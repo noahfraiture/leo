@@ -51,6 +51,9 @@ fn main() {
 /// Components should be annotated with `#[component]` to support props, better error messages, and autocomplete
 #[component]
 fn App() -> Element {
+    let theme = use_signal(|| "goodfox".to_string());
+    use_context_provider(|| theme);
+
     // The `rsx!` macro lets us define HTML inside of rust. It expands to an Element with all of our HTML inside.
     rsx! {
         // In addition to element and text (which we will see later), rsx can contain other components. In this case,
@@ -59,8 +62,13 @@ fn App() -> Element {
         document::Link { rel: "stylesheet", href: MAIN_CSS }
         document::Link { rel: "stylesheet", href: TAILWIND_CSS }
 
-        // The router component renders the route enum we defined above. It will handle synchronization of the URL and render
-        // the layouts and components for the active route.
-        Router::<Route> {}
+        div {
+            class: "min-h-screen bg-base-100 text-base-content transition-colors",
+            "data-theme": "{theme}",
+
+            // The router component renders the route enum we defined above. It will handle synchronization of the URL and render
+            // the layouts and components for the active route.
+            Router::<Route> {}
+        }
     }
 }
