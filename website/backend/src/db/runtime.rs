@@ -1,0 +1,188 @@
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
+
+use serde::Deserialize;
+use surrealdb::{
+    Surreal,
+    engine::any::{self, Any},
+    opt::{
+        Config,
+        capabilities::{Capabilities, ExperimentalFeature},
+    },
+};
+use thiserror::Error;
+
+pub type Database = Surreal<Any>;
+
+const UPLOAD_BUCKET: &str = "uploads";
+
+pub async fn init() -> Result<Database, DbInitError> {
+    let config = DatabaseConfig::from_env()?;
+    let local = config.local_paths()?;
+    local.prepare()?;
+
+    let db = any::connect((local.surreal_url.as_str(), surreal_config())).await?;
+    bootstrap(
+        &db,
+        &config.surreal_namespace,
+        &config.surreal_database,
+        &local.upload_bucket_path,
+    )
+    .await?;
+    Ok(db)
+}
+
+pub async fn bootstrap(
+    db: &Database,
+    namespace: &str,
+    database: &str,
+    upload_bucket_path: &Path,
+) -> surrealdb::Result<()> {
+    db.use_ns(namespace).use_db(database).await?;
+    define_upload_bucket(db, upload_bucket_path).await?;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct DatabaseConfig {
+    #[serde(default = "default_surreal_url")]
+    surreal_url: String,
+    #[serde(default = "default_surreal_namespace")]
+    surreal_namespace: String,
+    #[serde(default = "default_surreal_database")]
+    surreal_database: String,
+    #[serde(default = "default_upload_bucket_path")]
+    surreal_upload_bucket_path: PathBuf,
+}
+
+impl DatabaseConfig {
+    fn from_env() -> Result<Self, DbConfigError> {
+        Ok(envy::from_env()?)
+    }
+
+    fn local_paths(&self) -> Result<ResolvedLocalPaths, DbConfigError> {
+        let upload_bucket_path = resolve_repo_path(&self.surreal_upload_bucket_path);
+        let surreal_url = normalize_local_surreal_url(&self.surreal_url)?;
+
+        Ok(ResolvedLocalPaths {
+            surreal_url,
+            upload_bucket_path,
+        })
+    }
+}
+
+struct ResolvedLocalPaths {
+    surreal_url: String,
+    upload_bucket_path: PathBuf,
+}
+
+impl ResolvedLocalPaths {
+    fn prepare(&self) -> Result<(), DbConfigError> {
+        if let Some(path) = local_surreal_path(&self.surreal_url) {
+            fs::create_dir_all(path)?;
+        }
+
+        prepare_upload_bucket_path(&self.upload_bucket_path)?;
+
+        Ok(())
+    }
+}
+
+fn surreal_config() -> Config {
+    let capabilities =
+        Capabilities::new().with_experimental_feature_allowed(ExperimentalFeature::Files);
+
+    Config::new().capabilities(capabilities)
+}
+
+async fn define_upload_bucket(db: &Database, upload_bucket_path: &Path) -> surrealdb::Result<()> {
+    let path = prepare_upload_bucket_path(upload_bucket_path)
+        .map_err(|error| surrealdb::Error::internal(error.to_string()))?;
+    let backend = format!("file:{}?lowercase_paths=false", path.display());
+    let backend = serde_json::to_string(&backend)
+        .map_err(|error| surrealdb::Error::internal(error.to_string()))?;
+    let query = format!("DEFINE BUCKET IF NOT EXISTS {UPLOAD_BUCKET} BACKEND {backend};");
+
+    db.query(query).await?.check()?;
+    Ok(())
+}
+
+fn prepare_upload_bucket_path(path: &Path) -> std::io::Result<PathBuf> {
+    fs::create_dir_all(path)?;
+    let path = path.canonicalize()?;
+
+    if env::var_os("SURREAL_BUCKET_FOLDER_ALLOWLIST").is_none() {
+        // This happens during startup before app tasks are spawned. SurrealDB
+        // reads this process-wide allowlist when file buckets are first used.
+        unsafe {
+            env::set_var("SURREAL_BUCKET_FOLDER_ALLOWLIST", &path);
+        }
+    }
+
+    Ok(path)
+}
+
+fn normalize_local_surreal_url(value: &str) -> Result<String, DbConfigError> {
+    let Some(path) = local_surreal_path(value) else {
+        return Ok(value.to_owned());
+    };
+
+    let normalized = resolve_repo_path(path);
+    Ok(format!("surrealkv://{}", normalized.display()))
+}
+
+fn local_surreal_path(value: &str) -> Option<&Path> {
+    value
+        .strip_prefix("surrealkv://")
+        .map(Path::new)
+        .filter(|path| !path.as_os_str().is_empty())
+}
+
+fn resolve_repo_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_owned();
+    }
+
+    repo_root().join(path)
+}
+
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("backend crate should have a repository root parent")
+        .to_owned()
+}
+
+fn default_surreal_url() -> String {
+    "surrealkv://.data/surrealdb".to_owned()
+}
+
+fn default_surreal_namespace() -> String {
+    "video_analysis".to_owned()
+}
+
+fn default_surreal_database() -> String {
+    "app".to_owned()
+}
+
+fn default_upload_bucket_path() -> PathBuf {
+    PathBuf::from(".data/uploads")
+}
+
+#[derive(Debug, Error)]
+pub enum DbInitError {
+    #[error(transparent)]
+    Config(#[from] DbConfigError),
+    #[error(transparent)]
+    Surreal(#[from] surrealdb::Error),
+}
+
+#[derive(Debug, Error)]
+pub enum DbConfigError {
+    #[error(transparent)]
+    Env(#[from] envy::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}

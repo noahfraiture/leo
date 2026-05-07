@@ -1,0 +1,8 @@
+.direnv
+.data
+.env
+.pnpm-store
+.task
+.cache
+.svg-export-manifest.json
+.gitnexus

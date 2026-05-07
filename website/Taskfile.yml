@@ -1,0 +1,159 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: "3"
+
+dotenv:
+  - .local
+
+tasks:
+  setup:
+    desc: Install local dependencies used by project workflows
+    deps:
+      - frontend:install
+
+  build:
+    desc: Build frontend assets and the backend
+    deps:
+      - frontend:build
+      - backend:build
+
+  run:
+    desc: Build if needed and run the local backend once
+    deps:
+      - frontend:build
+      - backend:build
+    dir: backend
+    cmds:
+      - ./target/debug/video-analysis
+
+  dev:
+    desc: Watch frontend assets and restart the backend on changes
+    deps:
+      - frontend:build
+    cmds:
+      - task --parallel frontend:watch backend:watch
+
+  test:
+    desc: Run backend and frontend tests
+    deps:
+      - backend:test
+      - frontend:test
+
+  check:
+    desc: Run the local build and test verification suite
+    cmds:
+      - task build
+      - task test
+
+  frontend:install:
+    dir: frontend
+    method: timestamp
+    sources:
+      - package.json
+      - pnpm-lock.yaml
+    generates:
+      - node_modules/.modules.yaml
+    cmds:
+      - pnpm install --frozen-lockfile
+
+  proto:lint:
+    desc: Lint protobuf contracts with Buf
+    cmds:
+      - buf lint
+
+  proto:gen:
+    desc: Regenerate code derived from protobuf contracts
+    deps:
+      - frontend:install
+      - proto:lint
+    cmds:
+      - pnpm --prefix frontend gen:props
+
+  frontend:build:
+    dir: frontend
+    deps:
+      - proto:gen
+    method: timestamp
+    sources:
+      - package.json
+      - pnpm-lock.yaml
+      - tsconfig.json
+      - vite.config.ts
+      - ../buf.gen.yaml
+      - ../buf.yaml
+      - ../api/proto/props/**/*.proto
+      - src/**/*
+    generates:
+      - dist/manifest.json
+    cmds:
+      - pnpm exec vite build
+
+  frontend:watch:
+    dir: backend
+    deps:
+      - frontend:install
+    cmds:
+      - >-
+        cargo watch
+        --why
+        --postpone
+        --watch ../frontend/package.json
+        --watch ../frontend/pnpm-lock.yaml
+        --watch ../frontend/tsconfig.json
+        --watch ../frontend/vite.config.ts
+        --watch ../buf.gen.yaml
+        --watch ../buf.yaml
+        --watch ../api/proto/props
+        --watch ../frontend/src
+        --workdir ../frontend
+        --shell 'cd .. && task proto:gen && pnpm --prefix frontend exec vite build'
+
+  frontend:test:
+    dir: frontend
+    deps:
+      - proto:gen
+    cmds:
+      - pnpm exec vitest run
+
+  backend:build:
+    dir: backend
+    deps:
+      - proto:lint
+    method: timestamp
+    sources:
+      - Cargo.toml
+      - Cargo.lock
+      - build.rs
+      - src/**/*.rs
+      - ../api/proto/**/*.proto
+      - ../frontend/src/islands/**/*.tsx
+    generates:
+      - target/debug/video-analysis
+    cmds:
+      - cargo build
+
+  backend:run:
+    cmds:
+      - task run
+
+  backend:watch:
+    dir: backend
+    cmds:
+      - >-
+        cargo watch
+        --why
+        --watch Cargo.toml
+        --watch Cargo.lock
+        --watch build.rs
+        --watch src
+        --watch ../api/proto
+        --watch ../frontend/dist/manifest.json
+        --watch ../.local
+        --shell 'set -a; [ ! -f ../.local ] || . ../.local; set +a; cargo run'
+
+  backend:test:
+    dir: backend
+    deps:
+      - proto:lint
+    cmds:
+      - cargo test

@@ -1,0 +1,10 @@
+# This file is intentionally tracked so a fresh template checkout has one
+# obvious local configuration source.
+HOST=127.0.0.1
+GRPC_PORT=8081
+REST_PORT=3000
+
+SURREAL_URL=surrealkv://.data/surrealdb
+SURREAL_NAMESPACE=video_analysis
+SURREAL_DATABASE=app
+SURREAL_UPLOAD_BUCKET_PATH=.data/uploads
