@@ -1,9 +1,9 @@
+use async_trait::async_trait;
 use axum::{
     http::StatusCode,
     response::{Html, IntoResponse, Response},
 };
 use hypertext::prelude::*;
-use tonic::async_trait;
 
 use crate::http::router::AppState;
 

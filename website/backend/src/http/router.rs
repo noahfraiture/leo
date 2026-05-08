@@ -26,7 +26,7 @@ use crate::{
 #[derive(Clone)]
 pub struct AppState {
     db: db::Database,
-    // Built Vite asset references injected into every server-rendered page.
+    // Built stylesheet reference injected into every server-rendered page.
     frontend_assets: FrontendAssets,
 }
 
@@ -79,10 +79,7 @@ impl AppState {
             db: crate::test::database::init()
                 .await
                 .expect("test database should initialize"),
-            frontend_assets: FrontendAssets::for_test(
-                "/assets/main-test.js",
-                &["/assets/main-test.css"],
-            ),
+            frontend_assets: FrontendAssets::for_test("/assets/main-test.css"),
         }
     }
 }
@@ -141,6 +138,7 @@ mod tests {
 
         assert!(html.contains("Video analysis"));
         assert!(html.contains("Upload videos"));
-        assert!(html.contains(r#"solid-island="ExampleIsland""#));
+        assert!(html.contains("Analysis status"));
+        assert!(html.contains("Ready"));
     }
 }

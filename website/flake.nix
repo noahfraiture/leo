@@ -46,9 +46,6 @@
               cargo-watch
               rustToolchain
               nodejs
-              buf
-              protobuf
-              grpcurl
               pnpm_10
             ];
 

@@ -56,77 +56,42 @@ tasks:
     cmds:
       - pnpm install --frozen-lockfile
 
-  proto:lint:
-    desc: Lint protobuf contracts with Buf
-    cmds:
-      - buf lint
-
-  proto:gen:
-    desc: Regenerate code derived from protobuf contracts
-    deps:
-      - frontend:install
-      - proto:lint
-    cmds:
-      - pnpm --prefix frontend gen:props
-
   frontend:build:
     dir: frontend
     deps:
-      - proto:gen
+      - frontend:install
     method: timestamp
     sources:
       - package.json
       - pnpm-lock.yaml
-      - tsconfig.json
-      - vite.config.ts
-      - ../buf.gen.yaml
-      - ../buf.yaml
-      - ../api/proto/props/**/*.proto
-      - src/**/*
+      - src/app.css
+      - ../backend/src/http/ui/**/*.rs
     generates:
-      - dist/manifest.json
+      - dist/assets/main.css
     cmds:
-      - pnpm exec vite build
+      - pnpm run build
 
   frontend:watch:
-    dir: backend
+    dir: frontend
     deps:
       - frontend:install
     cmds:
-      - >-
-        cargo watch
-        --why
-        --postpone
-        --watch ../frontend/package.json
-        --watch ../frontend/pnpm-lock.yaml
-        --watch ../frontend/tsconfig.json
-        --watch ../frontend/vite.config.ts
-        --watch ../buf.gen.yaml
-        --watch ../buf.yaml
-        --watch ../api/proto/props
-        --watch ../frontend/src
-        --workdir ../frontend
-        --shell 'cd .. && task proto:gen && pnpm --prefix frontend exec vite build'
+      - pnpm run watch
 
   frontend:test:
     dir: frontend
     deps:
-      - proto:gen
+      - frontend:install
     cmds:
-      - pnpm exec vitest run
+      - pnpm run test
 
   backend:build:
     dir: backend
-    deps:
-      - proto:lint
     method: timestamp
     sources:
       - Cargo.toml
       - Cargo.lock
-      - build.rs
       - src/**/*.rs
-      - ../api/proto/**/*.proto
-      - ../frontend/src/islands/**/*.tsx
     generates:
       - target/debug/video-analysis
     cmds:
@@ -144,16 +109,12 @@ tasks:
         --why
         --watch Cargo.toml
         --watch Cargo.lock
-        --watch build.rs
         --watch src
-        --watch ../api/proto
-        --watch ../frontend/dist/manifest.json
+        --watch ../frontend/dist/assets/main.css
         --watch ../.local
         --shell 'set -a; [ ! -f ../.local ] || . ../.local; set +a; cargo run'
 
   backend:test:
     dir: backend
-    deps:
-      - proto:lint
     cmds:
       - cargo test

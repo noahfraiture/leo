@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Video Analysis is a Rust web app for receiving uploaded videos and analyzing them with AI providers. It uses server-rendered pages, HTMX fragments, SolidJS islands, protobuf contracts, embedded SurrealDB, and gRPC health checks.
+Video Analysis is a Rust web app for receiving uploaded videos and analyzing them with AI providers. It uses server-rendered pages, HTMX fragments, TailwindCSS/DaisyUI, and embedded SurrealDB.
 
 ## General Rules
 
@@ -18,22 +18,14 @@ Video Analysis is a Rust web app for receiving uploaded videos and analyzing the
 - Rust
 - axum for HTTP
 - hypertext for server-rendered HTML
-- tonic for gRPC
 - embedded SurrealDB with SurrealKV for local persistence
 - SurrealDB file buckets for uploaded video storage
 
 ### Frontend
 
 - HTMX for server interactions
-- SolidJS islands for focused browser state
 - TailwindCSS and DaisyUI for styling
-- Vite for frontend asset builds
-
-### Contracts
-
-- Protobuf is the source of truth for gRPC and browser-facing island props.
-- Browser island props belong in `api/proto/props/v1/*.proto`.
-- Generated TypeScript mirrors live under `frontend/src/gen/props/v1/`.
+- Tailwind CLI for frontend CSS builds
 
 ## Repository Conventions
 
@@ -55,14 +47,7 @@ Video Analysis is a Rust web app for receiving uploaded videos and analyzing the
 15. Full pages render through `document()`. `fragment()` is the HTMX and embedding render surface.
 16. Prefer DaisyUI classes and semantic state tokens over raw Tailwind color utilities when DaisyUI has an equivalent.
 
-### Islands
-
-17. Keep Solid islands narrowly scoped to browser state, browser APIs, or realtime behavior.
-18. Page structure, non-interactive copy, and HTMX flows should stay in Rust-rendered pages and fragments.
-19. Island file names and exported component names must match because the backend and frontend registries derive names from filenames.
-20. Browser-facing island props are schema contracts. Declare them in proto first, then use generated Rust and TypeScript types.
-
 ### Tests
 
-21. Keep tests focused on non-trivial behavior and shared contracts.
-22. Do not add tests for straightforward UI composition or refactor-only changes unless the user asked for them or the change introduces logic.
+17. Keep tests focused on non-trivial behavior and shared contracts.
+18. Do not add tests for straightforward UI composition or refactor-only changes unless the user asked for them or the change introduces logic.

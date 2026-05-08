@@ -1,8 +1,0 @@
-syntax = "proto3";
-
-package props.v1;
-
-message ExampleIslandProps {
-  string label = 1;
-  int32 initial_count = 2;
-}

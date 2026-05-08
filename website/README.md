@@ -1,6 +1,6 @@
 # Video Analysis
 
-Rust web app for video upload and AI analysis with axum, hypertext SSR, HTMX fragments, SolidJS islands, protobuf contracts, embedded SurrealDB, and gRPC health checks.
+Rust web app for video upload and AI analysis with axum, hypertext SSR, HTMX fragments, TailwindCSS/DaisyUI, and embedded SurrealDB.
 
 ## Quickstart
 

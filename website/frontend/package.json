@@ -3,24 +3,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "pnpm gen:props && vite build",
-    "gen:props": "cd .. && buf generate --path api/proto/props",
-    "test": "pnpm gen:props && vitest run"
+    "build": "mkdir -p dist/assets && tailwindcss -i src/app.css -o dist/assets/main.css --minify",
+    "watch": "mkdir -p dist/assets && tailwindcss -i src/app.css -o dist/assets/main.css --watch",
+    "test": "echo \"No frontend tests configured\""
   },
-  "dependencies": {
-    "@bufbuild/protobuf": "^2.12.0",
-    "solid-js": "^1.9.9"
-  },
+  "dependencies": {},
   "devDependencies": {
-    "@bufbuild/protoc-gen-es": "^2.12.0",
     "@tailwindcss/cli": "^4.2.2",
-    "@tailwindcss/vite": "^4.2.2",
     "daisyui": "^5.5.19",
-    "jsdom": "^26.1.0",
-    "tailwindcss": "^4.2.2",
-    "typescript": "^5.9.3",
-    "vite": "^7.1.10",
-    "vite-plugin-solid": "^2.11.8",
-    "vitest": "^3.2.4"
+    "tailwindcss": "^4.2.2"
   }
 }

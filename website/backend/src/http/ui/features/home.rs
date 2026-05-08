@@ -4,7 +4,6 @@ use hypertext::prelude::*;
 
 use super::TopBar;
 use crate::http::{
-    client::{islands, props},
     router::AppState,
     ui::{
         self, NoInput, Public, Route, RouteContext, RouteError, RouteFragment, RouteView, document,
@@ -41,8 +40,8 @@ impl HomeFrame {
 
 /// Public starter page mounted at `/`.
 ///
-/// The current shell keeps the SSR/HTMX/Solid plumbing in place while the
-/// upload and analysis workflow is built out.
+/// The current shell keeps the Rust-rendered HTML and HTMX plumbing in place
+/// while the upload and analysis workflow is built out.
 pub struct HomePage;
 
 pub struct HomePageView {
@@ -68,12 +67,6 @@ impl Route for HomePage {
 
 impl HomePageView {
     fn body(&self) -> impl Renderable {
-        let island_props = props::ExampleIslandProps {
-            label: "Analysis status".to_owned(),
-            initial_count: 0,
-        };
-        let island = islands::host_with_props::<islands::ExampleIsland, _>(&island_props);
-
         rsx! {
             <section class="space-y-6">
                 <div class="space-y-2">
@@ -97,7 +90,15 @@ impl HomePageView {
                     </section>
 
                     <aside class="rounded-box border border-base-300 bg-base-100 p-4 shadow-sm">
-                        (island)
+                        <section class="space-y-3">
+                            <p class="text-xs font-semibold uppercase tracking-[0.22em] text-base-content/60">
+                                "Analysis status"
+                            </p>
+                            <h2 class="text-xl font-semibold text-base-content">"Ready"</h2>
+                            <p class="text-sm leading-6 text-base-content/70">
+                                "Upload and provider status will be rendered here from Rust fragments."
+                            </p>
+                        </section>
                     </aside>
                 </div>
             </section>

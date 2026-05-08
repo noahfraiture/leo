@@ -1,46 +1,27 @@
-use std::{collections::HashMap, fs, path::PathBuf};
+use std::{fs, path::PathBuf};
 
 use hypertext::prelude::*;
-use serde::Deserialize;
 
 #[derive(Clone)]
 pub struct FrontendAssets {
-    script_path: String,
-    stylesheet_paths: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct ManifestEntry {
-    file: String,
-    #[serde(default)]
-    css: Vec<String>,
+    stylesheet_path: String,
 }
 
 impl FrontendAssets {
-    // Read the Vite manifest and expose the backend-facing asset URLs it references.
+    // Ensure the stylesheet has been built before the backend starts.
     pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
-        let manifest_path = frontend_dist_dir().join("manifest.json");
-        let manifest = fs::read_to_string(&manifest_path)?;
-        let entries: HashMap<String, ManifestEntry> = serde_json::from_str(&manifest)?;
-        let entry = entries
-            .get("src/main.ts")
-            .ok_or_else(|| format!("missing Vite entry \"src/main.ts\" in {manifest_path:?}"))?;
-        let asset_url =
-            |path: &str| format!("/assets/{}", path.strip_prefix("assets/").unwrap_or(path));
+        let stylesheet_path = "main.css";
+        fs::metadata(Self::assets_dir().join(stylesheet_path))?;
 
         Ok(Self {
-            script_path: asset_url(&entry.file),
-            stylesheet_paths: entry.css.iter().map(|path| asset_url(path)).collect(),
+            stylesheet_path: format!("/assets/{stylesheet_path}"),
         })
     }
 
-    // Render the stylesheet and module script tags required by the browser runtime.
+    // Render the stylesheet used by Rust-rendered pages.
     pub fn render_tags(&self) -> impl Renderable {
         rsx! {
-            @for stylesheet_path in &self.stylesheet_paths {
-                <link rel="stylesheet" href=(stylesheet_path) />
-            }
-            <script type="module" src=(self.script_path)></script>
+            <link rel="stylesheet" href=(self.stylesheet_path) />
         }
     }
 
@@ -51,13 +32,9 @@ impl FrontendAssets {
 
     // Build a deterministic asset set for backend tests without reading the Vite manifest.
     #[cfg(test)]
-    pub fn for_test(script_path: &str, stylesheet_paths: &[&str]) -> Self {
+    pub fn for_test(stylesheet_path: &str) -> Self {
         Self {
-            script_path: script_path.to_owned(),
-            stylesheet_paths: stylesheet_paths
-                .iter()
-                .map(|path| (*path).to_owned())
-                .collect(),
+            stylesheet_path: stylesheet_path.to_owned(),
         }
     }
 }
@@ -77,17 +54,16 @@ mod tests {
 
     // Build a deterministic asset set for testing without depending on the Vite manifest.
     fn test_assets() -> FrontendAssets {
-        FrontendAssets::for_test("/assets/main-test.js", &["/assets/main-test.css"])
+        FrontendAssets::for_test("/assets/main-test.css")
     }
 
-    // Ensure the rendered tags include both stylesheet and module script references.
+    // Ensure the rendered tags include the compiled stylesheet.
     #[test]
     fn render_tags_include_frontend_assets() {
         let html = test_assets().render_tags().render();
 
         assert!(html.as_inner().contains(r#"href="/assets/main-test.css""#));
-        assert!(html.as_inner().contains(r#"src="/assets/main-test.js""#));
-        assert!(html.as_inner().contains(r#"type="module""#));
+        assert!(!html.as_inner().contains("<script"));
     }
 
     // Ensure the backend serves only the built frontend asset directory under `/assets`.
