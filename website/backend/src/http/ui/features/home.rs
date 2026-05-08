@@ -49,10 +49,7 @@ impl RouteView for HomePageView {
                     <section class="space-y-6">
                         (intro())
 
-                        <div class="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
-                            (video_intake(&self.videos))
-                            (analysis_status())
-                        </div>
+                        (video_intake(&self.videos))
 
                         (analysis_prompt(&self.videos))
                     </section>
@@ -142,22 +139,6 @@ fn video_intake(videos: &[db::video::Video]) -> impl Renderable {
     }
 }
 
-fn analysis_status() -> impl Renderable {
-    rsx! {
-        <aside class="rounded-box border border-base-300 bg-base-100 p-4 shadow-sm">
-            <section class="space-y-3">
-                <p class="text-xs font-semibold uppercase tracking-[0.22em] text-base-content/60">
-                    "Analysis status"
-                </p>
-                <h2 class="text-xl font-semibold text-base-content">"Ready"</h2>
-                <p class="text-sm leading-6 text-base-content/70">
-                    "Upload and provider status will be rendered here from Rust fragments."
-                </p>
-            </section>
-        </aside>
-    }
-}
-
 fn analysis_prompt(videos: &[db::video::Video]) -> impl Renderable {
     rsx! {
         <section class="space-y-6">
@@ -228,22 +209,39 @@ pub(super) fn video_selection(videos: &[db::video::Video]) -> impl Renderable {
 }
 
 pub(super) fn video_option(video: &db::video::Video) -> impl Renderable {
+    let delete_path = format!("/videos/{}", video.file.key().trim_start_matches('/'));
+    let delete_label = format!("Delete {}", video.name);
+    let delete_confirm = format!("Delete {}?", video.name);
+
     rsx! {
-        <label class="flex cursor-pointer items-center gap-3 rounded-box border border-base-300 p-3 hover:bg-base-200">
-            <input
-                class="checkbox checkbox-primary"
-                type="checkbox"
-                name="video_keys"
-                value=(video.file.key()) />
-            <span class="min-w-0 flex-1">
-                <span class="block truncate text-sm font-medium text-base-content">
-                    (video.name.as_str())
+        <div class="flex items-center gap-2 rounded-box border border-base-300 hover:bg-base-200">
+            <label class="flex min-w-0 flex-1 cursor-pointer items-center gap-3 p-3">
+                <input
+                    class="checkbox checkbox-primary"
+                    type="checkbox"
+                    name="video_keys"
+                    value=(video.file.key()) />
+                <span class="min-w-0 flex-1">
+                    <span class="block truncate text-sm font-medium text-base-content">
+                        (video.name.as_str())
+                    </span>
+                    <span class="block text-xs text-base-content/60">
+                        (format!("{} bytes", video.size))
+                    </span>
                 </span>
-                <span class="block text-xs text-base-content/60">
-                    (format!("{} bytes", video.size))
-                </span>
-            </span>
-        </label>
+            </label>
+
+            <button
+                class="btn btn-ghost btn-sm mr-2 text-error hover:bg-error hover:text-error-content"
+                type="button"
+                aria-label=(delete_label)
+                hx-delete=(delete_path)
+                hx-target="#video-selection"
+                hx-swap="outerHTML"
+                hx-confirm=(delete_confirm)>
+                "Delete"
+            </button>
+        </div>
     }
 }
 

@@ -31,6 +31,11 @@ pub struct Video {
     pub file: File,
 }
 
+pub struct VideoAsset {
+    pub video: Video,
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Debug, Error)]
 pub enum VideoError {
     #[error("uploaded video is too large to record its size")]
@@ -52,6 +57,16 @@ struct UploadVideo {
     size: u64,
     file: File,
     bytes: Bytes,
+}
+
+#[derive(SurrealValue)]
+struct FindVideo {
+    file: File,
+}
+
+#[derive(SurrealValue)]
+struct FindVideoByName {
+    name: String,
 }
 
 #[derive(SurrealValue)]
@@ -78,6 +93,74 @@ impl Video {
             .await?;
 
         Ok(response.take(0)?)
+    }
+
+    /// Returns one uploaded video metadata record by its bucket file key.
+    pub async fn find_by_file_key(db: &Database, key: &str) -> Result<Option<Video>, VideoError> {
+        let mut response = db
+            .query("SELECT * FROM video WHERE file = $file LIMIT 1;")
+            .bind(FindVideo {
+                file: File::new(VIDEO_BUCKET, key),
+            })
+            .await?;
+
+        let mut videos: Vec<Video> = response.take(0)?;
+        Ok(videos.pop())
+    }
+
+    /// Returns one uploaded video and its stored bucket bytes by file key.
+    pub async fn read_by_file_key(
+        db: &Database,
+        key: &str,
+    ) -> Result<Option<VideoAsset>, VideoError> {
+        let mut response = db
+            .query(
+                r#"
+                SELECT * FROM video WHERE file = $file LIMIT 1;
+                RETURN file::get($file);
+                "#,
+            )
+            .bind(FindVideo {
+                file: File::new(VIDEO_BUCKET, key),
+            })
+            .await?;
+
+        let mut videos: Vec<Video> = response.take(0)?;
+        let Some(video) = videos.pop() else {
+            return Ok(None);
+        };
+        let bytes = Bytes::from_value(response.take::<surrealdb::types::Value>(1)?)?;
+
+        Ok(Some(VideoAsset {
+            video,
+            bytes: bytes.into_inner().to_vec(),
+        }))
+    }
+
+    /// Returns one uploaded video and its stored bucket bytes by original file name.
+    pub async fn read_by_name(db: &Database, name: &str) -> Result<Option<VideoAsset>, VideoError> {
+        let mut response = db
+            .query(
+                r#"
+                SELECT * FROM video WHERE name = $name LIMIT 1;
+                RETURN file::get((SELECT VALUE file FROM video WHERE name = $name LIMIT 1)[0]);
+                "#,
+            )
+            .bind(FindVideoByName {
+                name: name.to_owned(),
+            })
+            .await?;
+
+        let mut videos: Vec<Video> = response.take(0)?;
+        let Some(video) = videos.pop() else {
+            return Ok(None);
+        };
+        let bytes = Bytes::from_value(response.take::<surrealdb::types::Value>(1)?)?;
+
+        Ok(Some(VideoAsset {
+            video,
+            bytes: bytes.into_inner().to_vec(),
+        }))
     }
 
     /// Deletes this video's metadata record and its stored bucket file.
@@ -110,7 +193,7 @@ impl Video {
         let bytes = bytes.into();
         let size = u64::try_from(bytes.len()).map_err(|_| VideoError::SizeOverflow)?;
         let file = File::new(VIDEO_BUCKET, video_file_key(&name));
-        let path = public_video_path(file.key());
+        let path = public_video_path(&name);
 
         let mut response = db
             .query(
@@ -159,6 +242,7 @@ async fn define_video_table(db: &Database) -> Result<(), VideoError> {
         DEFINE FIELD IF NOT EXISTS file ON TABLE video TYPE file<videos>;
         DEFINE FIELD IF NOT EXISTS created_at ON TABLE video TYPE datetime;
         DEFINE INDEX IF NOT EXISTS video_path ON TABLE video FIELDS path UNIQUE;
+        DEFINE INDEX IF NOT EXISTS video_name ON TABLE video FIELDS name UNIQUE;
         "#,
     )
     .await?
@@ -210,7 +294,7 @@ fn sanitize_file_name(name: &str) -> String {
 }
 
 fn public_video_path(key: &str) -> String {
-    format!("/public/videos/{}", key.trim_start_matches('/'))
+    format!("/video/{}", key.trim_start_matches('/'))
 }
 
 #[cfg(test)]
@@ -251,7 +335,8 @@ mod tests {
 
         assert_eq!(video.name, "sample.mp4");
         assert_eq!(video.size, bytes.len() as u64);
-        assert!(video.path.starts_with("/public/videos/"));
+        assert!(video.path.starts_with("/video/"));
+        assert_eq!(video.path, "/video/sample.mp4");
 
         let videos = Video::list(&db).await.expect("videos should list");
         assert_eq!(videos.len(), 1);
@@ -278,5 +363,117 @@ mod tests {
                 .await
                 .expect("file existence should be checked")
         );
+    }
+
+    #[tokio::test]
+    async fn find_by_file_key_returns_uploaded_video() {
+        let db = crate::test::database::init()
+            .await
+            .expect("test database should initialize");
+        let video = Video::upload(&db, "sample.mp4", b"video bytes".to_vec())
+            .await
+            .expect("video should upload");
+
+        let found = Video::find_by_file_key(&db, video.file.key())
+            .await
+            .expect("lookup should complete")
+            .expect("video should exist");
+
+        assert_eq!(found.id, video.id);
+        assert_eq!(found.file.key(), video.file.key());
+        assert_eq!(found.name, "sample.mp4");
+    }
+
+    #[tokio::test]
+    async fn find_by_file_key_returns_none_for_missing_video() {
+        let db = crate::test::database::init()
+            .await
+            .expect("test database should initialize");
+
+        let found = Video::find_by_file_key(&db, "missing.mp4")
+            .await
+            .expect("lookup should complete");
+
+        assert!(found.is_none());
+    }
+
+    #[tokio::test]
+    async fn read_by_file_key_returns_uploaded_video_and_bytes() {
+        let db = crate::test::database::init()
+            .await
+            .expect("test database should initialize");
+        let bytes = b"video bytes".to_vec();
+        let video = Video::upload(&db, "sample.mp4", bytes.clone())
+            .await
+            .expect("video should upload");
+
+        let found = Video::read_by_file_key(&db, video.file.key())
+            .await
+            .expect("lookup should complete")
+            .expect("video should exist");
+
+        assert_eq!(found.video.id, video.id);
+        assert_eq!(found.video.file.key(), video.file.key());
+        assert_eq!(found.bytes, bytes);
+    }
+
+    #[tokio::test]
+    async fn read_by_file_key_returns_none_for_missing_video() {
+        let db = crate::test::database::init()
+            .await
+            .expect("test database should initialize");
+
+        let found = Video::read_by_file_key(&db, "missing.mp4")
+            .await
+            .expect("lookup should complete");
+
+        assert!(found.is_none());
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_duplicate_file_names() {
+        let db = crate::test::database::init()
+            .await
+            .expect("test database should initialize");
+
+        Video::upload(&db, "sample.mp4", b"first".to_vec())
+            .await
+            .expect("first upload should succeed");
+        let duplicate = Video::upload(&db, "sample.mp4", b"second".to_vec()).await;
+
+        assert!(duplicate.is_err());
+    }
+
+    #[tokio::test]
+    async fn read_by_name_returns_uploaded_video_and_bytes() {
+        let db = crate::test::database::init()
+            .await
+            .expect("test database should initialize");
+        let bytes = b"video bytes".to_vec();
+        let video = Video::upload(&db, "sample.mp4", bytes.clone())
+            .await
+            .expect("video should upload");
+
+        let found = Video::read_by_name(&db, "sample.mp4")
+            .await
+            .expect("lookup should complete")
+            .expect("video should exist");
+
+        assert_eq!(found.video.id, video.id);
+        assert_eq!(found.video.name, "sample.mp4");
+        assert_eq!(found.bytes, bytes);
+    }
+
+    #[tokio::test]
+    async fn read_by_name_returns_none_for_missing_video() {
+        let db = crate::test::database::init()
+            .await
+            .expect("test database should initialize");
+
+        let found = Video::read_by_name(&db, "missing.mp4")
+            .await
+            .expect("lookup should complete");
+
+        assert!(found.is_none());
     }
 }

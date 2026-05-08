@@ -32,6 +32,7 @@ pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/", ui::route::<ui::features::HomePage>(MethodFilter::GET))
         .route("/healthz", get(ui::features::healthz))
+        .route("/video/{key}", get(crate::http::video::serve))
         .route(
             "/analysis",
             ui::route::<ui::features::AnalyzeRoute>(MethodFilter::POST),
@@ -39,6 +40,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/videos",
             ui::route::<ui::features::UploadVideoRoute>(MethodFilter::POST),
+        )
+        .route(
+            "/videos/{video_key}",
+            ui::route::<ui::features::DeleteVideoRoute>(MethodFilter::DELETE),
         )
         .with_state(state)
         .layer(DefaultBodyLimit::max(512 * 1024 * 1024))
@@ -128,8 +133,8 @@ mod tests {
 
         assert!(html.contains("Video analysis"));
         assert!(html.contains("Upload videos"));
-        assert!(html.contains("Analysis status"));
-        assert!(html.contains("Ready"));
+        assert!(!html.contains("Analysis status"));
+        assert!(!html.contains("Upload and provider status"));
     }
 
     #[tokio::test]
@@ -186,5 +191,91 @@ mod tests {
         assert!(html.contains(r#"id="video-selection""#));
         assert!(html.contains("sample.mp4"));
         assert!(html.contains(r#"name="video_keys""#));
+        assert!(html.contains("Delete"));
+        assert!(html.contains(r#"type="button""#));
+        assert!(html.contains(r#"hx-delete="/videos/"#));
+        assert!(html.contains(r##"hx-target="#video-selection""##));
+    }
+
+    #[tokio::test]
+    async fn video_delete_route_removes_video_and_returns_updated_picker() {
+        let state = AppState::for_test().await;
+        let video = db::video::Video::upload(state.db(), "sample.mp4", b"video bytes".to_vec())
+            .await
+            .expect("video should upload");
+
+        let response = app(state.clone())
+            .oneshot(
+                HttpRequest::builder()
+                    .method("DELETE")
+                    .uri(format!(
+                        "/videos/{}",
+                        video.file.key().trim_start_matches('/')
+                    ))
+                    .header("HX-Request", "true")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        let status = response.status();
+        let html = response_text(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains(r#"id="video-selection""#));
+        assert!(html.contains("No videos have been uploaded yet."));
+        assert!(!html.contains("sample.mp4"));
+
+        let videos = db::video::Video::list(state.db())
+            .await
+            .expect("videos should list");
+        assert!(videos.is_empty());
+    }
+
+    #[tokio::test]
+    async fn video_route_serves_uploaded_video_bytes() {
+        let state = AppState::for_test().await;
+        let video = db::video::Video::upload(state.db(), "sample.mp4", b"video bytes".to_vec())
+            .await
+            .expect("video should upload");
+
+        let response = app(state)
+            .oneshot(
+                HttpRequest::builder()
+                    .uri(format!("/video/{}", video.name))
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type.as_deref(), Some("video/mp4"));
+        assert_eq!(body.as_ref(), b"video bytes");
+    }
+
+    #[tokio::test]
+    async fn video_route_returns_not_found_for_missing_video() {
+        let response = test_app()
+            .await
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/video/missing.mp4")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }
