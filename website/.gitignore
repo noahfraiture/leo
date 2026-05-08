@@ -1,8 +1,10 @@
 .direnv
+.DS_Store
 .data
 .env
+node_modules
 .pnpm-store
 .task
 .cache
-.svg-export-manifest.json
 .gitnexus
+.local

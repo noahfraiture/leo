@@ -14,9 +14,9 @@ use surrealdb::{
 };
 use thiserror::Error;
 
-pub type Database = Surreal<Any>;
+use super::models::video::{Video, VideoError};
 
-const UPLOAD_BUCKET: &str = "uploads";
+pub type Database = Surreal<Any>;
 
 pub async fn init() -> Result<Database, DbInitError> {
     let config = DatabaseConfig::from_env()?;
@@ -39,9 +39,9 @@ pub async fn bootstrap(
     namespace: &str,
     database: &str,
     upload_bucket_path: &Path,
-) -> surrealdb::Result<()> {
+) -> Result<(), VideoError> {
     db.use_ns(namespace).use_db(database).await?;
-    define_upload_bucket(db, upload_bucket_path).await?;
+    Video::init(db, upload_bucket_path).await?;
     Ok(())
 }
 
@@ -84,7 +84,7 @@ impl ResolvedLocalPaths {
             fs::create_dir_all(path)?;
         }
 
-        prepare_upload_bucket_path(&self.upload_bucket_path)?;
+        fs::create_dir_all(&self.upload_bucket_path)?;
 
         Ok(())
     }
@@ -95,33 +95,6 @@ fn surreal_config() -> Config {
         Capabilities::new().with_experimental_feature_allowed(ExperimentalFeature::Files);
 
     Config::new().capabilities(capabilities)
-}
-
-async fn define_upload_bucket(db: &Database, upload_bucket_path: &Path) -> surrealdb::Result<()> {
-    let path = prepare_upload_bucket_path(upload_bucket_path)
-        .map_err(|error| surrealdb::Error::internal(error.to_string()))?;
-    let backend = format!("file:{}?lowercase_paths=false", path.display());
-    let backend = serde_json::to_string(&backend)
-        .map_err(|error| surrealdb::Error::internal(error.to_string()))?;
-    let query = format!("DEFINE BUCKET IF NOT EXISTS {UPLOAD_BUCKET} BACKEND {backend};");
-
-    db.query(query).await?.check()?;
-    Ok(())
-}
-
-fn prepare_upload_bucket_path(path: &Path) -> std::io::Result<PathBuf> {
-    fs::create_dir_all(path)?;
-    let path = path.canonicalize()?;
-
-    if env::var_os("SURREAL_BUCKET_FOLDER_ALLOWLIST").is_none() {
-        // This happens during startup before app tasks are spawned. SurrealDB
-        // reads this process-wide allowlist when file buckets are first used.
-        unsafe {
-            env::set_var("SURREAL_BUCKET_FOLDER_ALLOWLIST", &path);
-        }
-    }
-
-    Ok(path)
 }
 
 fn normalize_local_surreal_url(value: &str) -> Result<String, DbConfigError> {
@@ -175,6 +148,8 @@ fn default_upload_bucket_path() -> PathBuf {
 pub enum DbInitError {
     #[error(transparent)]
     Config(#[from] DbConfigError),
+    #[error(transparent)]
+    Video(#[from] VideoError),
     #[error(transparent)]
     Surreal(#[from] surrealdb::Error),
 }

@@ -12,6 +12,8 @@ pub enum RouteError {
     Authz(#[from] AuthzError),
     #[error(transparent)]
     Db(#[from] surrealdb::Error),
+    #[error(transparent)]
+    Video(#[from] crate::db::video::VideoError),
     #[error("{0}")]
     BadRequest(&'static str),
     #[error("failed to extract embedded route input for {route}: {message}")]
@@ -30,6 +32,11 @@ impl IntoResponse for RouteError {
             Self::Db(error) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("database route failure: {error}"),
+            )
+                .into_response(),
+            Self::Video(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("video route failure: {error}"),
             )
                 .into_response(),
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message).into_response(),

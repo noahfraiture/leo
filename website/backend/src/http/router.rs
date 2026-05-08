@@ -1,20 +1,12 @@
 use axum::{
     Router,
-    extract::Request,
+    extract::{DefaultBodyLimit, Request},
     middleware::{self, Next},
     response::Response,
     routing::{MethodFilter, get},
 };
-use hypertext::Renderable;
-use tower_http::services::ServeDir;
 
-use crate::{
-    db,
-    http::{
-        client::assets::FrontendAssets,
-        ui::{self},
-    },
-};
+use crate::{db, http::ui};
 
 /// Shared application services passed through axum state and reused by UI
 /// route dispatch.
@@ -26,18 +18,13 @@ use crate::{
 #[derive(Clone)]
 pub struct AppState {
     db: db::Database,
-    // Built stylesheet reference injected into every server-rendered page.
-    frontend_assets: FrontendAssets,
 }
 
 pub async fn run(db: db::Database) -> Result<(), Box<dyn std::error::Error>> {
-    let state = AppState {
-        db,
-        frontend_assets: FrontendAssets::load()?,
-    };
+    let state = AppState { db };
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-    println!("Listening on http://localhost:3000");
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
+    println!("Listening on http://localhost:8080");
     Ok(axum::serve(listener, app(state)).await?)
 }
 
@@ -45,8 +32,16 @@ pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/", ui::route::<ui::features::HomePage>(MethodFilter::GET))
         .route("/healthz", get(ui::features::healthz))
+        .route(
+            "/analysis",
+            ui::route::<ui::features::AnalyzeRoute>(MethodFilter::POST),
+        )
+        .route(
+            "/videos",
+            ui::route::<ui::features::UploadVideoRoute>(MethodFilter::POST),
+        )
         .with_state(state)
-        .nest_service("/assets", ServeDir::new(FrontendAssets::assets_dir()))
+        .layer(DefaultBodyLimit::max(512 * 1024 * 1024))
         .layer(middleware::from_fn(log_request))
 }
 
@@ -69,17 +64,12 @@ impl AppState {
         &self.db
     }
 
-    pub fn assets(&self) -> impl Renderable {
-        self.frontend_assets.render_tags()
-    }
-
     #[cfg(test)]
     pub async fn for_test() -> Self {
         Self {
             db: crate::test::database::init()
                 .await
                 .expect("test database should initialize"),
-            frontend_assets: FrontendAssets::for_test("/assets/main-test.css"),
         }
     }
 }
@@ -140,5 +130,61 @@ mod tests {
         assert!(html.contains("Upload videos"));
         assert!(html.contains("Analysis status"));
         assert!(html.contains("Ready"));
+    }
+
+    #[tokio::test]
+    async fn analyze_route_returns_dummy_fragment() {
+        let response = test_app()
+            .await
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/analysis")
+                    .header("HX-Request", "true")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        let html = response_text(response).await;
+
+        assert!(html.contains(r#"id="analysis-result""#));
+        assert!(html.contains("Video analysis is not implemented yet."));
+    }
+
+    #[tokio::test]
+    async fn video_upload_route_returns_updated_video_picker() {
+        let boundary = "leo-test-boundary";
+        let body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"video\"; filename=\"sample.mp4\"\r\n\
+             Content-Type: video/mp4\r\n\r\n\
+             video bytes\r\n\
+             --{boundary}--\r\n"
+        );
+
+        let response = test_app()
+            .await
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/videos")
+                    .header("HX-Request", "true")
+                    .header(
+                        "Content-Type",
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        let status = response.status();
+        let html = response_text(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains(r#"id="video-selection""#));
+        assert!(html.contains("sample.mp4"));
+        assert!(html.contains(r#"name="video_keys""#));
     }
 }

@@ -1,23 +1,21 @@
 // Project tasks configuration. See https://zed.dev/docs/tasks for documentation.
-//
-// Example:
 [
-  {
-    "label": "Surrealist",
-    "command": "surrealist",
-    "reveal": "never",
-    "hide": "always",
-  },
-  {
-    "label": "Surreal DB",
-    "command": "task surrealdb:run",
-    "reveal": "never",
-    "hide": "on_success",
-  },
   {
     "label": "Run",
     "command": "task run",
     "reveal": "no_focus",
+    "hide": "on_success",
+  },
+  {
+    "label": "Dev",
+    "command": "task dev",
+    "reveal": "never",
+    "hide": "on_success",
+  },
+  {
+    "label": "Check",
+    "command": "task check",
+    "reveal": "always",
     "hide": "on_success",
   },
 ]

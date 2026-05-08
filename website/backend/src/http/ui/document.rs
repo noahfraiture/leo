@@ -1,17 +1,18 @@
 use crate::http::router::AppState;
-use hypertext::prelude::*;
+use hypertext::{Raw, prelude::*};
+
+const STYLES: &str = include_str!("styles.generated.css");
 
 /// Render a full HTML document around a UI route body.
-pub fn document(state: &AppState, title: &str, body: impl Renderable) -> impl Renderable {
+pub fn document(_state: &AppState, title: &str, body: impl Renderable) -> impl Renderable {
     rsx! {
         <html lang="en" data-theme="goodfox">
             <head>
                 <meta charset="utf-8" />
                 <meta name="viewport" content="width=device-width, initial-scale=1" />
                 <title>(title)</title>
+                <style>(Raw::dangerously_create(STYLES))</style>
                 <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.8/dist/htmx.min.js"></script>
-                <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.15.11/dist/cdn.min.js"></script>
-                (state.assets())
             </head>
             <body class="min-h-screen bg-base-100 text-base-content">
                 (body)

@@ -3,13 +3,17 @@
 // For a full list of overridable settings, and general information on folder-specific settings,
 // see the documentation: https://zed.dev/docs/configuring-zed#settings-files
 {
-  "project_name": "Babylon",
+  "project_name": "Video Analysis",
   "lsp_document_colors": "inlay",
   "lsp": {
     "tailwindcss-language-server": {
       "settings": {
         "files": {
-          "exclude": ["**/.direnv/**"],
+          "exclude": [
+            "**/.direnv/**",
+            "**/.data/**",
+            "**/backend/target/**"
+          ],
         },
         "colorDecorators": true,
         "hovers": true,
@@ -23,9 +27,8 @@
         },
         "experimental": {
           "configFile": {
-            "/Users/noah/Projects/babylon/frontend/src/app.css": [
-              "/Users/noah/Projects/babylon/frontend/src/**",
-              "/Users/noah/Projects/babylon/backend/src/http/ui/**",
+            "/Users/noah/Projects/leo/website/backend/src/http/ui/styles.css": [
+              "/Users/noah/Projects/leo/website/backend/src/http/ui/**",
             ],
           },
           "classRegex": [

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Video Analysis is a Rust web app for receiving uploaded videos and analyzing them with AI providers. It uses server-rendered pages, HTMX fragments, TailwindCSS/DaisyUI, and embedded SurrealDB.
+Video Analysis is a Rust web app for receiving uploaded videos and analyzing them with AI providers. It uses server-rendered pages, HTMX fragments, TailwindCSS/DaisyUI compiled from backend UI CSS, and embedded SurrealDB.
 
 ## General Rules
 
@@ -21,11 +21,14 @@ Video Analysis is a Rust web app for receiving uploaded videos and analyzing the
 - embedded SurrealDB with SurrealKV for local persistence
 - SurrealDB file buckets for uploaded video storage
 
-### Frontend
+The videos files will live in surrealdb with the new file support. They will also be served at `/video/<video>` so that the html can have a video player with the file path directly.
+
+### UI
 
 - HTMX for server interactions
 - TailwindCSS and DaisyUI for styling
-- Tailwind CLI for frontend CSS builds
+- CSS source lives in `backend/src/http/ui/styles.css`
+- Compiled CSS lives in `backend/src/http/ui/styles.generated.css` and is embedded by `document()`
 
 ## Repository Conventions
 
@@ -37,17 +40,19 @@ Video Analysis is a Rust web app for receiving uploaded videos and analyzing the
 8. Keep the tracked `.local` file as the local configuration source; do not introduce `*.example` config files.
 9. When reorganizing functions within a file, prefer public functions first, then private helpers in top-down call order.
 10. SurrealDB runs embedded in the backend process. Do not add a required local SurrealDB server task unless the architecture changes.
+11. Prefer public struct fields for simple data models over trivial accessor methods.
 
 ### Backend UI
 
-11. Keep a single mounted page `Route` / `RouteView` pair per file.
-12. Keep backend UI feature files page-oriented. Extract a shared file only when markup or logic is meaningfully reused.
-13. Do not extract a render helper that is called only once from the same file unless it materially improves readability.
-14. Meaningful composable fragments should be embedded `Route` / `RouteView` types in their own file, not plain helper functions.
-15. Full pages render through `document()`. `fragment()` is the HTMX and embedding render surface.
-16. Prefer DaisyUI classes and semantic state tokens over raw Tailwind color utilities when DaisyUI has an equivalent.
+12. Keep a single mounted page `Route` / `RouteView` pair per file.
+13. Keep backend UI feature files page-oriented. Extract a shared file only when markup or logic is meaningfully reused.
+14. Do not extract a render helper that is called only once from the same file unless it materially improves readability.
+15. Meaningful composable fragments should be embedded `Route` / `RouteView` types in their own file, not plain helper functions.
+16. Full pages render through `document()`. `fragment()` is the HTMX and embedding render surface.
+17. Prefer DaisyUI classes and semantic state tokens over raw Tailwind color utilities when DaisyUI has an equivalent.
+18. Prefer native axum extractors such as `Path`, `Query`, `Form`, `Multipart`, and tuples of extractors for route input. Only introduce custom input/extractor types when they add validation or behavior that axum extractors cannot express cleanly.
 
 ### Tests
 
-17. Keep tests focused on non-trivial behavior and shared contracts.
-18. Do not add tests for straightforward UI composition or refactor-only changes unless the user asked for them or the change introduces logic.
+19. Keep tests focused on non-trivial behavior and shared contracts.
+20. Do not add tests for straightforward UI composition or refactor-only changes unless the user asked for them or the change introduces logic.

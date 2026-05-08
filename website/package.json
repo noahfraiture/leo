@@ -1,0 +1,14 @@
+{
+  "name": "video-analysis",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:css": "tailwindcss -i backend/src/http/ui/styles.css -o backend/src/http/ui/styles.generated.css --minify",
+    "watch:css": "tailwindcss -i backend/src/http/ui/styles.css -o backend/src/http/ui/styles.generated.css --watch"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.2.2",
+    "daisyui": "^5.5.19",
+    "tailwindcss": "^4.2.2"
+  }
+}

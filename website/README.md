@@ -9,7 +9,7 @@ nix develop -c task setup
 nix develop -c task run
 ```
 
-Open `http://localhost:3000`.
+Open `http://localhost:8080`.
 
 The tracked `.local` file contains local defaults. SurrealDB runs embedded with data under `.data/`.
 

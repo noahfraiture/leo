@@ -2,50 +2,22 @@ use async_trait::async_trait;
 use axum::http::StatusCode;
 use hypertext::prelude::*;
 
-use super::TopBar;
-use crate::http::{
-    router::AppState,
-    ui::{
-        self, NoInput, Public, Route, RouteContext, RouteError, RouteFragment, RouteView, document,
+use crate::{
+    db,
+    http::{
+        router::AppState,
+        ui::{
+            NoInput, Public, Route, RouteContext, RouteError, RouteView, document,
+            not_found_fragment,
+        },
     },
 };
 
-/// Shared page frame used by mounted pages that should keep the same top bar
-/// and HTMX swap target. Child pages embed their replaceable content inside
-/// `#body`, so regular navigation returns a full document and HTMX navigation
-/// swaps only that inner region.
-pub struct HomeFrame {
-    top_bar: RouteFragment<TopBar>,
-}
-
-impl HomeFrame {
-    pub async fn new(context: &RouteContext) -> Result<Self, RouteError> {
-        let top_bar = ui::embed::<TopBar>()
-            .input(NoInput)
-            .resolve(context)
-            .await?;
-
-        Ok(Self { top_bar })
-    }
-
-    pub fn embed(&self, body: impl Renderable) -> impl Renderable {
-        rsx! {
-            <main class="mx-auto max-w-4xl space-y-8 p-6 lg:py-10">
-                (self.top_bar)
-                <div id="body">(body)</div>
-            </main>
-        }
-    }
-}
-
-/// Public starter page mounted at `/`.
-///
-/// The current shell keeps the Rust-rendered HTML and HTMX plumbing in place
-/// while the upload and analysis workflow is built out.
+/// Public workspace page mounted at `/`.
 pub struct HomePage;
 
 pub struct HomePageView {
-    home: HomeFrame,
+    videos: Vec<db::video::Video>,
 }
 
 #[async_trait]
@@ -59,60 +31,219 @@ impl Route for HomePage {
         _granted: (),
         _input: Self::Input,
     ) -> Result<Self::View, RouteError> {
-        let home = HomeFrame::new(context).await?;
+        let videos = db::video::Video::list(context.state().db()).await?;
 
-        Ok(HomePageView { home })
-    }
-}
-
-impl HomePageView {
-    fn body(&self) -> impl Renderable {
-        rsx! {
-            <section class="space-y-6">
-                <div class="space-y-2">
-                    <h1 class="text-3xl font-semibold text-base-content">"Upload videos"</h1>
-                    <p class="max-w-2xl text-base-content/70">
-                        "A server-rendered workspace for video uploads and AI analysis with OpenAI and Gemini."
-                    </p>
-                </div>
-
-                <div class="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
-                    <section class="rounded-box border border-dashed border-base-300 bg-base-100 p-6 shadow-sm">
-                        <div class="space-y-3">
-                            <p class="text-sm font-semibold uppercase tracking-[0.22em] text-base-content/60">
-                                "Next"
-                            </p>
-                            <h2 class="text-xl font-semibold text-base-content">"Video intake"</h2>
-                            <p class="text-sm leading-6 text-base-content/70">
-                                "The upload handler and provider analysis jobs can be added on top of this shell."
-                            </p>
-                        </div>
-                    </section>
-
-                    <aside class="rounded-box border border-base-300 bg-base-100 p-4 shadow-sm">
-                        <section class="space-y-3">
-                            <p class="text-xs font-semibold uppercase tracking-[0.22em] text-base-content/60">
-                                "Analysis status"
-                            </p>
-                            <h2 class="text-xl font-semibold text-base-content">"Ready"</h2>
-                            <p class="text-sm leading-6 text-base-content/70">
-                                "Upload and provider status will be rendered here from Rust fragments."
-                            </p>
-                        </section>
-                    </aside>
-                </div>
-            </section>
-        }
+        Ok(HomePageView { videos })
     }
 }
 
 impl RouteView for HomePageView {
     fn document(&self, state: &AppState) -> impl Renderable {
-        document(state, "Video analysis | Home", self.home.embed(self.body()))
+        document(
+            state,
+            "Video analysis | Home",
+            rsx! {
+                <main class="mx-auto max-w-4xl space-y-8 p-6 lg:py-10">
+                    (top_bar())
+
+                    <section class="space-y-6">
+                        (intro())
+
+                        <div class="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
+                            (video_intake(&self.videos))
+                            (analysis_status())
+                        </div>
+
+                        (analysis_prompt(&self.videos))
+                    </section>
+                </main>
+            },
+        )
     }
 
     fn fragment(&self, _state: &AppState) -> impl Renderable {
-        self.body()
+        not_found_fragment()
+    }
+
+    fn fragment_status() -> StatusCode {
+        StatusCode::NOT_FOUND
+    }
+}
+
+fn top_bar() -> impl Renderable {
+    rsx! {
+        <header class="navbar rounded-box border border-base-300 bg-base-100 px-4 shadow-sm">
+            <div class="flex-1">
+                <a
+                    class="btn btn-ghost px-0 text-xl font-semibold normal-case"
+                    href="/">
+                    "Video analysis"
+                </a>
+            </div>
+        </header>
+    }
+}
+
+fn intro() -> impl Renderable {
+    rsx! {
+        <div class="space-y-2">
+            <h1 class="text-3xl font-semibold text-base-content">"Upload videos"</h1>
+            <p class="max-w-2xl text-base-content/70">
+                "A server-rendered workspace for video uploads and AI analysis with OpenAI and Gemini."
+            </p>
+        </div>
+    }
+}
+
+fn video_intake(videos: &[db::video::Video]) -> impl Renderable {
+    rsx! {
+        <section class="rounded-box border border-base-300 bg-base-100 p-6 shadow-sm">
+            <form
+                class="space-y-4"
+                method="post"
+                action="/videos"
+                enctype="multipart/form-data"
+                hx-post="/videos"
+                hx-encoding="multipart/form-data"
+                hx-target="#video-selection"
+                hx-swap="outerHTML"
+                hx-indicator="#upload-indicator">
+                <p class="text-sm font-semibold uppercase tracking-[0.22em] text-base-content/60">
+                    "Upload"
+                </p>
+                <h2 class="text-xl font-semibold text-base-content">"Video intake"</h2>
+
+                <label class="form-control space-y-2">
+                    <span class="text-sm font-medium text-base-content">"Video file"</span>
+                    <input
+                        class="file-input file-input-bordered w-full"
+                        type="file"
+                        name="video"
+                        accept="video/*"
+                        required="required" />
+                </label>
+
+                <div class="flex flex-wrap items-center justify-between gap-3">
+                    <span class="text-sm text-base-content/60">
+                        (format!("{} uploaded", videos.len()))
+                    </span>
+                    <div class="flex items-center gap-3">
+                        <span
+                            id="upload-indicator"
+                            class="htmx-indicator inline-flex items-center gap-2 text-sm text-base-content/70">
+                            <span class="loading loading-spinner loading-sm"></span>
+                            "Uploading"
+                        </span>
+                        <button class="btn btn-primary" type="submit">"Upload"</button>
+                    </div>
+                </div>
+            </form>
+        </section>
+    }
+}
+
+fn analysis_status() -> impl Renderable {
+    rsx! {
+        <aside class="rounded-box border border-base-300 bg-base-100 p-4 shadow-sm">
+            <section class="space-y-3">
+                <p class="text-xs font-semibold uppercase tracking-[0.22em] text-base-content/60">
+                    "Analysis status"
+                </p>
+                <h2 class="text-xl font-semibold text-base-content">"Ready"</h2>
+                <p class="text-sm leading-6 text-base-content/70">
+                    "Upload and provider status will be rendered here from Rust fragments."
+                </p>
+            </section>
+        </aside>
+    }
+}
+
+fn analysis_prompt(videos: &[db::video::Video]) -> impl Renderable {
+    rsx! {
+        <section class="space-y-6">
+            <div class="space-y-2">
+                <p class="text-sm font-semibold uppercase tracking-[0.22em] text-base-content/60">
+                    "Analyze"
+                </p>
+                <h2 class="text-2xl font-semibold text-base-content">"Prompt videos"</h2>
+                <p class="max-w-2xl text-sm leading-6 text-base-content/70">
+                    "Choose uploaded videos, add the analysis prompt, and submit it for processing."
+                </p>
+            </div>
+
+            <form
+                class="space-y-5 rounded-box border border-base-300 bg-base-100 p-5 shadow-sm"
+                method="post"
+                action="/analysis"
+                hx-post="/analysis"
+                hx-target="#analysis-result"
+                hx-swap="outerHTML"
+                hx-indicator="#analysis-indicator">
+                (video_selection(videos))
+
+                <label class="form-control space-y-2">
+                    <span class="text-sm font-medium text-base-content">"Prompt"</span>
+                    <textarea
+                        class="textarea textarea-bordered min-h-32 w-full"
+                        name="prompt"
+                        placeholder="Describe what the AI should look for in the selected videos."
+                        required="required"></textarea>
+                </label>
+
+                <div class="flex flex-wrap items-center justify-between gap-3">
+                    <p id="analysis-result" class="text-sm text-base-content/70"></p>
+                    <div class="flex items-center gap-3">
+                        <span
+                            id="analysis-indicator"
+                            class="htmx-indicator inline-flex items-center gap-2 text-sm text-base-content/70">
+                            <span class="loading loading-spinner loading-sm"></span>
+                            "Analyzing"
+                        </span>
+                        <button class="btn btn-primary" type="submit">"Run analysis"</button>
+                    </div>
+                </div>
+            </form>
+        </section>
+    }
+}
+
+pub(super) fn video_selection(videos: &[db::video::Video]) -> impl Renderable {
+    rsx! {
+        <fieldset id="video-selection" class="space-y-3">
+            <legend class="text-sm font-medium text-base-content">"Videos"</legend>
+
+            @if videos.is_empty() {
+                <p class="rounded-box border border-dashed border-base-300 p-4 text-sm text-base-content/70">
+                    "No videos have been uploaded yet."
+                </p>
+            } @else {
+                <div class="space-y-2">
+                    @for video in videos.iter() {
+                        (video_option(video))
+                    }
+                </div>
+            }
+        </fieldset>
+    }
+}
+
+pub(super) fn video_option(video: &db::video::Video) -> impl Renderable {
+    rsx! {
+        <label class="flex cursor-pointer items-center gap-3 rounded-box border border-base-300 p-3 hover:bg-base-200">
+            <input
+                class="checkbox checkbox-primary"
+                type="checkbox"
+                name="video_keys"
+                value=(video.file.key()) />
+            <span class="min-w-0 flex-1">
+                <span class="block truncate text-sm font-medium text-base-content">
+                    (video.name.as_str())
+                </span>
+                <span class="block text-xs text-base-content/60">
+                    (format!("{} bytes", video.size))
+                </span>
+            </span>
+        </label>
     }
 }
 

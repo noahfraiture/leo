@@ -1,5 +1,5 @@
 @import "tailwindcss" source(".");
-@source "../../backend/src/http/ui";
+@source ".";
 
 @plugin "daisyui";
 

@@ -1,8 +1,8 @@
+mod analyze;
 mod home;
-mod top_bar;
+mod upload;
 
 // Pages
+pub use analyze::AnalyzeRoute;
 pub use home::{HomePage, healthz};
-
-// Embedding only
-pub(super) use top_bar::TopBar;
+pub use upload::UploadVideoRoute;

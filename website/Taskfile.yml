@@ -9,35 +9,32 @@ tasks:
   setup:
     desc: Install local dependencies used by project workflows
     deps:
-      - frontend:install
+      - css:install
 
   build:
-    desc: Build frontend assets and the backend
+    desc: Build the backend
     deps:
-      - frontend:build
       - backend:build
 
   run:
     desc: Build if needed and run the local backend once
     deps:
-      - frontend:build
       - backend:build
     dir: backend
     cmds:
       - ./target/debug/video-analysis
 
   dev:
-    desc: Watch frontend assets and restart the backend on changes
+    desc: Restart the backend on source changes
     deps:
-      - frontend:build
+      - css:build
     cmds:
-      - task --parallel frontend:watch backend:watch
+      - task --parallel css:watch backend:watch
 
   test:
-    desc: Run backend and frontend tests
+    desc: Run backend tests
     deps:
       - backend:test
-      - frontend:test
 
   check:
     desc: Run the local build and test verification suite
@@ -45,8 +42,7 @@ tasks:
       - task build
       - task test
 
-  frontend:install:
-    dir: frontend
+  css:install:
     method: timestamp
     sources:
       - package.json
@@ -56,42 +52,36 @@ tasks:
     cmds:
       - pnpm install --frozen-lockfile
 
-  frontend:build:
-    dir: frontend
+  css:build:
     deps:
-      - frontend:install
+      - css:install
     method: timestamp
     sources:
       - package.json
       - pnpm-lock.yaml
-      - src/app.css
-      - ../backend/src/http/ui/**/*.rs
+      - backend/src/http/ui/styles.css
+      - backend/src/http/ui/**/*.rs
     generates:
-      - dist/assets/main.css
+      - backend/src/http/ui/styles.generated.css
     cmds:
-      - pnpm run build
+      - pnpm run build:css
 
-  frontend:watch:
-    dir: frontend
+  css:watch:
     deps:
-      - frontend:install
+      - css:install
     cmds:
-      - pnpm run watch
-
-  frontend:test:
-    dir: frontend
-    deps:
-      - frontend:install
-    cmds:
-      - pnpm run test
+      - pnpm run watch:css
 
   backend:build:
     dir: backend
+    deps:
+      - css:build
     method: timestamp
     sources:
       - Cargo.toml
       - Cargo.lock
       - src/**/*.rs
+      - src/**/*.css
     generates:
       - target/debug/video-analysis
     cmds:
@@ -110,7 +100,6 @@ tasks:
         --watch Cargo.toml
         --watch Cargo.lock
         --watch src
-        --watch ../frontend/dist/assets/main.css
         --watch ../.local
         --shell 'set -a; [ ! -f ../.local ] || . ../.local; set +a; cargo run'
 
