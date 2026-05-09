@@ -15,6 +15,8 @@ pub enum RouteError {
     #[error(transparent)]
     Video(#[from] crate::db::video::VideoError),
     #[error(transparent)]
+    Analysis(#[from] crate::db::analysis::AnalysisError),
+    #[error(transparent)]
     Gemini(#[from] crate::analysis::gemini::GeminiError),
     #[error("{0}")]
     BadRequest(&'static str),
@@ -25,6 +27,8 @@ pub enum RouteError {
     },
     #[error("{0}")]
     Forbidden(&'static str),
+    #[error("{0}")]
+    NotFound(&'static str),
 }
 
 impl IntoResponse for RouteError {
@@ -41,6 +45,11 @@ impl IntoResponse for RouteError {
                 format!("video route failure: {error}"),
             )
                 .into_response(),
+            Self::Analysis(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("analysis route failure: {error}"),
+            )
+                .into_response(),
             Self::Gemini(error) => (
                 StatusCode::BAD_GATEWAY,
                 format!("analysis route failure: {error}"),
@@ -51,6 +60,7 @@ impl IntoResponse for RouteError {
                 (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()).into_response()
             }
             Self::Forbidden(message) => (StatusCode::FORBIDDEN, message).into_response(),
+            Self::NotFound(message) => (StatusCode::NOT_FOUND, message).into_response(),
         }
     }
 }

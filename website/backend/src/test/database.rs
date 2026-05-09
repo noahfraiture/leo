@@ -8,9 +8,9 @@ use surrealdb::opt::{
     capabilities::{Capabilities, ExperimentalFeature},
 };
 
-use crate::db::{self, Database, video::VideoError};
+use crate::db::{self, Database, DbInitError};
 
-pub async fn init() -> Result<Database, VideoError> {
+pub async fn init() -> Result<Database, DbInitError> {
     let capabilities =
         Capabilities::new().with_experimental_feature_allowed(ExperimentalFeature::Files);
     let db = any::connect(("mem://", Config::new().capabilities(capabilities))).await?;

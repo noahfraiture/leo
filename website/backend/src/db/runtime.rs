@@ -14,7 +14,10 @@ use surrealdb::{
 };
 use thiserror::Error;
 
-use super::models::video::{Video, VideoError};
+use super::models::{
+    analysis::{Analysis, AnalysisError},
+    video::{Video, VideoError},
+};
 
 pub type Database = Surreal<Any>;
 
@@ -39,9 +42,10 @@ pub async fn bootstrap(
     namespace: &str,
     database: &str,
     upload_bucket_path: &Path,
-) -> Result<(), VideoError> {
+) -> Result<(), DbInitError> {
     db.use_ns(namespace).use_db(database).await?;
     Video::init(db, upload_bucket_path).await?;
+    Analysis::init(db).await?;
     Ok(())
 }
 
@@ -151,7 +155,11 @@ pub enum DbInitError {
     #[error(transparent)]
     Video(#[from] VideoError),
     #[error(transparent)]
+    Analysis(#[from] AnalysisError),
+    #[error(transparent)]
     Surreal(#[from] surrealdb::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }
 
 #[derive(Debug, Error)]

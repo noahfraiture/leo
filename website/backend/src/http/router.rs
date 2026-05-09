@@ -18,10 +18,14 @@ use crate::{db, http::ui};
 #[derive(Clone)]
 pub struct AppState {
     db: db::Database,
+    run_analysis_jobs: bool,
 }
 
 pub async fn run(db: db::Database) -> Result<(), Box<dyn std::error::Error>> {
-    let state = AppState { db };
+    let state = AppState {
+        db,
+        run_analysis_jobs: true,
+    };
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
     println!("Listening on http://localhost:8080");
@@ -36,6 +40,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/analysis",
             ui::route::<ui::features::AnalyzeRoute>(MethodFilter::POST),
+        )
+        .route(
+            "/analysis/{analysis_id}",
+            ui::route::<ui::features::AnalysisStatusRoute>(MethodFilter::GET),
         )
         .route(
             "/videos",
@@ -69,12 +77,17 @@ impl AppState {
         &self.db
     }
 
+    pub fn runs_analysis_jobs(&self) -> bool {
+        self.run_analysis_jobs
+    }
+
     #[cfg(test)]
     pub async fn for_test() -> Self {
         Self {
             db: crate::test::database::init()
                 .await
                 .expect("test database should initialize"),
+            run_analysis_jobs: false,
         }
     }
 }
@@ -240,6 +253,71 @@ mod tests {
             response_text(response).await,
             "select no more than 10 videos to analyze"
         );
+    }
+
+    #[tokio::test]
+    async fn analyze_route_returns_polling_fragment_for_valid_request() {
+        let state = AppState::for_test().await;
+        let video = db::video::Video::upload(state.db(), "sample.mp4", b"video bytes".to_vec())
+            .await
+            .expect("video should upload");
+        let body = format!("video_keys={}&prompt=Summarize+the+video", video.file.key());
+
+        let response = app(state)
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/analysis")
+                    .header("HX-Request", "true")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        let status = response.status();
+        let html = response_text(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains(r#"id="analysis-result""#));
+        assert!(html.contains("Analysis queued"));
+        assert!(html.contains(r#"hx-get="/analysis/"#));
+        assert!(html.contains(r#"hx-trigger="every 2s""#));
+        assert!(!html.contains(r#"hx-trigger="load, every 2s""#));
+    }
+
+    #[tokio::test]
+    async fn analysis_status_route_renders_completed_result_without_polling() {
+        let state = AppState::for_test().await;
+        let analysis = db::analysis::Analysis::create(
+            state.db(),
+            "Summarize the video",
+            vec!["sample.mp4".to_owned()],
+        )
+        .await
+        .expect("analysis should create");
+        analysis
+            .complete(state.db(), "The video shows a clean test result.")
+            .await
+            .expect("analysis should complete");
+
+        let response = app(state)
+            .oneshot(
+                HttpRequest::builder()
+                    .uri(format!("/analysis/{}", analysis.key()))
+                    .header("HX-Request", "true")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        let status = response.status();
+        let html = response_text(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains(r#"id="analysis-result""#));
+        assert!(html.contains("The video shows a clean test result."));
+        assert!(!html.contains("hx-trigger"));
     }
 
     #[tokio::test]
