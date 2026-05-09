@@ -1,5 +1,7 @@
 use crate::db;
 
+pub const DEFAULT_FRAME_SAMPLE_RATE_FPS: f64 = 0.2;
+
 /// Provider-agnostic analysis input built by the background job.
 ///
 /// Providers decide whether to upload the original video bytes directly or to
@@ -7,6 +9,20 @@ use crate::db;
 pub struct AnalysisRequest {
     pub videos: Vec<db::video::VideoAsset>,
     pub prompt: String,
+    pub settings: AnalysisSettings,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AnalysisSettings {
+    pub frame_sample_rate_fps: f64,
+}
+
+impl Default for AnalysisSettings {
+    fn default() -> Self {
+        Self {
+            frame_sample_rate_fps: DEFAULT_FRAME_SAMPLE_RATE_FPS,
+        }
+    }
 }
 
 /// A sampled video frame ready to send to a vision model.

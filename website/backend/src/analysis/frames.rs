@@ -1,4 +1,4 @@
-use std::{env, io::Write, path::Path, time::Duration};
+use std::{env, io::Write, path::Path};
 
 use tempfile::NamedTempFile;
 use thiserror::Error;
@@ -6,12 +6,12 @@ use tokio::{fs, process::Command};
 
 use crate::{analysis::request::VideoFrame, db};
 
-const DEFAULT_FRAME_INTERVAL: Duration = Duration::from_secs(5);
+const DEFAULT_FRAME_SAMPLE_RATE_FPS: f64 = 0.2;
 const FRAME_OUTPUT_PATTERN: &str = "frame-%06d.jpg";
 
 #[derive(Clone, Copy, Debug)]
 pub struct FrameExtractionConfig {
-    pub interval: Duration,
+    pub sample_rate_fps: f64,
 }
 
 #[derive(Debug, Error)]
@@ -26,14 +26,26 @@ pub enum FrameExtractionError {
 
 impl FrameExtractionConfig {
     pub fn from_env() -> Self {
-        let interval = env::var("ANALYSIS_FRAME_INTERVAL_SECS")
+        let sample_rate_fps = env::var("ANALYSIS_FRAME_SAMPLE_RATE_FPS")
             .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .filter(|seconds| *seconds > 0)
-            .map(Duration::from_secs)
-            .unwrap_or(DEFAULT_FRAME_INTERVAL);
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(DEFAULT_FRAME_SAMPLE_RATE_FPS);
 
-        Self { interval }
+        Self::from_sample_rate_fps(sample_rate_fps)
+    }
+
+    pub fn from_sample_rate_fps(sample_rate_fps: f64) -> Self {
+        Self {
+            sample_rate_fps: normalize_sample_rate(sample_rate_fps),
+        }
+    }
+
+    pub fn seconds_per_frame(self) -> f64 {
+        1.0 / self.sample_rate_fps
+    }
+
+    pub fn ffmpeg_fps_filter(self) -> String {
+        format!("fps={}", trim_float(self.sample_rate_fps))
     }
 }
 
@@ -59,7 +71,7 @@ async fn extract_single_video_frames(
 
     let output_dir = tempfile::tempdir()?;
     let output_pattern = output_dir.path().join(FRAME_OUTPUT_PATTERN);
-    let interval_secs = config.interval.as_secs_f64();
+    let seconds_per_frame = config.seconds_per_frame();
 
     // ffmpeg stays at the process boundary. It handles the wide video codec
     // surface better than pure Rust crates, while this module keeps the rest of
@@ -71,7 +83,7 @@ async fn extract_single_video_frames(
         .arg("-i")
         .arg(input.path())
         .arg("-vf")
-        .arg(format!("fps=1/{interval_secs}"))
+        .arg(config.ffmpeg_fps_filter())
         .arg("-q:v")
         .arg("4")
         .arg(&output_pattern)
@@ -96,7 +108,7 @@ async fn extract_single_video_frames(
     for (index, path) in files.iter().enumerate() {
         frames.push(VideoFrame {
             video_name: video.video.name.clone(),
-            timestamp_secs: index as f64 * interval_secs,
+            timestamp_secs: index as f64 * seconds_per_frame,
             mime_type: "image/jpeg",
             bytes: fs::read(path).await?,
         });
@@ -115,4 +127,31 @@ async fn frame_files(path: &Path) -> Result<Vec<std::path::PathBuf>, FrameExtrac
 
     files.sort();
     Ok(files)
+}
+
+fn normalize_sample_rate(sample_rate_fps: f64) -> f64 {
+    if sample_rate_fps.is_finite() && sample_rate_fps > 0.0 {
+        sample_rate_fps.clamp(0.1, 8.0)
+    } else {
+        DEFAULT_FRAME_SAMPLE_RATE_FPS
+    }
+}
+
+fn trim_float(value: f64) -> String {
+    let text = format!("{value:.3}");
+    text.trim_end_matches('0').trim_end_matches('.').to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FrameExtractionConfig;
+
+    #[test]
+    fn frame_extraction_config_supports_dense_sampling_rates() {
+        let config = FrameExtractionConfig::from_sample_rate_fps(2.0);
+
+        assert_eq!(config.sample_rate_fps, 2.0);
+        assert_eq!(config.seconds_per_frame(), 0.5);
+        assert_eq!(config.ffmpeg_fps_filter(), "fps=2");
+    }
 }

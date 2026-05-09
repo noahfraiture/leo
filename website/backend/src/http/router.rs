@@ -1,3 +1,5 @@
+use std::env;
+
 use axum::{
     Router,
     extract::{DefaultBodyLimit, Request},
@@ -27,14 +29,21 @@ pub async fn run(db: db::Database) -> Result<(), Box<dyn std::error::Error>> {
         run_analysis_jobs: true,
     };
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
-    println!("Listening on http://localhost:8080");
+    let port = env::var("PORT")
+        .unwrap_or_else(|_| "8080".to_owned())
+        .parse::<u16>()?;
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
+    println!("Listening on http://0.0.0.0:{port}");
     Ok(axum::serve(listener, app(state)).await?)
 }
 
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/", ui::route::<ui::features::HomePage>(MethodFilter::GET))
+        .route(
+            "/analyses",
+            ui::route::<ui::features::AnalysesPage>(MethodFilter::GET),
+        )
         .route("/healthz", get(ui::features::healthz))
         .route("/video/{key}", get(crate::http::video::serve))
         .route(
@@ -157,6 +166,9 @@ mod tests {
         assert!(html.contains(r#"value="openai""#));
         assert!(html.contains(r#"aria-label="Gemini""#));
         assert!(html.contains(r#"aria-label="OpenAI""#));
+        assert!(html.contains(r#"name="frame_sample_rate_fps""#));
+        assert!(html.contains(r#"value="2""#));
+        assert!(html.contains(r#"value="4""#));
         assert!(!html.contains("Analysis status"));
         assert!(!html.contains("Upload and provider status"));
     }
@@ -185,6 +197,42 @@ mod tests {
         assert!(html.contains(r#"x-bind:src="selectedVideo""#));
         assert!(html.contains(video.path.as_str()));
         assert!(html.contains("sample.mp4"));
+    }
+
+    #[tokio::test]
+    async fn home_page_renders_recent_analysis_widget() {
+        let state = AppState::for_test().await;
+        let video = db::video::Video::upload(state.db(), "sample.mp4", b"video bytes".to_vec())
+            .await
+            .expect("video should upload");
+        let analysis = db::analysis::Analysis::create(
+            state.db(),
+            "Summarize the uploaded video",
+            vec![video.file.key().to_owned()],
+        )
+        .await
+        .expect("analysis should create");
+        analysis
+            .complete(state.db(), "The video contains a short test scene.")
+            .await
+            .expect("analysis should complete");
+
+        let response = app(state)
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        let html = response_text(response).await;
+
+        assert!(html.contains("Recent analyses"));
+        assert!(html.contains(r#"href="/analyses""#));
+        assert!(html.contains("sample.mp4"));
+        assert!(html.contains("Summarize the uploaded video"));
+        assert!(html.contains("The video contains a short test scene."));
     }
 
     #[tokio::test]
@@ -358,6 +406,43 @@ mod tests {
         assert!(html.contains(r#"id="analysis-result""#));
         assert!(html.contains("The video shows a clean test result."));
         assert!(!html.contains("hx-trigger"));
+    }
+
+    #[tokio::test]
+    async fn analyses_page_renders_paginated_analysis_history() {
+        let state = AppState::for_test().await;
+        let video = db::video::Video::upload(state.db(), "sample.mp4", b"video bytes".to_vec())
+            .await
+            .expect("video should upload");
+        let analysis = db::analysis::Analysis::create(
+            state.db(),
+            "List the visible actions",
+            vec![video.file.key().to_owned()],
+        )
+        .await
+        .expect("analysis should create");
+        analysis
+            .complete(state.db(), "A person moves through the frame.")
+            .await
+            .expect("analysis should complete");
+
+        let response = app(state)
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/analyses")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        let status = response.status();
+        let html = response_text(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains("Analysis history"));
+        assert!(html.contains("sample.mp4"));
+        assert!(html.contains("List the visible actions"));
+        assert!(html.contains("A person moves through the frame."));
     }
 
     #[tokio::test]

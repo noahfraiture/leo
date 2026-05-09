@@ -7,14 +7,47 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 use crate::analysis::{
-    chunking::{ChunkingOptions, FrameChunk, chunk_frames},
+    chunking::{ChunkingOptions, FrameChunk, chunk_frames_by_payload},
     frames::{FrameExtractionConfig, extract_video_frames},
-    request::AnalysisRequest,
+    request::{AnalysisRequest, VideoFrame},
 };
 
 const DEFAULT_MODEL: &str = "gpt-5.5";
 const DEFAULT_IMAGE_DETAIL: &str = "low";
 const RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
+const BASE64_JSON_OVERHEAD_BYTES: usize = 192;
+
+mod prompts {
+    pub const VIDEO_ANALYSIS_INSTRUCTIONS: &str = "Analyze sampled video frames. Frames are chronological, may be chunked with overlap, and include video names and timestamps. Follow the user's request; use precise timestamps when they matter.";
+
+    pub fn chunk_evidence_request(
+        user_prompt: &str,
+        chunk_number: usize,
+        chunk_count: usize,
+        start_secs: f64,
+        end_secs: f64,
+    ) -> String {
+        format!(
+            "User request:\n{user_prompt}\n\nChunk {chunk_number} of {chunk_count} covers {start_secs:.3}s to {end_secs:.3}s.\nReturn concise evidence notes only: relevant observations, video names, timestamps, and uncertainty."
+        )
+    }
+
+    pub fn frame_metadata(frame_number: usize, video_name: &str, timestamp_secs: f64) -> String {
+        format!("Frame {frame_number}: video={video_name} timestamp={timestamp_secs:.3}s")
+    }
+
+    pub fn final_summary_request(user_prompt: &str, chunk_notes: &[String]) -> String {
+        format!(
+            "User request:\n{user_prompt}\n\nChunk notes:\n{}\n\nWrite the final answer. Use timestamps only when helpful. Do not mention chunking or overlap unless relevant.",
+            chunk_notes
+                .iter()
+                .enumerate()
+                .map(|(index, chunk)| format!("Chunk {}:\n{}", index + 1, chunk))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        )
+    }
+}
 
 pub struct OpenAiClient {
     http: reqwest::Client,
@@ -33,6 +66,18 @@ struct OpenAiChunkRequest<'a> {
     chunk_index: usize,
     chunk_count: usize,
     chunk: &'a FrameChunk,
+}
+
+enum OpenAiImageInput<'a> {
+    // Base64 data URLs keep the app fully local for now. This enum is the seam
+    // for switching to Files API image inputs later without changing chunking
+    // or prompt construction.
+    Base64DataUrl {
+        mime_type: &'static str,
+        bytes: &'a [u8],
+    },
+    #[allow(dead_code)]
+    FileId { file_id: &'a str },
 }
 
 #[derive(Debug, Error)]
@@ -60,13 +105,18 @@ impl OpenAiClient {
     }
 
     pub async fn analyze(&self, request: AnalysisRequest) -> Result<String, OpenAiError> {
-        let frames =
-            extract_video_frames(&request.videos, FrameExtractionConfig::from_env()).await?;
+        let frames = extract_video_frames(
+            &request.videos,
+            FrameExtractionConfig::from_sample_rate_fps(request.settings.frame_sample_rate_fps),
+        )
+        .await?;
         if frames.is_empty() {
             return Err(OpenAiError::EmptyFrames);
         }
 
-        let chunks = chunk_frames(frames, ChunkingOptions::from_env());
+        let chunks = chunk_frames_by_payload(frames, ChunkingOptions::from_env(), |frame| {
+            openai_frame_image_input(frame).estimated_payload_bytes()
+        });
         let chunk_count = chunks.len();
         let mut responses = Vec::with_capacity(chunk_count);
 
@@ -77,11 +127,7 @@ impl OpenAiClient {
             );
         }
 
-        if responses.len() == 1 {
-            Ok(responses.remove(0))
-        } else {
-            self.summarize_chunks(&request.prompt, &responses).await
-        }
+        self.summarize_chunks(&request.prompt, &responses).await
     }
 
     async fn analyze_chunk(
@@ -120,32 +166,43 @@ impl OpenAiClient {
             .post(RESPONSES_URL)
             .bearer_auth(&self.config.api_key)
             .header(CONTENT_TYPE, "application/json")
-            .json(&json!({
-                "model": self.config.model,
-                "input": [{
-                    "role": "user",
-                    "content": [{
-                        "type": "input_text",
-                        "text": format!(
-                            "Merge these partial video analyses into one answer for the original prompt.\n\nOriginal prompt:\n{prompt}\n\nPartial analyses:\n{}",
-                            chunks
-                                .iter()
-                                .enumerate()
-                                .map(|(index, chunk)| format!("Chunk {}:\n{}", index + 1, chunk))
-                                .collect::<Vec<_>>()
-                                .join("\n\n")
-                        )
-                    }]
-                }],
-                "text": {
-                    "verbosity": "low"
-                }
-            }))
+            .json(&summarize_chunks_request(&self.config, prompt, chunks))
             .send()
             .await?;
         let response: OpenAiResponse = success_json(response).await?;
 
         response.text().ok_or(OpenAiError::EmptyResponse)
+    }
+}
+
+impl OpenAiImageInput<'_> {
+    fn to_json(&self, detail: &str) -> Value {
+        match self {
+            Self::Base64DataUrl { mime_type, bytes } => json!({
+                "type": "input_image",
+                "image_url": format!(
+                    "data:{};base64,{}",
+                    mime_type,
+                    STANDARD.encode(bytes),
+                ),
+                "detail": detail,
+            }),
+            Self::FileId { file_id } => json!({
+                "type": "input_image",
+                "file_id": file_id,
+                "detail": detail,
+            }),
+        }
+    }
+
+    fn estimated_payload_bytes(&self) -> usize {
+        match self {
+            Self::Base64DataUrl { mime_type, bytes } => {
+                let encoded_len = bytes.len().div_ceil(3) * 4;
+                "data:;base64,".len() + mime_type.len() + encoded_len + BASE64_JSON_OVERHEAD_BYTES
+            }
+            Self::FileId { file_id } => file_id.len() + BASE64_JSON_OVERHEAD_BYTES,
+        }
     }
 }
 
@@ -191,8 +248,7 @@ where
 fn generate_response_request(request: OpenAiChunkRequest<'_>) -> Value {
     let mut content = vec![json!({
         "type": "input_text",
-        "text": format!(
-            "Analyze the provided video frames for this time window and answer the user's prompt.\n\nUser prompt:\n{}\n\nWindow: chunk {} of {}, {:.3}s to {:.3}s.\nFrames are ordered by timestamp across all selected videos.",
+        "text": prompts::chunk_evidence_request(
             request.prompt,
             request.chunk_index + 1,
             request.chunk_count,
@@ -204,26 +260,18 @@ fn generate_response_request(request: OpenAiChunkRequest<'_>) -> Value {
     for (index, frame) in request.chunk.frames.iter().enumerate() {
         content.push(json!({
             "type": "input_text",
-            "text": format!(
-                "Frame {}: video={} timestamp={:.3}s",
+            "text": prompts::frame_metadata(
                 index + 1,
-                frame.video_name,
+                &frame.video_name,
                 frame.timestamp_secs,
             ),
         }));
-        content.push(json!({
-            "type": "input_image",
-            "image_url": format!(
-                "data:{};base64,{}",
-                frame.mime_type,
-                STANDARD.encode(&frame.bytes),
-            ),
-            "detail": request.config.image_detail,
-        }));
+        content.push(openai_frame_image_input(frame).to_json(&request.config.image_detail));
     }
 
     json!({
         "model": request.config.model,
+        "instructions": prompts::VIDEO_ANALYSIS_INSTRUCTIONS,
         "input": [{
             "role": "user",
             "content": content,
@@ -232,6 +280,30 @@ fn generate_response_request(request: OpenAiChunkRequest<'_>) -> Value {
             "verbosity": "low"
         }
     })
+}
+
+fn summarize_chunks_request(config: &OpenAiConfig, prompt: &str, chunks: &[String]) -> Value {
+    json!({
+        "model": config.model,
+        "instructions": prompts::VIDEO_ANALYSIS_INSTRUCTIONS,
+        "input": [{
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": prompts::final_summary_request(prompt, chunks)
+            }]
+        }],
+        "text": {
+            "verbosity": "low"
+        }
+    })
+}
+
+fn openai_frame_image_input(frame: &VideoFrame) -> OpenAiImageInput<'_> {
+    OpenAiImageInput::Base64DataUrl {
+        mime_type: frame.mime_type,
+        bytes: &frame.bytes,
+    }
 }
 
 #[derive(Deserialize)]
@@ -276,11 +348,14 @@ struct OpenAiContent {
 mod tests {
     use serde_json::json;
 
-    use super::{OpenAiChunkRequest, OpenAiConfig, generate_response_request};
+    use super::{
+        OpenAiChunkRequest, OpenAiConfig, OpenAiImageInput, generate_response_request,
+        summarize_chunks_request,
+    };
     use crate::analysis::{chunking::FrameChunk, request::VideoFrame};
 
     #[test]
-    fn generate_response_request_places_prompt_metadata_and_images_in_one_message() {
+    fn generate_response_request_uses_minimal_instructions_and_evidence_prompt() {
         let config = OpenAiConfig {
             api_key: "test-key".to_owned(),
             model: "gpt-test".to_owned(),
@@ -309,12 +384,13 @@ mod tests {
             request,
             json!({
                 "model": "gpt-test",
+                "instructions": "Analyze sampled video frames. Frames are chronological, may be chunked with overlap, and include video names and timestamps. Follow the user's request; use precise timestamps when they matter.",
                 "input": [{
                     "role": "user",
                     "content": [
                         {
                             "type": "input_text",
-                            "text": "Analyze the provided video frames for this time window and answer the user's prompt.\n\nUser prompt:\nFind the key moment.\n\nWindow: chunk 1 of 1, 0.000s to 5.000s.\nFrames are ordered by timestamp across all selected videos."
+                            "text": "User request:\nFind the key moment.\n\nChunk 1 of 1 covers 0.000s to 5.000s.\nReturn concise evidence notes only: relevant observations, video names, timestamps, and uncertainty."
                         },
                         {
                             "type": "input_text",
@@ -332,5 +408,33 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn summarize_chunks_request_uses_user_prompt_as_final_answer_driver() {
+        let config = OpenAiConfig {
+            api_key: "test-key".to_owned(),
+            model: "gpt-test".to_owned(),
+            image_detail: "low".to_owned(),
+        };
+
+        let request = summarize_chunks_request(&config, "Find the key moment.", &["notes".into()]);
+
+        assert_eq!(
+            request["input"][0]["content"][0]["text"],
+            "User request:\nFind the key moment.\n\nChunk notes:\nChunk 1:\nnotes\n\nWrite the final answer. Use timestamps only when helpful. Do not mention chunking or overlap unless relevant."
+        );
+    }
+
+    #[test]
+    fn image_input_estimates_base64_payload_instead_of_raw_bytes() {
+        let bytes = [b'x'; 3];
+        let input = OpenAiImageInput::Base64DataUrl {
+            mime_type: "image/jpeg",
+            bytes: &bytes,
+        };
+
+        assert!(input.estimated_payload_bytes() > bytes.len());
+        assert!(input.estimated_payload_bytes() >= "data:image/jpeg;base64,eHh4".len());
     }
 }

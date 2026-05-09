@@ -24,6 +24,8 @@ pub struct AnalyzeInput {
     #[serde(default)]
     provider: Option<String>,
     #[serde(default)]
+    frame_sample_rate_fps: Option<f64>,
+    #[serde(default)]
     video_keys: Vec<String>,
     #[serde(default)]
     prompt: String,
@@ -59,6 +61,11 @@ impl Route for AnalyzeRoute {
         let provider =
             ai_analysis::provider_from_value(input.provider.as_deref().unwrap_or("gemini"))
                 .map_err(|_| RouteError::BadRequest("unsupported analysis provider"))?;
+        let frame_sample_rate_fps =
+            validate_frame_sample_rate(input.frame_sample_rate_fps.unwrap_or(0.2))?;
+        let settings = ai_analysis::request::AnalysisSettings {
+            frame_sample_rate_fps,
+        };
 
         for key in &input.video_keys {
             if db::video::Video::find_by_file_key(context.state().db(), key)
@@ -69,9 +76,10 @@ impl Route for AnalyzeRoute {
             }
         }
 
-        let analysis = db::analysis::Analysis::create_with_provider(
+        let analysis = db::analysis::Analysis::create_with_provider_and_settings(
             context.state().db(),
             provider,
+            settings,
             input.prompt.trim(),
             input.video_keys,
         )
@@ -183,8 +191,24 @@ async fn run_analysis_job(
     }
 
     let provider = ai_analysis::provider_from_value(&analysis.provider)?;
-    let response = ai_analysis::analyze_videos(provider, videos, analysis.prompt.clone()).await?;
+    let response = ai_analysis::analyze_videos(
+        provider,
+        videos,
+        analysis.prompt.clone(),
+        ai_analysis::request::AnalysisSettings {
+            frame_sample_rate_fps: analysis.frame_sample_rate_fps,
+        },
+    )
+    .await?;
     analysis.complete(&db, response).await?;
 
     Ok(())
+}
+
+fn validate_frame_sample_rate(value: f64) -> Result<f64, RouteError> {
+    if value.is_finite() && (0.1..=8.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err(RouteError::BadRequest("unsupported frame sampling rate"))
+    }
 }

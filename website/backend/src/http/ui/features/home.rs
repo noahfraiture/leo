@@ -13,11 +13,14 @@ use crate::{
     },
 };
 
+const RECENT_ANALYSIS_LIMIT: usize = 5;
+
 /// Public workspace page mounted at `/`.
 pub struct HomePage;
 
 pub struct HomePageView {
     videos: Vec<db::video::Video>,
+    recent_analyses: Vec<db::analysis::Analysis>,
 }
 
 #[async_trait]
@@ -32,8 +35,14 @@ impl Route for HomePage {
         _input: Self::Input,
     ) -> Result<Self::View, RouteError> {
         let videos = db::video::Video::list(context.state().db()).await?;
+        let recent_analyses =
+            db::analysis::Analysis::list_recent(context.state().db(), RECENT_ANALYSIS_LIMIT)
+                .await?;
 
-        Ok(HomePageView { videos })
+        Ok(HomePageView {
+            videos,
+            recent_analyses,
+        })
     }
 }
 
@@ -52,6 +61,8 @@ impl RouteView for HomePageView {
                         (video_intake(&self.videos))
 
                         (video_workspace(&self.videos))
+
+                        (recent_analyses(&self.recent_analyses, &self.videos))
                     </section>
                 </main>
             },
@@ -76,6 +87,9 @@ fn top_bar() -> impl Renderable {
                     href="/">
                     "Video analysis"
                 </a>
+            </div>
+            <div class="flex-none">
+                <a class="btn btn-sm btn-ghost" href="/analyses">"History"</a>
             </div>
         </header>
     }
@@ -219,9 +233,10 @@ fn analysis_prompt(videos: &[db::video::Video]) -> impl Renderable {
                 hx-swap="outerHTML"
                 hx-indicator="#analysis-indicator">
                 (analysis_provider_selection())
+                (frame_sampling_selection())
                 (video_selection(videos))
 
-                <label class="form-control space-y-2">
+                <label class="form-control space-y-2 gap-3">
                     <span class="text-sm font-medium text-base-content">"Prompt"</span>
                     <textarea
                         class="textarea textarea-bordered min-h-32 w-full"
@@ -243,6 +258,53 @@ fn analysis_prompt(videos: &[db::video::Video]) -> impl Renderable {
                 </div>
             </form>
         </section>
+    }
+}
+
+fn frame_sampling_selection() -> impl Renderable {
+    rsx! {
+        <fieldset class="space-y-3">
+            <legend class="text-sm font-medium text-base-content">"Frame sampling"</legend>
+            <div class="join flex-wrap">
+                <input
+                    class="btn join-item"
+                    type="radio"
+                    name="frame_sample_rate_fps"
+                    value="0.1"
+                    aria-label="1 / 10s" />
+                <input
+                    class="btn join-item"
+                    type="radio"
+                    name="frame_sample_rate_fps"
+                    value="0.2"
+                    aria-label="1 / 5s"
+                    checked="checked" />
+                <input
+                    class="btn join-item"
+                    type="radio"
+                    name="frame_sample_rate_fps"
+                    value="0.5"
+                    aria-label="1 / 2s" />
+                <input
+                    class="btn join-item"
+                    type="radio"
+                    name="frame_sample_rate_fps"
+                    value="1"
+                    aria-label="1 fps" />
+                <input
+                    class="btn join-item"
+                    type="radio"
+                    name="frame_sample_rate_fps"
+                    value="2"
+                    aria-label="2 fps" />
+                <input
+                    class="btn join-item"
+                    type="radio"
+                    name="frame_sample_rate_fps"
+                    value="4"
+                    aria-label="4 fps" />
+            </div>
+        </fieldset>
     }
 }
 
@@ -326,6 +388,27 @@ pub(super) fn video_option(video: &db::video::Video) -> impl Renderable {
                 "Delete"
             </button>
         </div>
+    }
+}
+
+fn recent_analyses(
+    analyses: &[db::analysis::Analysis],
+    videos: &[db::video::Video],
+) -> impl Renderable {
+    rsx! {
+        <section class="space-y-4">
+            <div class="flex flex-wrap items-end justify-between gap-3">
+                <div class="space-y-2">
+                    <p class="text-sm font-semibold uppercase tracking-[0.22em] text-base-content/60">
+                        "History"
+                    </p>
+                    <h2 class="text-2xl font-semibold text-base-content">"Recent analyses"</h2>
+                </div>
+                <a class="btn btn-sm btn-outline" href="/analyses">"View all"</a>
+            </div>
+
+            (super::analyses::analysis_history(analyses, videos))
+        </section>
     }
 }
 

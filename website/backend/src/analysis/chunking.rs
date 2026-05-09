@@ -2,13 +2,15 @@ use std::env;
 
 use crate::analysis::request::VideoFrame;
 
-const DEFAULT_MAX_IMAGES_PER_REQUEST: usize = 200;
-const DEFAULT_MAX_PAYLOAD_BYTES_PER_REQUEST: usize = 40 * 1024 * 1024;
+const SAFE_OPENAI_MAX_IMAGES_PER_REQUEST: usize = 450;
+const SAFE_OPENAI_MAX_PAYLOAD_BYTES_PER_REQUEST: usize = 45 * 1024 * 1024;
+const DEFAULT_OVERLAP_PERCENT: f64 = 10.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ChunkingOptions {
     pub max_images_per_request: usize,
     pub max_payload_bytes_per_request: usize,
+    pub overlap_percent: f64,
 }
 
 #[derive(Debug, PartialEq)]
@@ -22,16 +24,21 @@ impl ChunkingOptions {
     pub fn from_env() -> Self {
         let max_images_per_request = env_usize(
             "ANALYSIS_MAX_IMAGES_PER_REQUEST",
-            DEFAULT_MAX_IMAGES_PER_REQUEST,
-        );
+            SAFE_OPENAI_MAX_IMAGES_PER_REQUEST,
+        )
+        .min(SAFE_OPENAI_MAX_IMAGES_PER_REQUEST);
         let max_payload_bytes_per_request = env_usize(
             "ANALYSIS_MAX_IMAGE_BYTES_PER_REQUEST",
-            DEFAULT_MAX_PAYLOAD_BYTES_PER_REQUEST,
-        );
+            SAFE_OPENAI_MAX_PAYLOAD_BYTES_PER_REQUEST,
+        )
+        .min(SAFE_OPENAI_MAX_PAYLOAD_BYTES_PER_REQUEST);
+        let overlap_percent =
+            env_f64("ANALYSIS_CHUNK_OVERLAP_PERCENT", DEFAULT_OVERLAP_PERCENT).clamp(0.0, 50.0);
 
         Self {
             max_images_per_request,
             max_payload_bytes_per_request,
+            overlap_percent,
         }
     }
 }
@@ -41,7 +48,15 @@ impl ChunkingOptions {
 /// Provider requests should see the selected videos in temporal order, so this
 /// first sorts all frames by timestamp and then opens a new chunk before adding
 /// an image would exceed either configured request budget.
-pub fn chunk_frames(mut frames: Vec<VideoFrame>, options: ChunkingOptions) -> Vec<FrameChunk> {
+pub fn chunk_frames(frames: Vec<VideoFrame>, options: ChunkingOptions) -> Vec<FrameChunk> {
+    chunk_frames_by_payload(frames, options, |frame| frame.bytes.len())
+}
+
+pub fn chunk_frames_by_payload(
+    mut frames: Vec<VideoFrame>,
+    options: ChunkingOptions,
+    payload_size: impl Fn(&VideoFrame) -> usize,
+) -> Vec<FrameChunk> {
     frames.sort_by(|left, right| {
         left.timestamp_secs
             .total_cmp(&right.timestamp_secs)
@@ -55,18 +70,25 @@ pub fn chunk_frames(mut frames: Vec<VideoFrame>, options: ChunkingOptions) -> Ve
     let mut current_payload_bytes = 0usize;
 
     for frame in frames {
-        let frame_bytes = frame.bytes.len();
+        let frame_payload_bytes = payload_size(&frame);
         let would_exceed_images = current.len() >= max_images;
         let would_exceed_payload =
-            !current.is_empty() && current_payload_bytes + frame_bytes > max_payload_bytes;
+            !current.is_empty() && current_payload_bytes + frame_payload_bytes > max_payload_bytes;
 
         if would_exceed_images || would_exceed_payload {
-            chunks.push(frame_chunk(current));
-            current = Vec::new();
-            current_payload_bytes = 0;
+            let chunk = frame_chunk(current);
+            current = overlap_frames(
+                &chunk,
+                options,
+                &payload_size,
+                max_images,
+                max_payload_bytes,
+            );
+            current_payload_bytes = current.iter().map(&payload_size).sum();
+            chunks.push(chunk);
         }
 
-        current_payload_bytes += frame_bytes;
+        current_payload_bytes += frame_payload_bytes;
         current.push(frame);
     }
 
@@ -75,6 +97,42 @@ pub fn chunk_frames(mut frames: Vec<VideoFrame>, options: ChunkingOptions) -> Ve
     }
 
     chunks
+}
+
+fn overlap_frames(
+    chunk: &FrameChunk,
+    options: ChunkingOptions,
+    payload_size: &impl Fn(&VideoFrame) -> usize,
+    max_images: usize,
+    max_payload_bytes: usize,
+) -> Vec<VideoFrame> {
+    if options.overlap_percent <= 0.0 || max_images <= 1 || chunk.frames.len() <= 1 {
+        return Vec::new();
+    }
+
+    let duration_secs = chunk.end_secs - chunk.start_secs;
+    if duration_secs <= 0.0 {
+        return Vec::new();
+    }
+
+    let overlap_secs = duration_secs * (options.overlap_percent / 100.0);
+    let overlap_start_secs = chunk.end_secs - overlap_secs;
+    let mut frames = chunk
+        .frames
+        .iter()
+        .filter(|frame| frame.timestamp_secs >= overlap_start_secs)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    while frames.len() >= max_images {
+        frames.remove(0);
+    }
+
+    while frames.iter().map(payload_size).sum::<usize>() >= max_payload_bytes {
+        frames.remove(0);
+    }
+
+    frames
 }
 
 fn frame_chunk(frames: Vec<VideoFrame>) -> FrameChunk {
@@ -99,6 +157,14 @@ fn env_usize(name: &str, default: usize) -> usize {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn env_f64(name: &str, default: f64) -> f64 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite())
         .unwrap_or(default)
 }
 
@@ -130,6 +196,7 @@ mod tests {
             ChunkingOptions {
                 max_images_per_request: 3,
                 max_payload_bytes_per_request: 100,
+                overlap_percent: 0.0,
             },
         );
 
@@ -167,11 +234,41 @@ mod tests {
             ChunkingOptions {
                 max_images_per_request: 10,
                 max_payload_bytes_per_request: 100,
+                overlap_percent: 0.0,
             },
         );
 
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].frames.len(), 1);
         assert_eq!(chunks[1].frames.len(), 2);
+    }
+
+    #[test]
+    fn chunk_frames_overlaps_next_chunk_by_time_percentage() {
+        let frames = vec![
+            frame("a.mp4", 0.0, 10),
+            frame("a.mp4", 10.0, 10),
+            frame("a.mp4", 20.0, 10),
+            frame("a.mp4", 30.0, 10),
+        ];
+
+        let chunks = chunk_frames(
+            frames,
+            ChunkingOptions {
+                max_images_per_request: 3,
+                max_payload_bytes_per_request: 100,
+                overlap_percent: 50.0,
+            },
+        );
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(
+            chunks[1]
+                .frames
+                .iter()
+                .map(|frame| frame.timestamp_secs)
+                .collect::<Vec<_>>(),
+            vec![10.0, 20.0, 30.0]
+        );
     }
 }

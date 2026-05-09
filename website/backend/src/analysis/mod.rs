@@ -10,7 +10,7 @@ use std::str::FromStr;
 
 use error::AnalysisError;
 use provider::AnalysisProvider;
-use request::AnalysisRequest;
+use request::{AnalysisRequest, AnalysisSettings};
 
 use crate::db;
 
@@ -18,10 +18,12 @@ pub async fn analyze_videos(
     provider: AnalysisProvider,
     videos: Vec<db::video::VideoAsset>,
     prompt: impl Into<String>,
+    settings: AnalysisSettings,
 ) -> Result<String, AnalysisError> {
     let request = AnalysisRequest {
         videos,
         prompt: prompt.into(),
+        settings,
     };
 
     match provider {

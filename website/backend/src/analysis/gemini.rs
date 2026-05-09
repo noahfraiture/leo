@@ -9,7 +9,10 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::time::{Instant, sleep};
 
-use crate::{analysis::request::AnalysisRequest, db};
+use crate::{
+    analysis::request::{AnalysisRequest, AnalysisSettings},
+    db,
+};
 
 const DEFAULT_MODEL: &str = "gemini-3-flash-preview";
 const UPLOAD_URL: &str = "https://generativelanguage.googleapis.com/upload/v1beta/files";
@@ -17,6 +20,17 @@ const API_URL_PREFIX: &str = "https://generativelanguage.googleapis.com/v1beta";
 const GENERATE_URL_PREFIX: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 const DEFAULT_FILE_PROCESSING_TIMEOUT: Duration = Duration::from_secs(300);
 const FILE_PROCESSING_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+mod prompts {
+    /// Gemini currently receives the raw user prompt after the uploaded videos.
+    ///
+    /// Keep this function as the single edit point for Gemini prompt shaping so
+    /// future provider-specific instructions do not get scattered through the
+    /// request builder.
+    pub fn user_prompt(prompt: &str) -> String {
+        prompt.to_owned()
+    }
+}
 
 pub async fn analyze_videos(
     videos: &[db::video::VideoAsset],
@@ -28,6 +42,7 @@ pub async fn analyze_videos(
         .analyze(AnalysisRequest {
             videos: videos.to_vec(),
             prompt: prompt.to_owned(),
+            settings: AnalysisSettings::default(),
         })
         .await
 }
@@ -289,7 +304,7 @@ fn generate_content_request(files: &[UploadedFile], prompt: &str) -> Value {
             })
         })
         .collect::<Vec<_>>();
-    parts.push(json!({ "text": prompt }));
+    parts.push(json!({ "text": prompts::user_prompt(prompt) }));
 
     json!({
         "contents": [{
