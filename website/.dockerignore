@@ -1,0 +1,11 @@
+.data
+.direnv
+.env
+.git
+.gitnexus
+.pnpm-store
+.task
+.cache
+.DS_Store
+node_modules
+backend/target
