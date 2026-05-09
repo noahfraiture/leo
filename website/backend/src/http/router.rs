@@ -138,7 +138,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn analyze_route_returns_dummy_fragment() {
+    async fn analyze_route_requires_selected_videos() {
         let response = test_app()
             .await
             .oneshot(
@@ -146,15 +146,72 @@ mod tests {
                     .method("POST")
                     .uri("/analysis")
                     .header("HX-Request", "true")
-                    .body(Body::empty())
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from("prompt=Summarize+the+video"))
                     .expect("request should build"),
             )
             .await
             .expect("request should complete");
-        let html = response_text(response).await;
 
-        assert!(html.contains(r#"id="analysis-result""#));
-        assert!(html.contains("Video analysis is not implemented yet."));
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_text(response).await,
+            "select at least one video to analyze"
+        );
+    }
+
+    #[tokio::test]
+    async fn analyze_route_rejects_missing_selected_video() {
+        let response = test_app()
+            .await
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/analysis")
+                    .header("HX-Request", "true")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "video_keys=missing.mp4&prompt=Summarize+the+video",
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_text(response).await,
+            "selected video was not found"
+        );
+    }
+
+    #[tokio::test]
+    async fn analyze_route_rejects_more_than_ten_videos() {
+        let body = (0..11)
+            .map(|index| format!("video_keys=clip-{index}.mp4"))
+            .chain(["prompt=Summarize+the+videos".to_owned()])
+            .collect::<Vec<_>>()
+            .join("&");
+
+        let response = test_app()
+            .await
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/analysis")
+                    .header("HX-Request", "true")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_text(response).await,
+            "select no more than 10 videos to analyze"
+        );
     }
 
     #[tokio::test]

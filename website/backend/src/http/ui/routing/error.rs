@@ -14,6 +14,8 @@ pub enum RouteError {
     Db(#[from] surrealdb::Error),
     #[error(transparent)]
     Video(#[from] crate::db::video::VideoError),
+    #[error(transparent)]
+    Gemini(#[from] crate::analysis::gemini::GeminiError),
     #[error("{0}")]
     BadRequest(&'static str),
     #[error("failed to extract embedded route input for {route}: {message}")]
@@ -37,6 +39,11 @@ impl IntoResponse for RouteError {
             Self::Video(error) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("video route failure: {error}"),
+            )
+                .into_response(),
+            Self::Gemini(error) => (
+                StatusCode::BAD_GATEWAY,
+                format!("analysis route failure: {error}"),
             )
                 .into_response(),
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message).into_response(),

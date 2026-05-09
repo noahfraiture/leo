@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+mod analysis;
 mod db;
 mod http;
 #[cfg(test)]
