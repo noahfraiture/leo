@@ -42,8 +42,8 @@ pub fn app(state: AppState) -> Router {
             ui::route::<ui::features::UploadVideoRoute>(MethodFilter::POST),
         )
         .route(
-            "/videos/{video_key}",
-            ui::route::<ui::features::DeleteVideoRoute>(MethodFilter::DELETE),
+            "/videos/{video_key}/delete",
+            ui::route::<ui::features::DeleteVideoRoute>(MethodFilter::POST),
         )
         .with_state(state)
         .layer(DefaultBodyLimit::max(512 * 1024 * 1024))
@@ -280,7 +280,8 @@ mod tests {
         assert!(html.contains(r#"name="video_keys""#));
         assert!(html.contains("Delete"));
         assert!(html.contains(r#"type="button""#));
-        assert!(html.contains(r#"hx-delete="/videos/"#));
+        assert!(html.contains(r#"hx-post="/videos/"#));
+        assert!(html.contains(r#"/delete"#));
         assert!(html.contains(r##"hx-target="#video-workspace""##));
     }
 
@@ -294,9 +295,9 @@ mod tests {
         let response = app(state.clone())
             .oneshot(
                 HttpRequest::builder()
-                    .method("DELETE")
+                    .method("POST")
                     .uri(format!(
-                        "/videos/{}",
+                        "/videos/{}/delete",
                         video.file.key().trim_start_matches('/')
                     ))
                     .header("HX-Request", "true")

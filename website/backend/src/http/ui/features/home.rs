@@ -265,7 +265,10 @@ pub(super) fn video_selection(videos: &[db::video::Video]) -> impl Renderable {
 }
 
 pub(super) fn video_option(video: &db::video::Video) -> impl Renderable {
-    let delete_path = format!("/videos/{}", video.file.key().trim_start_matches('/'));
+    let delete_path = format!(
+        "/videos/{}/delete",
+        video.file.key().trim_start_matches('/')
+    );
     let delete_label = format!("Delete {}", video.name);
     let delete_confirm = format!("Delete {}?", video.name);
 
@@ -291,7 +294,7 @@ pub(super) fn video_option(video: &db::video::Video) -> impl Renderable {
                 class="btn btn-ghost btn-sm mr-2 text-error hover:bg-error hover:text-error-content"
                 type="button"
                 aria-label=(delete_label)
-                hx-delete=(delete_path)
+                hx-post=(delete_path)
                 hx-target="#video-workspace"
                 hx-swap="outerHTML"
                 hx-confirm=(delete_confirm)>
