@@ -133,8 +133,36 @@ mod tests {
 
         assert!(html.contains("Video analysis"));
         assert!(html.contains("Upload videos"));
+        assert!(html.contains("alpinejs"));
+        assert!(html.contains(r#"x-data="videoPlayer"#));
         assert!(!html.contains("Analysis status"));
         assert!(!html.contains("Upload and provider status"));
+    }
+
+    #[tokio::test]
+    async fn home_page_renders_video_player_dropdown_with_uploaded_videos() {
+        let state = AppState::for_test().await;
+        let video = db::video::Video::upload(state.db(), "sample.mp4", b"video bytes".to_vec())
+            .await
+            .expect("video should upload");
+
+        let response = app(state)
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        let html = response_text(response).await;
+
+        assert!(html.contains("Preview video"));
+        assert!(html.contains(r#"x-data="videoPlayer""#));
+        assert!(html.contains(r#"x-model="selectedVideo""#));
+        assert!(html.contains(r#"x-bind:src="selectedVideo""#));
+        assert!(html.contains(video.path.as_str()));
+        assert!(html.contains("sample.mp4"));
     }
 
     #[tokio::test]
@@ -245,13 +273,15 @@ mod tests {
         let html = response_text(response).await;
 
         assert_eq!(status, StatusCode::OK);
+        assert!(html.contains(r#"id="video-workspace""#));
+        assert!(html.contains(r#"x-data="videoPlayer""#));
         assert!(html.contains(r#"id="video-selection""#));
         assert!(html.contains("sample.mp4"));
         assert!(html.contains(r#"name="video_keys""#));
         assert!(html.contains("Delete"));
         assert!(html.contains(r#"type="button""#));
         assert!(html.contains(r#"hx-delete="/videos/"#));
-        assert!(html.contains(r##"hx-target="#video-selection""##));
+        assert!(html.contains(r##"hx-target="#video-workspace""##));
     }
 
     #[tokio::test]
@@ -279,6 +309,8 @@ mod tests {
         let html = response_text(response).await;
 
         assert_eq!(status, StatusCode::OK);
+        assert!(html.contains(r#"id="video-workspace""#));
+        assert!(html.contains(r#"x-data="videoPlayer""#));
         assert!(html.contains(r#"id="video-selection""#));
         assert!(html.contains("No videos have been uploaded yet."));
         assert!(!html.contains("sample.mp4"));

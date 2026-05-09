@@ -10,7 +10,7 @@ use crate::{
     },
 };
 
-use super::home::video_selection;
+use super::home::video_workspace;
 
 pub struct DeleteVideoRoute;
 
@@ -49,7 +49,7 @@ impl RouteView for DeleteVideoView {
                 <main class="mx-auto max-w-4xl space-y-8 p-6 lg:py-10">
                     <section class="space-y-6 rounded-box border border-base-300 bg-base-100 p-5 shadow-sm">
                         <h1 class="text-2xl font-semibold text-base-content">"Uploaded videos"</h1>
-                        (video_selection(&self.videos))
+                        (video_workspace(&self.videos))
                         <a class="btn btn-primary" href="/">"Back to analysis"</a>
                     </section>
                 </main>
@@ -58,6 +58,6 @@ impl RouteView for DeleteVideoView {
     }
 
     fn fragment(&self, _state: &AppState) -> impl Renderable {
-        video_selection(&self.videos)
+        video_workspace(&self.videos)
     }
 }

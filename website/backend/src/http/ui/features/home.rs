@@ -51,7 +51,7 @@ impl RouteView for HomePageView {
 
                         (video_intake(&self.videos))
 
-                        (analysis_prompt(&self.videos))
+                        (video_workspace(&self.videos))
                     </section>
                 </main>
             },
@@ -102,7 +102,7 @@ fn video_intake(videos: &[db::video::Video]) -> impl Renderable {
                 enctype="multipart/form-data"
                 hx-post="/videos"
                 hx-encoding="multipart/form-data"
-                hx-target="#video-selection"
+                hx-target="#video-workspace"
                 hx-swap="outerHTML"
                 hx-indicator="#upload-indicator">
                 <p class="text-sm font-semibold uppercase tracking-[0.22em] text-base-content/60">
@@ -135,6 +135,62 @@ fn video_intake(videos: &[db::video::Video]) -> impl Renderable {
                     </div>
                 </div>
             </form>
+        </section>
+    }
+}
+
+pub(super) fn video_workspace(videos: &[db::video::Video]) -> impl Renderable {
+    rsx! {
+        <div id="video-workspace" class="space-y-6">
+            (video_player(videos))
+            (analysis_prompt(videos))
+        </div>
+    }
+}
+
+fn video_player(videos: &[db::video::Video]) -> impl Renderable {
+    let selected_path = videos
+        .first()
+        .map(|video| video.path.as_str())
+        .unwrap_or("");
+
+    rsx! {
+        <section
+            class="space-y-4 rounded-box border border-base-300 bg-base-100 p-6 shadow-sm"
+            "x-data"="videoPlayer"
+            data-selected-video=(selected_path)>
+            <div class="space-y-2">
+                <p class="text-sm font-semibold uppercase tracking-[0.22em] text-base-content/60">
+                    "Preview"
+                </p>
+                <h2 class="text-xl font-semibold text-base-content">"Preview video"</h2>
+            </div>
+
+            @if videos.is_empty() {
+                <p class="rounded-box border border-dashed border-base-300 p-4 text-sm text-base-content/70">
+                    "No videos have been uploaded yet."
+                </p>
+            } @else {
+                <label class="form-control space-y-2">
+                    <span class="text-sm font-medium text-base-content">"Video"</span>
+                    <select
+                        class="select select-bordered w-full"
+                        "x-model"="selectedVideo">
+                        @for video in videos.iter() {
+                            <option value=(video.path.as_str())>
+                                (video.name.as_str())
+                            </option>
+                        }
+                    </select>
+                </label>
+
+                <video
+                    class="w-full rounded-box border border-base-300 bg-base-200"
+                    controls="controls"
+                    preload="metadata"
+                    "x-bind:src"="selectedVideo">
+                </video>
+            }
         </section>
     }
 }
@@ -236,7 +292,7 @@ pub(super) fn video_option(video: &db::video::Video) -> impl Renderable {
                 type="button"
                 aria-label=(delete_label)
                 hx-delete=(delete_path)
-                hx-target="#video-selection"
+                hx-target="#video-workspace"
                 hx-swap="outerHTML"
                 hx-confirm=(delete_confirm)>
                 "Delete"
