@@ -171,25 +171,27 @@ fn video_player(videos: &[db::video::Video]) -> impl Renderable {
                     "No videos have been uploaded yet."
                 </p>
             } @else {
-                <label class="form-control space-y-2">
-                    <span class="text-sm font-medium text-base-content">"Video"</span>
-                    <select
-                        class="select select-bordered w-full"
-                        "x-model"="selectedVideo">
-                        @for video in videos.iter() {
-                            <option value=(video.path.as_str())>
-                                (video.name.as_str())
-                            </option>
-                        }
-                    </select>
-                </label>
+                <div class="flex flex-col gap-8">
+                    <label class="flex flex-col gap-3">
+                        <span class="text-sm font-medium text-base-content">"Video"</span>
+                        <select
+                            class="select select-bordered w-full"
+                            "x-model"="selectedVideo">
+                            @for video in videos.iter() {
+                                <option value=(video.path.as_str())>
+                                    (video.name.as_str())
+                                </option>
+                            }
+                        </select>
+                    </label>
 
-                <video
-                    class="w-full rounded-box border border-base-300 bg-base-200"
-                    controls="controls"
-                    preload="metadata"
-                    "x-bind:src"="selectedVideo">
-                </video>
+                    <video
+                        class="w-full rounded-box border border-base-300 bg-base-200"
+                        controls="controls"
+                        preload="metadata"
+                        "x-bind:src"="selectedVideo">
+                    </video>
+                </div>
             }
         </section>
     }
@@ -216,6 +218,7 @@ fn analysis_prompt(videos: &[db::video::Video]) -> impl Renderable {
                 hx-target="#analysis-result"
                 hx-swap="outerHTML"
                 hx-indicator="#analysis-indicator">
+                (analysis_provider_selection())
                 (video_selection(videos))
 
                 <label class="form-control space-y-2">
@@ -227,20 +230,42 @@ fn analysis_prompt(videos: &[db::video::Video]) -> impl Renderable {
                         required="required"></textarea>
                 </label>
 
-                <div class="flex flex-wrap items-center justify-between gap-3">
-                    <p id="analysis-result" class="text-sm text-base-content/70"></p>
-                    <div class="flex items-center gap-3">
-                        <span
-                            id="analysis-indicator"
-                            class="htmx-indicator inline-flex items-center gap-2 text-sm text-base-content/70">
-                            <span class="loading loading-spinner loading-sm"></span>
-                            "Analyzing"
-                        </span>
-                        <button class="btn btn-primary" type="submit">"Run analysis"</button>
-                    </div>
+                <div id="analysis-result" class="empty:hidden"></div>
+
+                <div class="flex flex-wrap items-center justify-end gap-3">
+                    <span
+                        id="analysis-indicator"
+                        class="htmx-indicator inline-flex items-center gap-2 text-sm text-base-content/70">
+                        <span class="loading loading-spinner loading-sm"></span>
+                        "Analyzing"
+                    </span>
+                    <button class="btn btn-primary" type="submit">"Run analysis"</button>
                 </div>
             </form>
         </section>
+    }
+}
+
+fn analysis_provider_selection() -> impl Renderable {
+    rsx! {
+        <fieldset class="space-y-3">
+            <legend class="text-sm font-medium text-base-content">"Provider"</legend>
+            <div id="provider-switch" class="join">
+                <input
+                    class="btn join-item"
+                    type="radio"
+                    name="provider"
+                    value="gemini"
+                    aria-label="Gemini"
+                    checked="checked" />
+                <input
+                    class="btn join-item"
+                    type="radio"
+                    name="provider"
+                    value="openai"
+                    aria-label="OpenAI" />
+            </div>
+        </fieldset>
     }
 }
 

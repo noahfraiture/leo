@@ -17,7 +17,7 @@ pub enum RouteError {
     #[error(transparent)]
     Analysis(#[from] crate::db::analysis::AnalysisError),
     #[error(transparent)]
-    Gemini(#[from] crate::analysis::gemini::GeminiError),
+    AiAnalysis(#[from] crate::analysis::error::AnalysisError),
     #[error("{0}")]
     BadRequest(&'static str),
     #[error("failed to extract embedded route input for {route}: {message}")]
@@ -50,7 +50,7 @@ impl IntoResponse for RouteError {
                 format!("analysis route failure: {error}"),
             )
                 .into_response(),
-            Self::Gemini(error) => (
+            Self::AiAnalysis(error) => (
                 StatusCode::BAD_GATEWAY,
                 format!("analysis route failure: {error}"),
             )

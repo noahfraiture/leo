@@ -44,6 +44,7 @@
               go-task
               cargo
               cargo-watch
+              ffmpeg
               rustToolchain
               nodejs
               pnpm_10

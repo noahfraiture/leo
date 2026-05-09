@@ -145,9 +145,18 @@ mod tests {
         let html = response_text(response).await;
 
         assert!(html.contains("Video analysis"));
+        assert!(html.contains("<html lang=en>") || html.contains(r#"<html lang="en">"#));
+        assert!(!html.contains("<html lang=en data-theme="));
+        assert!(!html.contains(r#"<html lang="en" data-theme="#));
         assert!(html.contains("Upload videos"));
         assert!(html.contains("alpinejs"));
         assert!(html.contains(r#"x-data="videoPlayer"#));
+        assert!(html.contains(r#"id="provider-switch""#));
+        assert!(html.contains(r#"name="provider""#));
+        assert!(html.contains(r#"value="gemini""#));
+        assert!(html.contains(r#"value="openai""#));
+        assert!(html.contains(r#"aria-label="Gemini""#));
+        assert!(html.contains(r#"aria-label="OpenAI""#));
         assert!(!html.contains("Analysis status"));
         assert!(!html.contains("Upload and provider status"));
     }
@@ -256,6 +265,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn analyze_route_rejects_unknown_provider() {
+        let state = AppState::for_test().await;
+        let video = db::video::Video::upload(state.db(), "sample.mp4", b"video bytes".to_vec())
+            .await
+            .expect("video should upload");
+        let body = format!(
+            "provider=anthropic&video_keys={}&prompt=Summarize+the+video",
+            video.file.key()
+        );
+
+        let response = app(state)
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/analysis")
+                    .header("HX-Request", "true")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_text(response).await,
+            "unsupported analysis provider"
+        );
+    }
+
+    #[tokio::test]
     async fn analyze_route_returns_polling_fragment_for_valid_request() {
         let state = AppState::for_test().await;
         let video = db::video::Video::upload(state.db(), "sample.mp4", b"video bytes".to_vec())
@@ -359,7 +399,7 @@ mod tests {
         assert!(html.contains("Delete"));
         assert!(html.contains(r#"type="button""#));
         assert!(html.contains(r#"hx-post="/videos/"#));
-        assert!(html.contains(r#"/delete"#));
+        assert!(html.contains(r#"/delete""#));
         assert!(html.contains(r##"hx-target="#video-workspace""##));
     }
 

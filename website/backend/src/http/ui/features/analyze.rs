@@ -5,8 +5,7 @@ use hypertext::prelude::*;
 use serde::Deserialize;
 
 use crate::{
-    analysis::gemini,
-    db,
+    analysis as ai_analysis, db,
     http::{
         router::AppState,
         ui::{NoInput, Public, Route, RouteContext, RouteError, RouteView, not_found_fragment},
@@ -22,6 +21,8 @@ pub struct AnalyzeView {
 
 #[derive(Deserialize)]
 pub struct AnalyzeInput {
+    #[serde(default)]
+    provider: Option<String>,
     #[serde(default)]
     video_keys: Vec<String>,
     #[serde(default)]
@@ -55,6 +56,10 @@ impl Route for AnalyzeRoute {
             return Err(RouteError::BadRequest("analysis prompt cannot be empty"));
         }
 
+        let provider =
+            ai_analysis::provider_from_value(input.provider.as_deref().unwrap_or("gemini"))
+                .map_err(|_| RouteError::BadRequest("unsupported analysis provider"))?;
+
         for key in &input.video_keys {
             if db::video::Video::find_by_file_key(context.state().db(), key)
                 .await?
@@ -64,8 +69,9 @@ impl Route for AnalyzeRoute {
             }
         }
 
-        let analysis = db::analysis::Analysis::create(
+        let analysis = db::analysis::Analysis::create_with_provider(
             context.state().db(),
+            provider,
             input.prompt.trim(),
             input.video_keys,
         )
@@ -112,23 +118,37 @@ impl RouteView for AnalyzeView {
             @if self.analysis.is_pending() {
                 <div
                     id="analysis-result"
-                    class="whitespace-pre-wrap text-sm leading-6 text-base-content/80"
+                    class="rounded-box border border-base-300 bg-base-200/60 p-4 text-sm leading-6 text-base-content/80 shadow-sm"
                     hx-get=(status_path)
                     hx-trigger="every 2s"
                     hx-swap="outerHTML">
-                    @if self.analysis.status == "queued" {
-                        "Analysis queued"
-                    } @else {
-                        "Analysis running"
-                    }
+                    <div class="flex items-center gap-4">
+                        <span class="loading loading-spinner loading-sm text-primary"></span>
+                        <span class="font-medium">
+                            @if self.analysis.status == "queued" {
+                                "Analysis queued"
+                            } @else {
+                                "Analysis running"
+                            }
+                        </span>
+                    </div>
                 </div>
             } @else if self.analysis.status == "complete" {
-                <div id="analysis-result" class="whitespace-pre-wrap text-sm leading-6 text-base-content/80">
-                    (self.analysis.response.as_deref().unwrap_or(""))
+                <div id="analysis-result" class="rounded-box border border-base-300 bg-base-200/60 p-4 shadow-sm">
+                    <div class="mb-3 flex items-center justify-between gap-3 border-b border-base-300 pb-3">
+                        <h3 class="text-sm font-semibold text-base-content">"Analysis result"</h3>
+                        <span class="badge badge-success badge-outline">"Complete"</span>
+                    </div>
+                    <div class="whitespace-pre-wrap text-sm leading-7 text-base-content/80">
+                        (self.analysis.response.as_deref().unwrap_or(""))
+                    </div>
                 </div>
             } @else {
-                <div id="analysis-result" class="whitespace-pre-wrap text-sm leading-6 text-error">
-                    (self.analysis.error.as_deref().unwrap_or("Analysis failed"))
+                <div id="analysis-result" class="rounded-box border border-error/30 bg-error/10 p-4 text-sm leading-6 text-error shadow-sm">
+                    <div class="mb-2 font-semibold">"Analysis failed"</div>
+                    <div class="whitespace-pre-wrap">
+                        (self.analysis.error.as_deref().unwrap_or("Analysis failed"))
+                    </div>
                 </div>
             }
         }
@@ -162,7 +182,8 @@ async fn run_analysis_job(
         videos.push(video);
     }
 
-    let response = gemini::analyze_videos(&videos, &analysis.prompt).await?;
+    let provider = ai_analysis::provider_from_value(&analysis.provider)?;
+    let response = ai_analysis::analyze_videos(provider, videos, analysis.prompt.clone()).await?;
     analysis.complete(&db, response).await?;
 
     Ok(())

@@ -1,36 +1,38 @@
-use std::env;
+use std::{env, time::Duration};
 
 use reqwest::{
     StatusCode,
     header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderMap},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use thiserror::Error;
+use tokio::time::{Instant, sleep};
 
-use crate::db;
+use crate::{analysis::request::AnalysisRequest, db};
 
 const DEFAULT_MODEL: &str = "gemini-3-flash-preview";
 const UPLOAD_URL: &str = "https://generativelanguage.googleapis.com/upload/v1beta/files";
+const API_URL_PREFIX: &str = "https://generativelanguage.googleapis.com/v1beta";
 const GENERATE_URL_PREFIX: &str = "https://generativelanguage.googleapis.com/v1beta/models";
+const DEFAULT_FILE_PROCESSING_TIMEOUT: Duration = Duration::from_secs(300);
+const FILE_PROCESSING_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 pub async fn analyze_videos(
     videos: &[db::video::VideoAsset],
     prompt: &str,
 ) -> Result<String, GeminiError> {
     let client = GeminiClient::from_env()?;
-    let videos = videos
-        .iter()
-        .map(|asset| VideoInput {
-            name: asset.video.name.clone(),
-            bytes: asset.bytes.clone(),
-        })
-        .collect::<Vec<_>>();
 
-    client.analyze(&videos, prompt).await
+    client
+        .analyze(AnalysisRequest {
+            videos: videos.to_vec(),
+            prompt: prompt.to_owned(),
+        })
+        .await
 }
 
-struct GeminiClient {
+pub struct GeminiClient {
     http: reqwest::Client,
     config: GeminiConfig,
 }
@@ -38,6 +40,7 @@ struct GeminiClient {
 struct GeminiConfig {
     api_key: String,
     model: String,
+    file_processing_timeout: Duration,
 }
 
 struct VideoInput {
@@ -57,6 +60,10 @@ pub enum GeminiError {
     MissingApiKey,
     #[error("Gemini upload response did not include an upload URL")]
     MissingUploadUrl,
+    #[error("Gemini file {name} failed while processing")]
+    FileProcessingFailed { name: String },
+    #[error("Gemini file {name} did not become active within {timeout_secs} seconds")]
+    FileProcessingTimedOut { name: String, timeout_secs: u64 },
     #[error("Gemini API returned {status}: {body}")]
     Api { status: StatusCode, body: String },
     #[error("Gemini did not return any text")]
@@ -68,7 +75,7 @@ pub enum GeminiError {
 }
 
 impl GeminiClient {
-    fn from_env() -> Result<Self, GeminiError> {
+    pub fn from_env() -> Result<Self, GeminiError> {
         let config = GeminiConfig::from_env()?;
 
         Ok(Self {
@@ -77,7 +84,24 @@ impl GeminiClient {
         })
     }
 
-    async fn analyze(&self, videos: &[VideoInput], prompt: &str) -> Result<String, GeminiError> {
+    pub async fn analyze(&self, request: AnalysisRequest) -> Result<String, GeminiError> {
+        let videos = request
+            .videos
+            .iter()
+            .map(|asset| VideoInput {
+                name: asset.video.name.clone(),
+                bytes: asset.bytes.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        self.analyze_inputs(&videos, &request.prompt).await
+    }
+
+    async fn analyze_inputs(
+        &self,
+        videos: &[VideoInput],
+        prompt: &str,
+    ) -> Result<String, GeminiError> {
         let mut files = Vec::with_capacity(videos.len());
 
         for video in videos {
@@ -100,9 +124,10 @@ impl GeminiClient {
             .send()
             .await?;
         let upload: UploadResponse = success_json(response).await?;
+        let file = self.wait_for_file_active(upload.file).await?;
 
         Ok(UploadedFile {
-            uri: upload.file.uri,
+            uri: file.uri,
             mime_type: mime_type.to_owned(),
         })
     }
@@ -138,6 +163,45 @@ impl GeminiClient {
         Ok(upload_url.to_owned())
     }
 
+    async fn wait_for_file_active(
+        &self,
+        mut file: UploadedFileResponse,
+    ) -> Result<UploadedFileResponse, GeminiError> {
+        let deadline = Instant::now() + self.config.file_processing_timeout;
+
+        loop {
+            if file.state.is_active() {
+                return Ok(file);
+            }
+
+            if file.state.is_failed() {
+                return Err(GeminiError::FileProcessingFailed { name: file.name });
+            }
+
+            if Instant::now() >= deadline {
+                return Err(GeminiError::FileProcessingTimedOut {
+                    name: file.name,
+                    timeout_secs: self.config.file_processing_timeout.as_secs(),
+                });
+            }
+
+            sleep(FILE_PROCESSING_POLL_INTERVAL).await;
+            file = self.get_file(&file.name).await?;
+        }
+    }
+
+    async fn get_file(&self, name: &str) -> Result<UploadedFileResponse, GeminiError> {
+        let response = self
+            .http
+            .get(format!("{API_URL_PREFIX}/{name}"))
+            .header("x-goog-api-key", &self.config.api_key)
+            .send()
+            .await?;
+        let response: GetFileResponse = success_json(response).await?;
+
+        Ok(response.into_file())
+    }
+
     async fn generate_content(
         &self,
         files: &[UploadedFile],
@@ -170,8 +234,17 @@ impl GeminiConfig {
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
+        let file_processing_timeout = env::var("GEMINI_FILE_PROCESSING_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(DEFAULT_FILE_PROCESSING_TIMEOUT);
 
-        Ok(Self { api_key, model })
+        Ok(Self {
+            api_key,
+            model,
+            file_processing_timeout,
+        })
     }
 }
 
@@ -247,8 +320,68 @@ struct UploadResponse {
 }
 
 #[derive(Deserialize)]
+#[serde(untagged)]
+enum GetFileResponse {
+    Wrapped { file: UploadedFileResponse },
+    Direct(UploadedFileResponse),
+}
+
+impl GetFileResponse {
+    fn into_file(self) -> UploadedFileResponse {
+        match self {
+            Self::Wrapped { file } | Self::Direct(file) => file,
+        }
+    }
+}
+
+#[derive(Deserialize)]
 struct UploadedFileResponse {
+    name: String,
     uri: String,
+    #[serde(default, deserialize_with = "deserialize_file_state")]
+    state: FileState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FileState {
+    Unspecified,
+    Processing,
+    Active,
+    Failed,
+}
+
+impl Default for FileState {
+    fn default() -> Self {
+        Self::Unspecified
+    }
+}
+
+impl FileState {
+    fn is_active(self) -> bool {
+        matches!(self, Self::Active)
+    }
+
+    fn is_failed(self) -> bool {
+        matches!(self, Self::Failed)
+    }
+
+    fn is_waitable(self) -> bool {
+        matches!(self, Self::Unspecified | Self::Processing)
+    }
+}
+
+fn deserialize_file_state<'de, D>(deserializer: D) -> Result<FileState, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let state = Option::<String>::deserialize(deserializer)?;
+
+    Ok(match state.as_deref() {
+        Some("ACTIVE") => FileState::Active,
+        Some("FAILED") => FileState::Failed,
+        Some("PROCESSING") => FileState::Processing,
+        _ => FileState::Unspecified,
+    })
 }
 
 #[derive(Deserialize)]
@@ -343,5 +476,48 @@ mod tests {
                 }]
             })
         );
+    }
+
+    #[test]
+    fn upload_response_keeps_file_name_uri_and_state() {
+        let response: UploadResponse = serde_json::from_value(json!({
+            "file": {
+                "name": "files/46pyf29h2xti",
+                "uri": "https://generativelanguage.googleapis.com/v1beta/files/46pyf29h2xti",
+                "state": "PROCESSING"
+            }
+        }))
+        .expect("upload response should deserialize");
+
+        assert_eq!(response.file.name, "files/46pyf29h2xti");
+        assert_eq!(
+            response.file.uri,
+            "https://generativelanguage.googleapis.com/v1beta/files/46pyf29h2xti"
+        );
+        assert_eq!(response.file.state, FileState::Processing);
+    }
+
+    #[test]
+    fn get_file_response_accepts_direct_file_shape() {
+        let response: GetFileResponse = serde_json::from_value(json!({
+            "name": "files/46pyf29h2xti",
+            "uri": "https://generativelanguage.googleapis.com/v1beta/files/46pyf29h2xti",
+            "state": "ACTIVE"
+        }))
+        .expect("get file response should deserialize");
+        let file = response.into_file();
+
+        assert_eq!(file.name, "files/46pyf29h2xti");
+        assert_eq!(file.state, FileState::Active);
+    }
+
+    #[test]
+    fn file_state_detects_ready_and_failed_states() {
+        assert!(FileState::Active.is_active());
+        assert!(!FileState::Processing.is_active());
+        assert!(FileState::Failed.is_failed());
+        assert!(FileState::Unspecified.is_waitable());
+        assert!(FileState::Processing.is_waitable());
+        assert!(!FileState::Failed.is_waitable());
     }
 }

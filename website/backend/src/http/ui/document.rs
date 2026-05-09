@@ -6,7 +6,7 @@ const STYLES: &str = include_str!("styles.generated.css");
 /// Render a full HTML document around a UI route body.
 pub fn document(_state: &AppState, title: &str, body: impl Renderable) -> impl Renderable {
     rsx! {
-        <html lang="en" data-theme="goodfox">
+        <html lang="en">
             <head>
                 <meta charset="utf-8" />
                 <meta name="viewport" content="width=device-width, initial-scale=1" />

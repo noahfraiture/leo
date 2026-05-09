@@ -31,6 +31,7 @@ pub struct Video {
     pub file: File,
 }
 
+#[derive(Clone)]
 pub struct VideoAsset {
     pub video: Video,
     pub bytes: Vec<u8>,
