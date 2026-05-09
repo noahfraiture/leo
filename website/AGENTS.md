@@ -35,24 +35,26 @@ The videos files will live in surrealdb with the new file support. They will als
 ### Operational
 
 5. Tooling and workflow instructions for agents belong in `AGENTS.md`; implementation guidance belongs in code comments.
-6. Run project workflows through the flake dev shell, usually `nix develop -c task ...`.
-7. Use Taskfile entrypoints instead of ad hoc command sequences when a task exists.
-8. Keep the tracked `.local` file as the local configuration source; do not introduce `*.example` config files.
-9. When reorganizing functions within a file, prefer public functions first, then private helpers in top-down call order.
-10. SurrealDB runs embedded in the backend process. Do not add a required local SurrealDB server task unless the architecture changes.
-11. Prefer public struct fields for simple data models over trivial accessor methods.
+6. When the user asks a question or asks to discuss a design, answer and discuss first. Do not edit files unless the user explicitly asks for an implementation or confirms the direction.
+7. Run project workflows through the flake dev shell, usually `nix develop -c task ...`.
+8. Use Taskfile entrypoints instead of ad hoc command sequences when a task exists.
+9. Keep the tracked `.local` file as the local configuration source; do not introduce `*.example` config files.
+10. When reorganizing functions within a file, prefer public functions first, then private helpers in top-down call order.
+11. SurrealDB runs embedded in the backend process. Do not add a required local SurrealDB server task unless the architecture changes.
+12. Prefer public struct fields for simple data models over trivial accessor methods.
 
 ### Backend UI
 
-12. Keep a single mounted page `Route` / `RouteView` pair per file.
-13. Keep backend UI feature files page-oriented. Extract a shared file only when markup or logic is meaningfully reused.
-14. Do not extract a render helper that is called only once from the same file unless it materially improves readability.
-15. Meaningful composable fragments should be embedded `Route` / `RouteView` types in their own file, not plain helper functions.
-16. Full pages render through `document()`. `fragment()` is the HTMX and embedding render surface.
-17. Prefer DaisyUI classes and semantic state tokens over raw Tailwind color utilities when DaisyUI has an equivalent.
-18. Prefer native axum extractors such as `Path`, `Query`, `Form`, `Multipart`, and tuples of extractors for route input. Only introduce custom input/extractor types when they add validation or behavior that axum extractors cannot express cleanly.
+13. Keep a single mounted page `Route` / `RouteView` pair per file.
+14. Keep backend UI feature files page-oriented. Extract a shared file only when markup or logic is meaningfully reused.
+15. Do not extract a render helper that is called only once from the same file unless it materially improves readability.
+16. Meaningful composable fragments should be embedded `Route` / `RouteView` types in their own file, not plain helper functions.
+17. Full pages render through `document()`. `fragment()` is the HTMX and embedding render surface.
+18. Prefer DaisyUI classes and semantic state tokens over raw Tailwind color utilities when DaisyUI has an equivalent.
+19. Prefer native axum extractors such as `Path`, `Query`, `Form`, `Multipart`, and tuples of extractors for route input. Match the existing `Route::Input = (Path<T>, NoInput)` style for path-only UI routes instead of hand-parsing request URIs.
+20. Only introduce custom input/extractor types when they add validation or behavior that axum extractors cannot express cleanly, such as parsing repeated HTML form fields into `Vec<T>`.
 
 ### Tests
 
-19. Keep tests focused on non-trivial behavior and shared contracts.
-20. Do not add tests for straightforward UI composition or refactor-only changes unless the user asked for them or the change introduces logic.
+21. Keep tests focused on non-trivial behavior and shared contracts.
+22. Do not add tests for straightforward UI composition or refactor-only changes unless the user asked for them or the change introduces logic.
