@@ -44,10 +44,6 @@ jobs:
         id: image
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
-      - name: Set up QEMU
-        if: steps.dockerfile.outputs.ready == 'true'
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         if: steps.dockerfile.outputs.ready == 'true'
         uses: docker/setup-buildx-action@v3
@@ -83,10 +79,47 @@ jobs:
         with:
           context: ./website
           file: ./website/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summarize published image
+        if: steps.dockerfile.outputs.ready == 'true'
+        run: |
+          primary_tag="${{ steps.image.outputs.name }}:sha-${GITHUB_SHA::7}"
+
+          {
+            echo "## Published image"
+            echo
+            echo "Primary tag:"
+            echo
+            echo '```'
+            echo "$primary_tag"
+            echo '```'
+            echo
+            echo "All tags:"
+            echo
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo
+            echo "Digest:"
+            echo
+            echo '```'
+            echo "${{ steps.push.outputs.digest }}"
+            echo '```'
+            echo
+            echo "Digest-pinned pull:"
+            echo
+            echo '```sh'
+            echo "docker pull ${{ steps.image.outputs.name }}@${{ steps.push.outputs.digest }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "::notice title=Published image::$primary_tag"
 
       - name: Generate artifact attestation
         if: steps.dockerfile.outputs.ready == 'true'

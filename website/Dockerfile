@@ -3,10 +3,12 @@
 FROM node:22-bookworm-slim AS css
 WORKDIR /app
 
-RUN npm install -g pnpm@10
+RUN --mount=type=cache,target=/root/.npm \
+    npm install -g pnpm@10
 
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile
 
 COPY backend/src/http/ui ./backend/src/http/ui
 RUN pnpm run build:css
@@ -19,19 +21,24 @@ COPY backend/src ./backend/src
 COPY --from=css /app/backend/src/http/ui/styles.generated.css ./backend/src/http/ui/styles.generated.css
 
 WORKDIR /app/backend
-RUN cargo build --release --locked
+RUN --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/backend/target \
+    cargo build --release --locked \
+    && cp target/release/video-analysis /usr/local/bin/video-analysis
 
 FROM debian:bookworm-slim AS runtime
 
-RUN apt-get update \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates ffmpeg \
-    && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 app \
     && useradd --create-home --uid 10001 --gid 10001 app \
     && mkdir -p /data/uploads \
     && chown -R app:app /data
 
-COPY --from=builder /app/backend/target/release/video-analysis /usr/local/bin/video-analysis
+COPY --from=builder /usr/local/bin/video-analysis /usr/local/bin/video-analysis
 
 ENV PORT=8080 \
     SURREAL_URL=surrealkv:///data/surrealdb \
