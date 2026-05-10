@@ -12,6 +12,7 @@ pub fn document(_state: &AppState, title: &str, body: impl Renderable) -> impl R
                 <meta name="viewport" content="width=device-width, initial-scale=1" />
                 <title>(title)</title>
                 <style>(Raw::dangerously_create(STYLES))</style>
+                <style>"[x-cloak] { display: none !important; }"</style>
                 <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.8/dist/htmx.min.js"></script>
                 <script defer="defer" src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
                 <script>

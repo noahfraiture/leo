@@ -166,6 +166,9 @@ mod tests {
         assert!(html.contains(r#"value="openai""#));
         assert!(html.contains(r#"aria-label="Gemini""#));
         assert!(html.contains(r#"aria-label="OpenAI""#));
+        assert!(html.contains(r#"x-model="provider""#));
+        assert!(html.contains(r#"x-show="provider === 'openai'""#));
+        assert!(html.contains("x-cloak"));
         assert!(html.contains(r#"name="frame_sample_rate_fps""#));
         assert!(html.contains(r#"value="2""#));
         assert!(html.contains(r#"value="4""#));

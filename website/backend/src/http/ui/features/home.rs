@@ -228,6 +228,7 @@ fn analysis_prompt(videos: &[db::video::Video]) -> impl Renderable {
                 class="space-y-5 rounded-box border border-base-300 bg-base-100 p-5 shadow-sm"
                 method="post"
                 action="/analysis"
+                "x-data"="{ provider: 'gemini' }"
                 hx-post="/analysis"
                 hx-target="#analysis-result"
                 hx-swap="outerHTML"
@@ -263,7 +264,7 @@ fn analysis_prompt(videos: &[db::video::Video]) -> impl Renderable {
 
 fn frame_sampling_selection() -> impl Renderable {
     rsx! {
-        <fieldset class="space-y-3">
+        <fieldset class="space-y-3" "x-show"="provider === 'openai'" "x-cloak"="">
             <legend class="text-sm font-medium text-base-content">"Frame sampling"</legend>
             <div class="join flex-wrap">
                 <input
@@ -318,6 +319,7 @@ fn analysis_provider_selection() -> impl Renderable {
                     type="radio"
                     name="provider"
                     value="gemini"
+                    "x-model"="provider"
                     aria-label="Gemini"
                     checked="checked" />
                 <input
@@ -325,6 +327,7 @@ fn analysis_provider_selection() -> impl Renderable {
                     type="radio"
                     name="provider"
                     value="openai"
+                    "x-model"="provider"
                     aria-label="OpenAI" />
             </div>
         </fieldset>
