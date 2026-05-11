@@ -85,8 +85,12 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: |
+            type=gha,scope=website-image
+            type=registry,ref=${{ steps.image.outputs.name }}:buildcache
+          cache-to: |
+            type=gha,scope=website-image,mode=max
+            type=registry,ref=${{ steps.image.outputs.name }}:buildcache,mode=max,oci-mediatypes=true
 
       - name: Summarize published image
         if: steps.dockerfile.outputs.ready == 'true'
