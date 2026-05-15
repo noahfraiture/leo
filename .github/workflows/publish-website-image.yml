@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - main
-    tags:
-      - "v*.*.*"
     paths:
       - ".github/workflows/publish-website-image.yml"
       - "website/**"
@@ -41,10 +39,16 @@ jobs:
             echo "ready=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Set image name
+      - name: Set image tags
         if: steps.dockerfile.outputs.ready == 'true'
         id: image
-        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+        run: |
+          image_name="ghcr.io/noahfraiture/leo"
+          short_sha="${GITHUB_SHA::7}"
+
+          echo "name=$image_name" >> "$GITHUB_OUTPUT"
+          echo "prod_tag=prod-${GITHUB_RUN_NUMBER}-${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         if: steps.dockerfile.outputs.ready == 'true'
@@ -58,22 +62,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract Docker metadata
-        if: steps.dockerfile.outputs.ready == 'true'
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ steps.image.outputs.name }}
-          flavor: |
-            latest=false
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=branch
-            type=ref,event=tag
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=sha-
-
       - name: Build and push Docker image
         if: steps.dockerfile.outputs.ready == 'true'
         id: push
@@ -83,8 +71,12 @@ jobs:
           file: ./website/Dockerfile
           platforms: linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ steps.image.outputs.prod_tag }}
+            ${{ steps.image.outputs.name }}:${{ steps.image.outputs.sha_tag }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
           cache-from: |
             type=gha,scope=website-image
             type=registry,ref=${{ steps.image.outputs.name }}:buildcache
@@ -95,21 +87,22 @@ jobs:
       - name: Summarize published image
         if: steps.dockerfile.outputs.ready == 'true'
         run: |
-          primary_tag="${{ steps.image.outputs.name }}:sha-${GITHUB_SHA::7}"
+          prod_ref="${{ steps.image.outputs.name }}:${{ steps.image.outputs.prod_tag }}"
+          sha_ref="${{ steps.image.outputs.name }}:${{ steps.image.outputs.sha_tag }}"
 
           {
             echo "## Published image"
             echo
-            echo "Primary tag:"
+            echo "Flux deployment tag:"
             echo
             echo '```'
-            echo "$primary_tag"
+            echo "$prod_ref"
             echo '```'
             echo
-            echo "All tags:"
+            echo "Immutable source tag:"
             echo
             echo '```'
-            echo "${{ steps.meta.outputs.tags }}"
+            echo "$sha_ref"
             echo '```'
             echo
             echo "Digest:"
@@ -125,7 +118,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-          echo "::notice title=Published image::$primary_tag"
+          echo "::notice title=Published image::$prod_ref"
 
       - name: Generate artifact attestation
         if: steps.dockerfile.outputs.ready == 'true'
