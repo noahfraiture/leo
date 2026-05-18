@@ -381,6 +381,7 @@ pub(super) fn video_option(video: &db::video::Video) -> impl Renderable {
     );
     let delete_label = format!("Delete {}", video.name);
     let delete_confirm = format!("Delete {}?", video.name);
+    let size_label = megabyte_label(video.size);
 
     rsx! {
         <div class="flex items-center gap-2 rounded-box border border-base-300 hover:bg-base-200">
@@ -395,7 +396,7 @@ pub(super) fn video_option(video: &db::video::Video) -> impl Renderable {
                         (video.name.as_str())
                     </span>
                     <span class="block text-xs text-base-content/60">
-                        (format!("{} bytes", video.size))
+                        (size_label)
                     </span>
                 </span>
             </label>
@@ -412,6 +413,10 @@ pub(super) fn video_option(video: &db::video::Video) -> impl Renderable {
             </button>
         </div>
     }
+}
+
+fn megabyte_label(bytes: u64) -> String {
+    format!("{:.2} MB", bytes as f64 / 1_000_000.0)
 }
 
 fn recent_analyses(

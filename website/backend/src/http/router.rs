@@ -280,6 +280,8 @@ mod tests {
         assert!(html.contains(r#"x-bind:src="selectedVideo""#));
         assert!(html.contains(video.path.as_str()));
         assert!(html.contains("sample.mp4"));
+        assert!(html.contains("0.00 MB"));
+        assert!(!html.contains("11 bytes"));
     }
 
     #[tokio::test]
