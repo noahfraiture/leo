@@ -8,7 +8,7 @@ mod test;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = db::init().await?;
-    http::router::run(db).await?;
+    let runtime = db::init_runtime().await?;
+    http::router::run(runtime.db, runtime.upload_bucket_path).await?;
     Ok(())
 }

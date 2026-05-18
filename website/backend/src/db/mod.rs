@@ -6,4 +6,6 @@ pub use models::analysis;
 #[allow(unused_imports)]
 pub use models::video;
 #[allow(unused_imports)]
-pub use runtime::{Database, DbConfigError, DbInitError, bootstrap, init};
+pub use runtime::{
+    Database, DatabaseRuntime, DbConfigError, DbInitError, bootstrap, init, init_runtime,
+};

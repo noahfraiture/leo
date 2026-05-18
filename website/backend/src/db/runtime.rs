@@ -21,7 +21,16 @@ use super::models::{
 
 pub type Database = Surreal<Any>;
 
+pub struct DatabaseRuntime {
+    pub db: Database,
+    pub upload_bucket_path: PathBuf,
+}
+
 pub async fn init() -> Result<Database, DbInitError> {
+    Ok(init_runtime().await?.db)
+}
+
+pub async fn init_runtime() -> Result<DatabaseRuntime, DbInitError> {
     let config = DatabaseConfig::from_env()?;
     let local = config.local_paths()?;
     local.prepare()?;
@@ -34,7 +43,10 @@ pub async fn init() -> Result<Database, DbInitError> {
         &local.upload_bucket_path,
     )
     .await?;
-    Ok(db)
+    Ok(DatabaseRuntime {
+        db,
+        upload_bucket_path: local.upload_bucket_path,
+    })
 }
 
 pub async fn bootstrap(

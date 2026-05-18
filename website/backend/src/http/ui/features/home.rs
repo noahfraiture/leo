@@ -114,11 +114,8 @@ fn video_intake(videos: &[db::video::Video]) -> impl Renderable {
                 method="post"
                 action="/videos"
                 enctype="multipart/form-data"
-                hx-post="/videos"
-                hx-encoding="multipart/form-data"
-                hx-target="#video-workspace"
-                hx-swap="outerHTML"
-                hx-indicator="#upload-indicator">
+                "x-data"="chunkedVideoUpload"
+                "x-on:submit.prevent"="upload">
                 <p class="text-sm font-semibold uppercase tracking-[0.22em] text-base-content/60">
                     "Upload"
                 </p>
@@ -131,7 +128,8 @@ fn video_intake(videos: &[db::video::Video]) -> impl Renderable {
                         type="file"
                         name="video"
                         accept="video/*"
-                        required="required" />
+                        required="required"
+                        "x-ref"="video" />
                     <span class="text-xs text-base-content/60">
                         (format!("Uploads are limited to {MAX_VIDEO_UPLOAD_SIZE_LABEL}."))
                     </span>
@@ -144,11 +142,30 @@ fn video_intake(videos: &[db::video::Video]) -> impl Renderable {
                     <div class="flex items-center gap-3">
                         <span
                             id="upload-indicator"
-                            class="htmx-indicator inline-flex items-center gap-2 text-sm text-base-content/70">
+                            class="inline-flex items-center gap-2 text-sm text-base-content/70"
+                            "x-show"="uploading"
+                            "x-cloak"="x-cloak">
                             <span class="loading loading-spinner loading-sm"></span>
-                            "Uploading"
+                            <span "x-text"="status">"Uploading"</span>
                         </span>
-                        <button class="btn btn-primary" type="submit">"Upload"</button>
+                        <span
+                            class="text-sm text-base-content/70"
+                            "x-show"="!uploading && status"
+                            "x-text"="status"
+                            "x-cloak"="x-cloak">
+                        </span>
+                        <span
+                            class="text-sm text-error"
+                            "x-show"="error"
+                            "x-text"="error"
+                            "x-cloak"="x-cloak">
+                        </span>
+                        <button
+                            class="btn btn-primary"
+                            type="submit"
+                            "x-bind:disabled"="uploading">
+                            "Upload"
+                        </button>
                     </div>
                 </div>
             </form>

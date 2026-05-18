@@ -1,17 +1,20 @@
-use std::env;
+use std::{env, path::PathBuf};
 
 use axum::{
     Router,
     extract::{DefaultBodyLimit, Request},
     middleware::{self, Next},
     response::Response,
-    routing::{MethodFilter, get},
+    routing::{MethodFilter, delete, get, post, put},
 };
 
 use crate::{db, http::ui};
 
 pub const MAX_VIDEO_UPLOAD_SIZE_BYTES: usize = 4 * 1024 * 1024 * 1024;
 pub const MAX_VIDEO_UPLOAD_SIZE_LABEL: &str = "4 GiB";
+pub const VIDEO_UPLOAD_CHUNK_SIZE_BYTES: usize = 64 * 1024 * 1024;
+pub const VIDEO_UPLOAD_CHUNK_REQUEST_LIMIT_BYTES: usize =
+    VIDEO_UPLOAD_CHUNK_SIZE_BYTES + 1024 * 1024;
 
 /// Shared application services passed through axum state and reused by UI
 /// route dispatch.
@@ -23,12 +26,19 @@ pub const MAX_VIDEO_UPLOAD_SIZE_LABEL: &str = "4 GiB";
 #[derive(Clone)]
 pub struct AppState {
     db: db::Database,
+    chunked_uploads: ui::features::ChunkedUploadStore,
     run_analysis_jobs: bool,
 }
 
-pub async fn run(db: db::Database) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(
+    db: db::Database,
+    upload_bucket_path: PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState {
         db,
+        chunked_uploads: ui::features::ChunkedUploadStore::new(
+            upload_bucket_path.join(".partial"),
+        )?,
         run_analysis_jobs: true,
     };
 
@@ -61,6 +71,21 @@ pub fn app(state: AppState) -> Router {
             "/videos",
             ui::route::<ui::features::UploadVideoRoute>(MethodFilter::POST),
         )
+        .route("/videos/uploads", post(ui::features::start_chunked_upload))
+        .route(
+            "/videos/uploads/{upload_id}/chunks/{chunk_index}",
+            put(ui::features::upload_chunk).layer(DefaultBodyLimit::max(
+                VIDEO_UPLOAD_CHUNK_REQUEST_LIMIT_BYTES,
+            )),
+        )
+        .route(
+            "/videos/uploads/{upload_id}/complete",
+            post(ui::features::complete_chunked_upload),
+        )
+        .route(
+            "/videos/uploads/{upload_id}",
+            delete(ui::features::cancel_chunked_upload),
+        )
         .route(
             "/videos/{video_key}/delete",
             ui::route::<ui::features::DeleteVideoRoute>(MethodFilter::POST),
@@ -89,16 +114,26 @@ impl AppState {
         &self.db
     }
 
+    pub fn chunked_uploads(&self) -> &ui::features::ChunkedUploadStore {
+        &self.chunked_uploads
+    }
+
     pub fn runs_analysis_jobs(&self) -> bool {
         self.run_analysis_jobs
     }
 
     #[cfg(test)]
     pub async fn for_test() -> Self {
+        let test_database = crate::test::database::init_with_bucket_path()
+            .await
+            .expect("test database should initialize");
+
         Self {
-            db: crate::test::database::init()
-                .await
-                .expect("test database should initialize"),
+            db: test_database.db,
+            chunked_uploads: ui::features::ChunkedUploadStore::new(
+                test_database.upload_bucket_path.join(".partial"),
+            )
+            .expect("test chunk staging should initialize"),
             run_analysis_jobs: false,
         }
     }
@@ -110,6 +145,7 @@ mod tests {
         body::{Body, to_bytes},
         http::{Request as HttpRequest, StatusCode},
     };
+    use serde_json::{Value, json};
     use tower::ServiceExt;
 
     use super::*;
@@ -121,8 +157,44 @@ mod tests {
         String::from_utf8(body.to_vec()).expect("response body should be utf8")
     }
 
+    async fn response_json(response: Response) -> Value {
+        serde_json::from_str(&response_text(response).await).expect("response body should be json")
+    }
+
     async fn test_app() -> Router {
         app(AppState::for_test().await)
+    }
+
+    async fn start_chunked_upload(app: &Router, filename: &str, size: u64) -> String {
+        let response = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/videos/uploads")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        json!({ "filename": filename, "size": size }).to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response_json(response).await;
+        assert_eq!(
+            payload["chunk_size"].as_u64(),
+            Some(VIDEO_UPLOAD_CHUNK_SIZE_BYTES as u64)
+        );
+        assert_eq!(
+            payload["max_size"].as_u64(),
+            Some(MAX_VIDEO_UPLOAD_SIZE_BYTES as u64)
+        );
+        payload["upload_id"]
+            .as_str()
+            .expect("upload id should be returned")
+            .to_owned()
     }
 
     #[tokio::test]
@@ -163,6 +235,10 @@ mod tests {
         assert!(html.contains("Upload videos"));
         assert!(html.contains("Uploads are limited to 4 GiB."));
         assert!(html.contains("alpinejs"));
+        assert!(html.contains(r#"x-data="chunkedVideoUpload"#));
+        assert!(html.contains(r#"x-ref="video""#));
+        assert!(html.contains(r#"x-on:submit.prevent="upload""#));
+        assert!(html.contains(r#"x-text="status""#));
         assert!(html.contains(r#"x-data="videoPlayer"#));
         assert!(html.contains(r#"id="provider-switch""#));
         assert!(html.contains(r#"name="provider""#));
@@ -493,6 +569,176 @@ mod tests {
         assert!(html.contains(r#"hx-post="/videos/"#));
         assert!(html.contains(r#"/delete""#));
         assert!(html.contains(r##"hx-target="#video-workspace""##));
+    }
+
+    #[tokio::test]
+    async fn chunked_video_upload_completes_and_returns_updated_workspace() {
+        let state = AppState::for_test().await;
+        let app = app(state.clone());
+        let first = b"video ".to_vec();
+        let second = b"bytes".to_vec();
+        let upload_id =
+            start_chunked_upload(&app, "sample.mp4", (first.len() + second.len()) as u64).await;
+
+        for (index, chunk) in [first.as_slice(), second.as_slice()]
+            .into_iter()
+            .enumerate()
+        {
+            let response = app
+                .clone()
+                .oneshot(
+                    HttpRequest::builder()
+                        .method("PUT")
+                        .uri(format!("/videos/uploads/{upload_id}/chunks/{index}"))
+                        .header("Content-Type", "application/octet-stream")
+                        .body(Body::from(chunk.to_vec()))
+                        .expect("request should build"),
+                )
+                .await
+                .expect("request should complete");
+
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri(format!("/videos/uploads/{upload_id}/complete"))
+                    .header("HX-Request", "true")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        let status = response.status();
+        let html = response_text(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains(r#"id="video-workspace""#));
+        assert!(html.contains("sample.mp4"));
+
+        let stored = db::video::Video::read_by_name(state.db(), "sample.mp4")
+            .await
+            .expect("video should read")
+            .expect("video should exist");
+        assert_eq!(stored.bytes, b"video bytes");
+    }
+
+    #[tokio::test]
+    async fn chunked_upload_start_rejects_invalid_sizes() {
+        let app = test_app().await;
+
+        let empty_response = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/videos/uploads")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        json!({ "filename": "empty.mp4", "size": 0 }).to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(empty_response.status(), StatusCode::BAD_REQUEST);
+
+        let oversized_response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/videos/uploads")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "filename": "oversized.mp4",
+                            "size": MAX_VIDEO_UPLOAD_SIZE_BYTES as u64 + 1
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(oversized_response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn chunked_upload_rejects_oversized_chunk_body() {
+        let app = test_app().await;
+        let upload_id = start_chunked_upload(
+            &app,
+            "oversized-chunk.mp4",
+            VIDEO_UPLOAD_CHUNK_SIZE_BYTES as u64 + 1,
+        )
+        .await;
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("PUT")
+                    .uri(format!("/videos/uploads/{upload_id}/chunks/0"))
+                    .header("Content-Type", "application/octet-stream")
+                    .body(Body::from(vec![0; VIDEO_UPLOAD_CHUNK_SIZE_BYTES + 1]))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn chunked_upload_rejects_out_of_order_chunk_indexes() {
+        let app = test_app().await;
+        let upload_id = start_chunked_upload(&app, "sample.mp4", 10).await;
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("PUT")
+                    .uri(format!("/videos/uploads/{upload_id}/chunks/1"))
+                    .header("Content-Type", "application/octet-stream")
+                    .body(Body::from("video"))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn chunked_upload_cancel_removes_session() {
+        let app = test_app().await;
+        let upload_id = start_chunked_upload(&app, "sample.mp4", 10).await;
+
+        let cancel_response = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("DELETE")
+                    .uri(format!("/videos/uploads/{upload_id}"))
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(cancel_response.status(), StatusCode::NO_CONTENT);
+
+        let complete_response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri(format!("/videos/uploads/{upload_id}/complete"))
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(complete_response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
