@@ -188,7 +188,7 @@ impl Video {
     pub async fn upload(
         db: &Database,
         name: impl Into<String>,
-        bytes: impl Into<Vec<u8>>,
+        bytes: impl Into<Bytes>,
     ) -> Result<Video, VideoError> {
         let name = name.into();
         let bytes = bytes.into();
@@ -214,7 +214,7 @@ impl Video {
                 path,
                 size,
                 file,
-                bytes: Bytes::from(bytes),
+                bytes,
             })
             .await?;
 

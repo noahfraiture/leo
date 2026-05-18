@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use axum::extract::Multipart;
+use axum::{body::Bytes, extract::Multipart};
 use hypertext::prelude::*;
 
 use crate::{
@@ -60,7 +60,7 @@ impl RouteView for UploadVideoView {
     }
 }
 
-async fn uploaded_video(multipart: &mut Multipart) -> Result<(String, Vec<u8>), RouteError> {
+async fn uploaded_video(multipart: &mut Multipart) -> Result<(String, Bytes), RouteError> {
     while let Some(field) = multipart
         .next_field()
         .await
@@ -77,8 +77,7 @@ async fn uploaded_video(multipart: &mut Multipart) -> Result<(String, Vec<u8>), 
         let bytes = field
             .bytes()
             .await
-            .map_err(|_| RouteError::BadRequest("invalid video upload"))?
-            .to_vec();
+            .map_err(|_| RouteError::BadRequest("invalid video upload"))?;
 
         if bytes.is_empty() {
             return Err(RouteError::BadRequest("video upload cannot be empty"));

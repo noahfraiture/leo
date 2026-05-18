@@ -10,6 +10,9 @@ use axum::{
 
 use crate::{db, http::ui};
 
+pub const MAX_VIDEO_UPLOAD_SIZE_BYTES: usize = 4 * 1024 * 1024 * 1024;
+pub const MAX_VIDEO_UPLOAD_SIZE_LABEL: &str = "4 GiB";
+
 /// Shared application services passed through axum state and reused by UI
 /// route dispatch.
 ///
@@ -63,7 +66,7 @@ pub fn app(state: AppState) -> Router {
             ui::route::<ui::features::DeleteVideoRoute>(MethodFilter::POST),
         )
         .with_state(state)
-        .layer(DefaultBodyLimit::max(512 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(MAX_VIDEO_UPLOAD_SIZE_BYTES))
         .layer(middleware::from_fn(log_request))
 }
 
@@ -158,6 +161,7 @@ mod tests {
         assert!(!html.contains("<html lang=en data-theme="));
         assert!(!html.contains(r#"<html lang="en" data-theme="#));
         assert!(html.contains("Upload videos"));
+        assert!(html.contains("Uploads are limited to 4 GiB."));
         assert!(html.contains("alpinejs"));
         assert!(html.contains(r#"x-data="videoPlayer"#));
         assert!(html.contains(r#"id="provider-switch""#));

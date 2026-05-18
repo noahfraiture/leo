@@ -5,7 +5,7 @@ use hypertext::prelude::*;
 use crate::{
     db,
     http::{
-        router::AppState,
+        router::{AppState, MAX_VIDEO_UPLOAD_SIZE_LABEL},
         ui::{
             NoInput, Public, Route, RouteContext, RouteError, RouteView, document,
             not_found_fragment,
@@ -132,6 +132,9 @@ fn video_intake(videos: &[db::video::Video]) -> impl Renderable {
                         name="video"
                         accept="video/*"
                         required="required" />
+                    <span class="text-xs text-base-content/60">
+                        (format!("Uploads are limited to {MAX_VIDEO_UPLOAD_SIZE_LABEL}."))
+                    </span>
                 </label>
 
                 <div class="flex flex-wrap items-center justify-between gap-3">
