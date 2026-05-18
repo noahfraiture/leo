@@ -19,6 +19,8 @@ const UPLOAD_URL: &str = "https://generativelanguage.googleapis.com/upload/v1bet
 const API_URL_PREFIX: &str = "https://generativelanguage.googleapis.com/v1beta";
 const GENERATE_URL_PREFIX: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 const DEFAULT_FILE_PROCESSING_TIMEOUT: Duration = Duration::from_secs(300);
+const DEFAULT_UPLOAD_CHUNK_GRANULARITY_BYTES: usize = 256 * 1024;
+const DEFAULT_UPLOAD_CHUNK_SIZE_BYTES: usize = 16 * 1024 * 1024;
 const FILE_PROCESSING_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 mod prompts {
@@ -56,11 +58,45 @@ struct GeminiConfig {
     api_key: String,
     model: String,
     file_processing_timeout: Duration,
+    upload_chunk_size: usize,
 }
 
 struct VideoInput {
     name: String,
     bytes: Vec<u8>,
+}
+
+struct UploadSession {
+    url: String,
+    chunk_granularity: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UploadChunk {
+    offset: usize,
+    end: usize,
+    command: UploadCommand,
+}
+
+impl UploadChunk {
+    fn len(self) -> usize {
+        self.end - self.offset
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UploadCommand {
+    Upload,
+    UploadAndFinalize,
+}
+
+impl UploadCommand {
+    fn as_header(self) -> &'static str {
+        match self {
+            Self::Upload => "upload",
+            Self::UploadAndFinalize => "upload, finalize",
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -83,6 +119,21 @@ pub enum GeminiError {
     Api { status: StatusCode, body: String },
     #[error("Gemini did not return any text")]
     EmptyResponse,
+    #[error("Gemini upload chunk granularity header was invalid: {value}")]
+    InvalidUploadChunkGranularity { value: String },
+    #[error(
+        "Gemini upload request failed for {name} at offset {offset} ({bytes} bytes, timeout={timeout}, connect={connect}, body={body}): {source}"
+    )]
+    UploadRequest {
+        name: String,
+        offset: usize,
+        bytes: usize,
+        timeout: bool,
+        connect: bool,
+        body: bool,
+        #[source]
+        source: reqwest::Error,
+    },
     #[error(transparent)]
     Header(#[from] reqwest::header::ToStrError),
     #[error(transparent)]
@@ -128,17 +179,10 @@ impl GeminiClient {
 
     async fn upload_video(&self, video: &VideoInput) -> Result<UploadedFile, GeminiError> {
         let mime_type = video_mime_type(&video.name);
-        let upload_url = self.start_upload(video, mime_type).await?;
-        let response = self
-            .http
-            .post(upload_url)
-            .header(CONTENT_LENGTH, video.bytes.len())
-            .header("X-Goog-Upload-Offset", "0")
-            .header("X-Goog-Upload-Command", "upload, finalize")
-            .body(video.bytes.clone())
-            .send()
+        let upload_session = self.start_upload(video, mime_type).await?;
+        let upload = self
+            .upload_video_chunks(video, &upload_session, mime_type)
             .await?;
-        let upload: UploadResponse = success_json(response).await?;
         let file = self.wait_for_file_active(upload.file).await?;
 
         Ok(UploadedFile {
@@ -151,7 +195,7 @@ impl GeminiClient {
         &self,
         video: &VideoInput,
         mime_type: &'static str,
-    ) -> Result<String, GeminiError> {
+    ) -> Result<UploadSession, GeminiError> {
         let response = self
             .http
             .post(UPLOAD_URL)
@@ -170,12 +214,68 @@ impl GeminiClient {
             .await?;
 
         let headers = success_headers(response).await?;
-        let upload_url = headers
-            .get("x-goog-upload-url")
-            .ok_or(GeminiError::MissingUploadUrl)?
-            .to_str()?;
+        upload_session_from_headers(&headers)
+    }
 
-        Ok(upload_url.to_owned())
+    async fn upload_video_chunks(
+        &self,
+        video: &VideoInput,
+        session: &UploadSession,
+        mime_type: &'static str,
+    ) -> Result<UploadResponse, GeminiError> {
+        let chunks = upload_chunks(
+            video.bytes.len(),
+            session.chunk_granularity,
+            self.config.upload_chunk_size,
+        );
+        eprintln!(
+            "[gemini] uploading video name={} bytes={} mime={} chunks={} chunk_size={} granularity={}",
+            video.name,
+            video.bytes.len(),
+            mime_type,
+            chunks.len(),
+            self.config.upload_chunk_size,
+            session.chunk_granularity
+        );
+
+        for (chunk_index, chunk) in chunks.iter().copied().enumerate() {
+            eprintln!(
+                "[gemini] upload chunk name={} chunk={}/{} offset={} bytes={} command={}",
+                video.name,
+                chunk_index + 1,
+                chunks.len(),
+                chunk.offset,
+                chunk.len(),
+                chunk.command.as_header()
+            );
+            let response = self
+                .http
+                .post(&session.url)
+                .header("x-goog-api-key", &self.config.api_key)
+                .header(CONTENT_LENGTH, chunk.len())
+                .header("X-Goog-Upload-Offset", chunk.offset.to_string())
+                .header("X-Goog-Upload-Command", chunk.command.as_header())
+                .body(video.bytes[chunk.offset..chunk.end].to_vec())
+                .send()
+                .await
+                .map_err(|source| GeminiError::UploadRequest {
+                    name: video.name.clone(),
+                    offset: chunk.offset,
+                    bytes: chunk.len(),
+                    timeout: source.is_timeout(),
+                    connect: source.is_connect(),
+                    body: source.is_body(),
+                    source,
+                })?;
+
+            if chunk.command == UploadCommand::UploadAndFinalize {
+                return success_json(response).await;
+            }
+
+            success_upload_chunk(response).await?;
+        }
+
+        Err(GeminiError::EmptyResponse)
     }
 
     async fn wait_for_file_active(
@@ -254,11 +354,17 @@ impl GeminiConfig {
             .and_then(|value| value.parse::<u64>().ok())
             .map(Duration::from_secs)
             .unwrap_or(DEFAULT_FILE_PROCESSING_TIMEOUT);
+        let upload_chunk_size = env::var("GEMINI_UPLOAD_CHUNK_SIZE_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_UPLOAD_CHUNK_SIZE_BYTES);
 
         Ok(Self {
             api_key,
             model,
             file_processing_timeout,
+            upload_chunk_size,
         })
     }
 }
@@ -290,6 +396,87 @@ where
         status,
         body: response.text().await.unwrap_or_default(),
     })
+}
+
+async fn success_upload_chunk(response: reqwest::Response) -> Result<(), GeminiError> {
+    let status = response.status();
+
+    if status.is_success() || status.as_u16() == 308 {
+        return Ok(());
+    }
+
+    Err(GeminiError::Api {
+        status,
+        body: response.text().await.unwrap_or_default(),
+    })
+}
+
+fn upload_session_from_headers(headers: &HeaderMap) -> Result<UploadSession, GeminiError> {
+    let url = headers
+        .get("x-goog-upload-url")
+        .ok_or(GeminiError::MissingUploadUrl)?
+        .to_str()?
+        .to_owned();
+    let chunk_granularity = match headers.get("x-goog-upload-chunk-granularity") {
+        Some(value) => {
+            let value = value.to_str()?;
+            value
+                .parse::<usize>()
+                .map_err(|_| GeminiError::InvalidUploadChunkGranularity {
+                    value: value.to_owned(),
+                })?
+        }
+        None => DEFAULT_UPLOAD_CHUNK_GRANULARITY_BYTES,
+    };
+
+    Ok(UploadSession {
+        url,
+        chunk_granularity: chunk_granularity.max(1),
+    })
+}
+
+fn upload_chunks(
+    total_bytes: usize,
+    chunk_granularity: usize,
+    preferred_chunk_size: usize,
+) -> Vec<UploadChunk> {
+    if total_bytes == 0 {
+        return vec![UploadChunk {
+            offset: 0,
+            end: 0,
+            command: UploadCommand::UploadAndFinalize,
+        }];
+    }
+
+    let chunk_granularity = chunk_granularity.max(1);
+    let preferred_chunk_size = preferred_chunk_size.max(chunk_granularity);
+    let chunk_size = (preferred_chunk_size / chunk_granularity)
+        .saturating_mul(chunk_granularity)
+        .max(chunk_granularity);
+    let mut chunks = Vec::new();
+    let mut offset = 0;
+
+    while offset < total_bytes {
+        let remaining = total_bytes - offset;
+        let is_last = remaining <= chunk_size;
+        let end = if is_last {
+            total_bytes
+        } else {
+            offset + chunk_size
+        };
+        chunks.push(UploadChunk {
+            offset,
+            end,
+            command: if is_last {
+                UploadCommand::UploadAndFinalize
+            } else {
+                UploadCommand::Upload
+            },
+        });
+        offset = end;
+    }
+
+    chunks
 }
 
 fn generate_content_request(files: &[UploadedFile], prompt: &str) -> Value {
@@ -524,6 +711,78 @@ mod tests {
 
         assert_eq!(file.name, "files/46pyf29h2xti");
         assert_eq!(file.state, FileState::Active);
+    }
+
+    #[test]
+    fn upload_chunks_split_large_files_on_preferred_boundaries() {
+        let chunks = upload_chunks(36, 4, 16);
+
+        assert_eq!(
+            chunks,
+            vec![
+                UploadChunk {
+                    offset: 0,
+                    end: 16,
+                    command: UploadCommand::Upload,
+                },
+                UploadChunk {
+                    offset: 16,
+                    end: 32,
+                    command: UploadCommand::Upload,
+                },
+                UploadChunk {
+                    offset: 32,
+                    end: 36,
+                    command: UploadCommand::UploadAndFinalize,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn upload_chunks_respect_google_chunk_granularity() {
+        let chunks = upload_chunks(37, 6, 16);
+
+        assert_eq!(
+            chunks,
+            vec![
+                UploadChunk {
+                    offset: 0,
+                    end: 12,
+                    command: UploadCommand::Upload,
+                },
+                UploadChunk {
+                    offset: 12,
+                    end: 24,
+                    command: UploadCommand::Upload,
+                },
+                UploadChunk {
+                    offset: 24,
+                    end: 36,
+                    command: UploadCommand::Upload,
+                },
+                UploadChunk {
+                    offset: 36,
+                    end: 37,
+                    command: UploadCommand::UploadAndFinalize,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn upload_session_reads_chunk_granularity_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-goog-upload-url",
+            "https://uploads.example/session".parse().unwrap(),
+        );
+        headers.insert("x-goog-upload-chunk-granularity", "262144".parse().unwrap());
+
+        let session = upload_session_from_headers(&headers).expect("session should parse");
+
+        assert_eq!(session.url, "https://uploads.example/session");
+        assert_eq!(session.chunk_granularity, 262144);
     }
 
     #[test]
