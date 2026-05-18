@@ -19,9 +19,11 @@ const UPLOAD_URL: &str = "https://generativelanguage.googleapis.com/upload/v1bet
 const API_URL_PREFIX: &str = "https://generativelanguage.googleapis.com/v1beta";
 const GENERATE_URL_PREFIX: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 const DEFAULT_FILE_PROCESSING_TIMEOUT: Duration = Duration::from_secs(300);
+const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_UPLOAD_CHUNK_GRANULARITY_BYTES: usize = 256 * 1024;
-const DEFAULT_UPLOAD_CHUNK_SIZE_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_UPLOAD_CHUNK_SIZE_BYTES: usize = 8 * 1024 * 1024;
 const FILE_PROCESSING_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const MAX_UPLOAD_CHUNK_ATTEMPTS: usize = 4;
 
 mod prompts {
     /// Gemini currently receives the raw user prompt after the uploaded videos.
@@ -111,6 +113,8 @@ pub enum GeminiError {
     MissingApiKey,
     #[error("Gemini upload response did not include an upload URL")]
     MissingUploadUrl,
+    #[error("Gemini upload query response did not include a received-size offset")]
+    MissingUploadOffset,
     #[error("Gemini file {name} failed while processing")]
     FileProcessingFailed { name: String },
     #[error("Gemini file {name} did not become active within {timeout_secs} seconds")]
@@ -121,6 +125,8 @@ pub enum GeminiError {
     EmptyResponse,
     #[error("Gemini upload chunk granularity header was invalid: {value}")]
     InvalidUploadChunkGranularity { value: String },
+    #[error("Gemini upload received-size offset header was invalid: {value}")]
+    InvalidUploadOffset { value: String },
     #[error(
         "Gemini upload request failed for {name} at offset {offset} ({bytes} bytes, timeout={timeout}, connect={connect}, body={body}): {source}"
     )]
@@ -140,12 +146,35 @@ pub enum GeminiError {
     Http(#[from] reqwest::Error),
 }
 
+impl GeminiError {
+    fn is_retriable_upload_failure(&self) -> bool {
+        match self {
+            Self::UploadRequest {
+                timeout,
+                connect,
+                body,
+                ..
+            } => *timeout || *connect || *body,
+            Self::Api { status, .. } => {
+                status.is_server_error()
+                    || matches!(
+                        *status,
+                        StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
+                    )
+            }
+            _ => false,
+        }
+    }
+}
+
 impl GeminiClient {
     pub fn from_env() -> Result<Self, GeminiError> {
         let config = GeminiConfig::from_env()?;
 
         Ok(Self {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(DEFAULT_HTTP_TIMEOUT)
+                .build()?,
             config,
         })
     }
@@ -223,59 +252,147 @@ impl GeminiClient {
         session: &UploadSession,
         mime_type: &'static str,
     ) -> Result<UploadResponse, GeminiError> {
-        let chunks = upload_chunks(
-            video.bytes.len(),
+        let total_bytes = video.bytes.len();
+        let total_chunks = upload_chunks(
+            total_bytes,
             session.chunk_granularity,
             self.config.upload_chunk_size,
-        );
+        )
+        .len();
         eprintln!(
             "[gemini] uploading video name={} bytes={} mime={} chunks={} chunk_size={} granularity={}",
             video.name,
-            video.bytes.len(),
+            total_bytes,
             mime_type,
-            chunks.len(),
+            total_chunks,
             self.config.upload_chunk_size,
             session.chunk_granularity
         );
 
-        for (chunk_index, chunk) in chunks.iter().copied().enumerate() {
+        let mut offset = 0;
+        let mut chunk_index = 0;
+        let mut attempts_at_offset = 0;
+
+        while offset < total_bytes {
+            let chunk = next_upload_chunk(
+                total_bytes,
+                offset,
+                session.chunk_granularity,
+                self.config.upload_chunk_size,
+            );
+            attempts_at_offset += 1;
             eprintln!(
-                "[gemini] upload chunk name={} chunk={}/{} offset={} bytes={} command={}",
+                "[gemini] upload chunk name={} chunk={}/{} offset={} bytes={} command={} attempt={}/{}",
                 video.name,
                 chunk_index + 1,
-                chunks.len(),
+                total_chunks,
                 chunk.offset,
                 chunk.len(),
-                chunk.command.as_header()
+                chunk.command.as_header(),
+                attempts_at_offset,
+                MAX_UPLOAD_CHUNK_ATTEMPTS
             );
-            let response = self
-                .http
-                .post(&session.url)
-                .header("x-goog-api-key", &self.config.api_key)
-                .header(CONTENT_LENGTH, chunk.len())
-                .header("X-Goog-Upload-Offset", chunk.offset.to_string())
-                .header("X-Goog-Upload-Command", chunk.command.as_header())
-                .body(video.bytes[chunk.offset..chunk.end].to_vec())
-                .send()
-                .await
-                .map_err(|source| GeminiError::UploadRequest {
-                    name: video.name.clone(),
-                    offset: chunk.offset,
-                    bytes: chunk.len(),
-                    timeout: source.is_timeout(),
-                    connect: source.is_connect(),
-                    body: source.is_body(),
-                    source,
-                })?;
 
-            if chunk.command == UploadCommand::UploadAndFinalize {
-                return success_json(response).await;
+            match self.send_upload_chunk(video, session, chunk).await {
+                Ok(Some(upload)) => return Ok(upload),
+                Ok(None) => {
+                    offset = chunk.end;
+                    chunk_index += 1;
+                    attempts_at_offset = 0;
+                }
+                Err(error) if error.is_retriable_upload_failure() => {
+                    if attempts_at_offset >= MAX_UPLOAD_CHUNK_ATTEMPTS {
+                        return Err(error);
+                    }
+
+                    eprintln!(
+                        "[gemini] upload chunk retry name={} offset={} error={}",
+                        video.name, chunk.offset, error
+                    );
+                    let received_offset = self.query_upload_offset(session).await?;
+                    eprintln!(
+                        "[gemini] upload query name={} requested_offset={} received_offset={}",
+                        video.name, chunk.offset, received_offset
+                    );
+
+                    if received_offset > total_bytes {
+                        return Err(GeminiError::InvalidUploadOffset {
+                            value: received_offset.to_string(),
+                        });
+                    }
+
+                    if received_offset > offset {
+                        offset = received_offset;
+                        chunk_index = upload_chunks(
+                            offset,
+                            session.chunk_granularity,
+                            self.config.upload_chunk_size,
+                        )
+                        .len();
+                        attempts_at_offset = 0;
+                    }
+                }
+                Err(error) => return Err(error),
             }
-
-            success_upload_chunk(response).await?;
         }
 
-        Err(GeminiError::EmptyResponse)
+        let chunk = UploadChunk {
+            offset: total_bytes,
+            end: total_bytes,
+            command: UploadCommand::UploadAndFinalize,
+        };
+        match self.send_upload_chunk(video, session, chunk).await? {
+            Some(upload) => Ok(upload),
+            None => Err(GeminiError::EmptyResponse),
+        }
+    }
+
+    async fn send_upload_chunk(
+        &self,
+        video: &VideoInput,
+        session: &UploadSession,
+        chunk: UploadChunk,
+    ) -> Result<Option<UploadResponse>, GeminiError> {
+        let response = self
+            .http
+            .post(&session.url)
+            .header("x-goog-api-key", &self.config.api_key)
+            .header(CONTENT_LENGTH, chunk.len())
+            .header("X-Goog-Upload-Offset", chunk.offset.to_string())
+            .header("X-Goog-Upload-Command", chunk.command.as_header())
+            .body(video.bytes[chunk.offset..chunk.end].to_vec())
+            .send()
+            .await
+            .map_err(|source| GeminiError::UploadRequest {
+                name: video.name.clone(),
+                offset: chunk.offset,
+                bytes: chunk.len(),
+                timeout: source.is_timeout(),
+                connect: source.is_connect(),
+                body: source.is_body(),
+                source,
+            })?;
+
+        if chunk.command == UploadCommand::UploadAndFinalize {
+            return Ok(Some(success_json(response).await?));
+        }
+
+        success_upload_chunk(response).await?;
+        Ok(None)
+    }
+
+    async fn query_upload_offset(&self, session: &UploadSession) -> Result<usize, GeminiError> {
+        let response = self
+            .http
+            .post(&session.url)
+            .header("x-goog-api-key", &self.config.api_key)
+            .header(CONTENT_LENGTH, 0)
+            .header("X-Goog-Upload-Command", "query")
+            .send()
+            .await?;
+        let headers = success_headers(response).await?;
+
+        upload_offset_from_headers(&headers)
     }
 
     async fn wait_for_file_active(
@@ -477,6 +594,49 @@ fn upload_chunks(
     }
 
     chunks
+}
+
+fn next_upload_chunk(
+    total_bytes: usize,
+    offset: usize,
+    chunk_granularity: usize,
+    preferred_chunk_size: usize,
+) -> UploadChunk {
+    let chunk_granularity = chunk_granularity.max(1);
+    let preferred_chunk_size = preferred_chunk_size.max(chunk_granularity);
+    let chunk_size = (preferred_chunk_size / chunk_granularity)
+        .saturating_mul(chunk_granularity)
+        .max(chunk_granularity);
+    let remaining = total_bytes - offset;
+    let is_last = remaining <= chunk_size;
+    let end = if is_last {
+        total_bytes
+    } else {
+        offset + chunk_size
+    };
+
+    UploadChunk {
+        offset,
+        end,
+        command: if is_last {
+            UploadCommand::UploadAndFinalize
+        } else {
+            UploadCommand::Upload
+        },
+    }
+}
+
+fn upload_offset_from_headers(headers: &HeaderMap) -> Result<usize, GeminiError> {
+    let value = headers
+        .get("x-goog-upload-size-received")
+        .ok_or(GeminiError::MissingUploadOffset)?
+        .to_str()?;
+
+    value
+        .parse::<usize>()
+        .map_err(|_| GeminiError::InvalidUploadOffset {
+            value: value.to_owned(),
+        })
 }
 
 fn generate_content_request(files: &[UploadedFile], prompt: &str) -> Value {
@@ -783,6 +943,16 @@ mod tests {
 
         assert_eq!(session.url, "https://uploads.example/session");
         assert_eq!(session.chunk_granularity, 262144);
+    }
+
+    #[test]
+    fn upload_offset_reads_resumable_query_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-goog-upload-size-received", "83886080".parse().unwrap());
+
+        let offset = upload_offset_from_headers(&headers).expect("offset should parse");
+
+        assert_eq!(offset, 83886080);
     }
 
     #[test]
