@@ -309,7 +309,9 @@ impl GeminiClient {
                         "[gemini] upload chunk retry name={} offset={} error={}",
                         video.name, chunk.offset, error
                     );
-                    let received_offset = self.query_upload_offset(session).await?;
+                    let received_offset = self
+                        .query_upload_offset_with_retries(video, session, chunk.offset)
+                        .await?;
                     eprintln!(
                         "[gemini] upload query name={} requested_offset={} received_offset={}",
                         video.name, chunk.offset, received_offset
@@ -381,7 +383,41 @@ impl GeminiClient {
         Ok(None)
     }
 
-    async fn query_upload_offset(&self, session: &UploadSession) -> Result<usize, GeminiError> {
+    async fn query_upload_offset_with_retries(
+        &self,
+        video: &VideoInput,
+        session: &UploadSession,
+        requested_offset: usize,
+    ) -> Result<usize, GeminiError> {
+        for attempt in 1..=MAX_UPLOAD_CHUNK_ATTEMPTS {
+            match self
+                .query_upload_offset(video, session, requested_offset)
+                .await
+            {
+                Ok(offset) => return Ok(offset),
+                Err(error)
+                    if error.is_retriable_upload_failure()
+                        && attempt < MAX_UPLOAD_CHUNK_ATTEMPTS =>
+                {
+                    eprintln!(
+                        "[gemini] upload query retry name={} requested_offset={} attempt={}/{} error={}",
+                        video.name, requested_offset, attempt, MAX_UPLOAD_CHUNK_ATTEMPTS, error
+                    );
+                    sleep(Duration::from_secs(attempt as u64)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        unreachable!("upload query retry loop should return")
+    }
+
+    async fn query_upload_offset(
+        &self,
+        video: &VideoInput,
+        session: &UploadSession,
+        requested_offset: usize,
+    ) -> Result<usize, GeminiError> {
         let response = self
             .http
             .post(&session.url)
@@ -389,7 +425,16 @@ impl GeminiClient {
             .header(CONTENT_LENGTH, 0)
             .header("X-Goog-Upload-Command", "query")
             .send()
-            .await?;
+            .await
+            .map_err(|source| GeminiError::UploadRequest {
+                name: video.name.clone(),
+                offset: requested_offset,
+                bytes: 0,
+                timeout: source.is_timeout(),
+                connect: source.is_connect(),
+                body: source.is_body(),
+                source,
+            })?;
         let headers = success_headers(response).await?;
 
         upload_offset_from_headers(&headers)
@@ -786,6 +831,7 @@ struct ResponsePart {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::TcpListener;
 
     #[test]
     fn video_mime_type_maps_supported_extensions() {
@@ -953,6 +999,60 @@ mod tests {
         let offset = upload_offset_from_headers(&headers).expect("offset should parse");
 
         assert_eq!(offset, 83886080);
+    }
+
+    #[tokio::test]
+    async fn upload_query_timeout_uses_retriable_upload_context() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have addr");
+        tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.expect("connection should accept");
+            sleep(Duration::from_secs(1)).await;
+        });
+        let client = GeminiClient {
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_millis(25))
+                .build()
+                .expect("client should build"),
+            config: GeminiConfig {
+                api_key: "test-key".to_owned(),
+                model: "test-model".to_owned(),
+                file_processing_timeout: Duration::from_secs(1),
+                upload_chunk_size: 8,
+            },
+        };
+        let video = VideoInput {
+            name: "large.mp4".to_owned(),
+            bytes: Vec::new(),
+        };
+        let session = UploadSession {
+            url: format!("http://{address}/upload"),
+            chunk_granularity: 1,
+        };
+
+        let error = client
+            .query_upload_offset(&video, &session, 123)
+            .await
+            .expect_err("query should time out");
+
+        assert!(error.is_retriable_upload_failure());
+        match error {
+            GeminiError::UploadRequest {
+                name,
+                offset,
+                bytes,
+                timeout,
+                ..
+            } => {
+                assert_eq!(name, "large.mp4");
+                assert_eq!(offset, 123);
+                assert_eq!(bytes, 0);
+                assert!(timeout);
+            }
+            other => panic!("expected upload request error, got {other}"),
+        }
     }
 
     #[test]
