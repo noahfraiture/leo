@@ -239,6 +239,8 @@ mod tests {
         assert!(html.contains(r#"x-ref="video""#));
         assert!(html.contains(r#"x-on:submit.prevent="upload""#));
         assert!(html.contains(r#"x-text="status""#));
+        assert!(html.contains("maxChunkAttempts"));
+        assert!(html.contains("uploadChunkWithRetry"));
         assert!(html.contains(r#"x-data="videoPlayer"#));
         assert!(html.contains(r#"id="provider-switch""#));
         assert!(html.contains(r#"name="provider""#));
@@ -621,6 +623,50 @@ mod tests {
         assert!(html.contains("sample.mp4"));
 
         let stored = db::video::Video::read_by_name(state.db(), "sample.mp4")
+            .await
+            .expect("video should read")
+            .expect("video should exist");
+        assert_eq!(stored.bytes, b"video bytes");
+    }
+
+    #[tokio::test]
+    async fn chunked_upload_accepts_duplicate_completed_chunk_retries() {
+        let state = AppState::for_test().await;
+        let app = app(state.clone());
+        let upload_id = start_chunked_upload(&app, "retry.mp4", 11).await;
+
+        for index in [0, 0, 1] {
+            let chunk = if index == 0 { "video " } else { "bytes" };
+            let response = app
+                .clone()
+                .oneshot(
+                    HttpRequest::builder()
+                        .method("PUT")
+                        .uri(format!("/videos/uploads/{upload_id}/chunks/{index}"))
+                        .header("Content-Type", "application/octet-stream")
+                        .body(Body::from(chunk))
+                        .expect("request should build"),
+                )
+                .await
+                .expect("request should complete");
+
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri(format!("/videos/uploads/{upload_id}/complete"))
+                    .header("HX-Request", "true")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let stored = db::video::Video::read_by_name(state.db(), "retry.mp4")
             .await
             .expect("video should read")
             .expect("video should exist");

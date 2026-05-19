@@ -23,6 +23,7 @@ pub fn document(_state: &AppState, title: &str, body: impl Renderable) -> impl R
                                 uploading: false,
                                 status: "",
                                 error: "",
+                                maxChunkAttempts: 4,
                                 async upload() {
                                     const file = this.$refs.video.files[0];
                                     if (!file) {
@@ -55,17 +56,7 @@ pub fn document(_state: &AppState, title: &str, body: impl Renderable) -> impl R
                                             const chunk = file.slice(startByte, endByte);
 
                                             this.status = `Uploading ${index + 1} / ${totalChunks} chunks`;
-                                            const chunkResponse = await fetch(
-                                                `/videos/uploads/${encodeURIComponent(uploadId)}/chunks/${index}`,
-                                                {
-                                                    method: "PUT",
-                                                    headers: { "Content-Type": "application/octet-stream" },
-                                                    body: chunk,
-                                                },
-                                            );
-                                            if (!chunkResponse.ok) {
-                                                throw new Error(await chunkResponse.text());
-                                            }
+                                            await this.uploadChunkWithRetry(uploadId, index, chunk, totalChunks);
                                         }
 
                                         this.status = "Finalizing upload";
@@ -105,6 +96,39 @@ pub fn document(_state: &AppState, title: &str, body: impl Renderable) -> impl R
                                     } finally {
                                         this.uploading = false;
                                     }
+                                },
+                                async uploadChunkWithRetry(uploadId, index, chunk, totalChunks) {
+                                    let lastError = "Upload failed";
+
+                                    for (let attempt = 1; attempt <= this.maxChunkAttempts; attempt += 1) {
+                                        if (attempt > 1) {
+                                            this.status = `Retrying ${index + 1} / ${totalChunks} chunks`;
+                                        }
+
+                                        try {
+                                            const response = await fetch(
+                                                `/videos/uploads/${encodeURIComponent(uploadId)}/chunks/${index}`,
+                                                {
+                                                    method: "PUT",
+                                                    headers: { "Content-Type": "application/octet-stream" },
+                                                    body: chunk,
+                                                },
+                                            );
+                                            if (response.ok) {
+                                                return;
+                                            }
+
+                                            lastError = await response.text();
+                                        } catch (error) {
+                                            lastError = error.message || lastError;
+                                        }
+
+                                        if (attempt < this.maxChunkAttempts) {
+                                            await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+                                        }
+                                    }
+
+                                    throw new Error(lastError);
                                 },
                             }));
 

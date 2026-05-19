@@ -238,6 +238,10 @@ impl ChunkedUploadStore {
             .get_mut(upload_id)
             .ok_or(ChunkedUploadError::NotFound)?;
 
+        if chunk_index < session.next_chunk_index {
+            return Ok(());
+        }
+
         if chunk_index != session.next_chunk_index {
             return Err(ChunkedUploadError::OutOfOrder {
                 expected: session.next_chunk_index,
