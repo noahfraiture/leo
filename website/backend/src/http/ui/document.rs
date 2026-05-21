@@ -110,7 +110,11 @@ pub fn document(_state: &AppState, title: &str, body: impl Renderable) -> impl R
                                                 `/videos/uploads/${encodeURIComponent(uploadId)}/chunks/${index}`,
                                                 {
                                                     method: "PUT",
-                                                    headers: { "Content-Type": "application/octet-stream" },
+                                                    headers: {
+                                                        "Content-Type": "application/octet-stream",
+                                                        "X-Upload-Chunk-Attempt": String(attempt),
+                                                        "X-Upload-Total-Chunks": String(totalChunks),
+                                                    },
                                                     body: chunk,
                                                 },
                                             );

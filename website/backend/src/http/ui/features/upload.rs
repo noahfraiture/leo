@@ -10,11 +10,12 @@ use axum::{
     Json,
     body::Bytes,
     extract::{Multipart, Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use hypertext::prelude::*;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use thiserror::Error;
 use tokio::{
     fs::{self, OpenOptions},
@@ -355,28 +356,107 @@ pub async fn start_chunked_upload(
     State(state): State<AppState>,
     Json(input): Json<StartChunkedUpload>,
 ) -> Response {
-    match state
-        .chunked_uploads()
-        .create(input.filename, input.size)
-        .await
-    {
-        Ok(response) => Json(response).into_response(),
-        Err(error) => error.into_response(),
+    let filename = input.filename;
+    let size = input.size;
+    match state.chunked_uploads().create(filename.clone(), size).await {
+        Ok(response) => {
+            state
+                .metrics()
+                .increment("leo_upload_sessions_total", &[("result", "started")]);
+            eprintln!(
+                "{}",
+                json!({
+                    "level": "info",
+                    "component": "upload",
+                    "event": "session_started",
+                    "upload_id": response.upload_id,
+                    "filename": filename,
+                    "declared_size": size,
+                    "chunk_size": response.chunk_size,
+                    "max_size": response.max_size,
+                })
+            );
+            Json(response).into_response()
+        }
+        Err(error) => {
+            state
+                .metrics()
+                .increment("leo_upload_sessions_total", &[("result", "failed")]);
+            eprintln!(
+                "{}",
+                json!({
+                    "level": "error",
+                    "component": "upload",
+                    "event": "session_failed",
+                    "error": error.to_string(),
+                })
+            );
+            error.into_response()
+        }
     }
 }
 
 pub async fn upload_chunk(
     State(state): State<AppState>,
     Path((upload_id, chunk_index)): Path<(String, u64)>,
+    headers: HeaderMap,
     bytes: Bytes,
 ) -> Response {
+    let chunk_attempt = headers
+        .get("X-Upload-Chunk-Attempt")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(1);
+    let total_chunks = headers
+        .get("X-Upload-Total-Chunks")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    let chunk_bytes = bytes.len();
+
     match state
         .chunked_uploads()
         .append_chunk(&upload_id, chunk_index, bytes)
         .await
     {
-        Ok(()) => StatusCode::OK.into_response(),
-        Err(error) => error.into_response(),
+        Ok(()) => {
+            state
+                .metrics()
+                .increment("leo_upload_chunks_total", &[("result", "accepted")]);
+            eprintln!(
+                "{}",
+                json!({
+                    "level": "info",
+                    "component": "upload",
+                    "event": "chunk_accepted",
+                    "upload_id": upload_id,
+                    "chunk_index": chunk_index,
+                    "client_attempt": chunk_attempt,
+                    "total_chunks": total_chunks,
+                    "chunk_bytes": chunk_bytes,
+                })
+            );
+            StatusCode::OK.into_response()
+        }
+        Err(error) => {
+            state
+                .metrics()
+                .increment("leo_upload_chunks_total", &[("result", "failed")]);
+            eprintln!(
+                "{}",
+                json!({
+                    "level": "error",
+                    "component": "upload",
+                    "event": "chunk_failed",
+                    "upload_id": upload_id,
+                    "chunk_index": chunk_index,
+                    "client_attempt": chunk_attempt,
+                    "total_chunks": total_chunks,
+                    "chunk_bytes": chunk_bytes,
+                    "error": error.to_string(),
+                })
+            );
+            error.into_response()
+        }
     }
 }
 
@@ -390,8 +470,23 @@ pub async fn complete_chunked_upload(
     };
 
     if let Err(error) = db::video::Video::upload(state.db(), filename, bytes).await {
+        state
+            .metrics()
+            .increment("leo_upload_sessions_total", &[("result", "failed")]);
         return RouteError::from(error).into_response();
     }
+    state
+        .metrics()
+        .increment("leo_upload_sessions_total", &[("result", "completed")]);
+    eprintln!(
+        "{}",
+        json!({
+            "level": "info",
+            "component": "upload",
+            "event": "session_completed",
+            "upload_id": upload_id,
+        })
+    );
 
     match db::video::Video::list(state.db()).await {
         Ok(videos) => UploadVideoView { videos }.render_fragment(&state),

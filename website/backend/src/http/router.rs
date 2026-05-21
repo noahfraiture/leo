@@ -7,8 +7,12 @@ use axum::{
     response::Response,
     routing::{MethodFilter, delete, get, post, put},
 };
+use serde_json::json;
 
-use crate::{db, http::ui};
+use crate::{
+    db,
+    http::{metrics::AppMetrics, ui},
+};
 
 pub const MAX_VIDEO_UPLOAD_SIZE_BYTES: usize = 4 * 1024 * 1024 * 1024;
 pub const MAX_VIDEO_UPLOAD_SIZE_LABEL: &str = "4 GiB";
@@ -27,6 +31,7 @@ pub const VIDEO_UPLOAD_CHUNK_REQUEST_LIMIT_BYTES: usize =
 pub struct AppState {
     db: db::Database,
     chunked_uploads: ui::features::ChunkedUploadStore,
+    metrics: AppMetrics,
     run_analysis_jobs: bool,
 }
 
@@ -39,14 +44,24 @@ pub async fn run(
         chunked_uploads: ui::features::ChunkedUploadStore::new(
             upload_bucket_path.join(".partial"),
         )?,
+        metrics: AppMetrics::default(),
         run_analysis_jobs: true,
     };
+    crate::http::canary::spawn_canary(state.clone());
 
     let port = env::var("PORT")
         .unwrap_or_else(|_| "8080".to_owned())
         .parse::<u16>()?;
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
-    println!("Listening on http://0.0.0.0:{port}");
+    println!(
+        "{}",
+        json!({
+            "level": "info",
+            "component": "http",
+            "event": "listening",
+            "addr": format!("0.0.0.0:{port}"),
+        })
+    );
     Ok(axum::serve(listener, app(state)).await?)
 }
 
@@ -58,6 +73,7 @@ pub fn app(state: AppState) -> Router {
             ui::route::<ui::features::AnalysesPage>(MethodFilter::GET),
         )
         .route("/healthz", get(ui::features::healthz))
+        .route("/metrics", get(crate::http::metrics::serve_metrics))
         .route("/video/{key}", get(crate::http::video::serve))
         .route(
             "/analysis",
@@ -104,7 +120,17 @@ async fn log_request(request: Request, next: Next) -> Response {
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.eq_ignore_ascii_case("true"));
 
-    println!("[http] {method} {uri} htmx={is_htmx}");
+    println!(
+        "{}",
+        json!({
+            "level": "info",
+            "component": "http",
+            "event": "request",
+            "method": method.to_string(),
+            "uri": uri.to_string(),
+            "htmx": is_htmx,
+        })
+    );
 
     next.run(request).await
 }
@@ -116,6 +142,10 @@ impl AppState {
 
     pub fn chunked_uploads(&self) -> &ui::features::ChunkedUploadStore {
         &self.chunked_uploads
+    }
+
+    pub fn metrics(&self) -> &AppMetrics {
+        &self.metrics
     }
 
     pub fn runs_analysis_jobs(&self) -> bool {
@@ -134,6 +164,7 @@ impl AppState {
                 test_database.upload_bucket_path.join(".partial"),
             )
             .expect("test chunk staging should initialize"),
+            metrics: AppMetrics::default(),
             run_analysis_jobs: false,
         }
     }
@@ -496,6 +527,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn analysis_status_route_renders_failure_diagnostics_and_events() {
+        let state = AppState::for_test().await;
+        let analysis = db::analysis::Analysis::create(
+            state.db(),
+            "Summarize the video",
+            vec!["sample.mp4".to_owned()],
+        )
+        .await
+        .expect("analysis should create");
+        db::analysis::AnalysisEvent::record(
+            state.db(),
+            db::analysis::NewAnalysisEvent {
+                analysis_key: analysis.key(),
+                provider: "openai".to_owned(),
+                stage: "provider_request".to_owned(),
+                level: "error".to_owned(),
+                message: "provider request failed".to_owned(),
+                attempt: Some(3),
+                attempts: Some(3),
+                payload_bytes: Some(2048),
+                offset_bytes: None,
+                size_bytes: None,
+                duration_ms: Some(9000),
+            },
+        )
+        .await
+        .expect("event should record");
+        analysis
+            .fail_with_diagnostic(
+                state.db(),
+                db::analysis::AnalysisFailureDiagnostic {
+                    stage: "provider_request".to_owned(),
+                    kind: "timeout".to_owned(),
+                    retryable: true,
+                    attempt: Some(3),
+                    attempts: Some(3),
+                    payload_bytes: Some(2048),
+                    message: "provider request failed".to_owned(),
+                },
+            )
+            .await
+            .expect("analysis should fail");
+
+        let response = app(state)
+            .oneshot(
+                HttpRequest::builder()
+                    .uri(format!("/analysis/{}", analysis.key()))
+                    .header("HX-Request", "true")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        let html = response_text(response).await;
+
+        assert!(html.contains("Failure diagnostics"));
+        assert!(html.contains("provider_request"));
+        assert!(html.contains("timeout"));
+        assert!(html.contains("provider request failed"));
+        assert!(html.contains("Event history"));
+    }
+
+    #[tokio::test]
     async fn analyses_page_renders_paginated_analysis_history() {
         let state = AppState::for_test().await;
         let video = db::video::Video::upload(state.db(), "sample.mp4", b"video bytes".to_vec())
@@ -787,6 +881,64 @@ mod tests {
             .await
             .expect("request should complete");
         assert_eq!(complete_response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn metrics_route_exports_analysis_and_upload_counters() {
+        let state = AppState::for_test().await;
+        let video = db::video::Video::upload(state.db(), "sample.mp4", b"video bytes".to_vec())
+            .await
+            .expect("video should upload");
+        let app = app(state);
+        let upload_id = start_chunked_upload(&app, "metrics.mp4", 5).await;
+
+        let chunk_response = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("PUT")
+                    .uri(format!("/videos/uploads/{upload_id}/chunks/0"))
+                    .header("Content-Type", "application/octet-stream")
+                    .body(Body::from("bytes"))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(chunk_response.status(), StatusCode::OK);
+
+        let body = format!(
+            "provider=openai&video_keys={}&prompt=Summarize",
+            video.file.key()
+        );
+        let analysis_response = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/analysis")
+                    .header("HX-Request", "true")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(analysis_response.status(), StatusCode::OK);
+
+        let metrics_response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        let metrics = response_text(metrics_response).await;
+
+        assert!(metrics.contains("leo_analysis_submissions_total{provider=\"openai\"} 1"));
+        assert!(metrics.contains("leo_upload_sessions_total{result=\"started\"} 1"));
+        assert!(metrics.contains("leo_upload_chunks_total{result=\"accepted\"} 1"));
     }
 
     #[tokio::test]

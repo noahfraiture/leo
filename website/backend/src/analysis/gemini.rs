@@ -10,7 +10,7 @@ use thiserror::Error;
 use tokio::time::{Instant, sleep};
 
 use crate::{
-    analysis::request::{AnalysisRequest, AnalysisSettings},
+    analysis::request::{AnalysisRequest, AnalysisSettings, AnalysisTelemetry},
     db,
 };
 
@@ -48,6 +48,7 @@ pub async fn analyze_videos(
             videos: videos.to_vec(),
             prompt: prompt.to_owned(),
             settings: AnalysisSettings::default(),
+            telemetry: Default::default(),
         })
         .await
 }
@@ -207,6 +208,7 @@ impl GeminiClient {
     }
 
     pub async fn analyze(&self, request: AnalysisRequest) -> Result<String, GeminiError> {
+        let telemetry = request.telemetry.clone();
         let videos = request
             .videos
             .iter()
@@ -216,37 +218,49 @@ impl GeminiClient {
             })
             .collect::<Vec<_>>();
 
-        self.analyze_inputs(&videos, &request.prompt).await
+        self.analyze_inputs(&telemetry, &videos, &request.prompt)
+            .await
     }
 
     async fn analyze_inputs(
         &self,
+        telemetry: &AnalysisTelemetry,
         videos: &[VideoInput],
         prompt: &str,
     ) -> Result<String, GeminiError> {
         let mut files = Vec::with_capacity(videos.len());
 
         for video in videos {
-            files.push(self.upload_video(video).await?);
+            files.push(self.upload_video(telemetry, video).await?);
         }
 
-        self.generate_content(&files, prompt).await
+        self.generate_content(telemetry, &files, prompt).await
     }
 
-    async fn upload_video(&self, video: &VideoInput) -> Result<UploadedFile, GeminiError> {
+    async fn upload_video(
+        &self,
+        telemetry: &AnalysisTelemetry,
+        video: &VideoInput,
+    ) -> Result<UploadedFile, GeminiError> {
         let mime_type = video_mime_type(&video.name);
 
         for attempt in 1..=MAX_UPLOAD_SESSION_ATTEMPTS {
             if attempt > 1 {
-                eprintln!(
-                    "[gemini] restarting upload session name={} attempt={}/{}",
-                    video.name, attempt, MAX_UPLOAD_SESSION_ATTEMPTS
+                telemetry.log(
+                    "warn",
+                    "gemini",
+                    "upload_session_restarted",
+                    [
+                        ("video_name", json!(video.name)),
+                        ("attempt", json!(attempt)),
+                        ("attempts", json!(MAX_UPLOAD_SESSION_ATTEMPTS)),
+                    ],
                 );
             }
 
             let upload_session = self.start_upload(video, mime_type).await?;
             let upload = match self
-                .upload_video_chunks(video, &upload_session, mime_type)
+                .upload_video_chunks(telemetry, video, &upload_session, mime_type)
                 .await
             {
                 Ok(upload) => upload,
@@ -254,9 +268,16 @@ impl GeminiClient {
                 Err(UploadChunksError::FinalizedWithoutResponse(error))
                     if attempt < MAX_UPLOAD_SESSION_ATTEMPTS =>
                 {
-                    eprintln!(
-                        "[gemini] final upload response lost name={} attempt={}/{} error={}",
-                        video.name, attempt, MAX_UPLOAD_SESSION_ATTEMPTS, error
+                    telemetry.log(
+                        "warn",
+                        "gemini",
+                        "upload_final_response_lost",
+                        [
+                            ("video_name", json!(video.name)),
+                            ("attempt", json!(attempt)),
+                            ("attempts", json!(MAX_UPLOAD_SESSION_ATTEMPTS)),
+                            ("error", json!(error.to_string())),
+                        ],
                     );
                     continue;
                 }
@@ -308,6 +329,7 @@ impl GeminiClient {
 
     async fn upload_video_chunks(
         &self,
+        telemetry: &AnalysisTelemetry,
         video: &VideoInput,
         session: &UploadSession,
         mime_type: &'static str,
@@ -319,14 +341,18 @@ impl GeminiClient {
             self.config.upload_chunk_size,
         )
         .len();
-        eprintln!(
-            "[gemini] uploading video name={} bytes={} mime={} chunks={} chunk_size={} granularity={}",
-            video.name,
-            total_bytes,
-            mime_type,
-            total_chunks,
-            self.config.upload_chunk_size,
-            session.chunk_granularity
+        telemetry.log(
+            "info",
+            "gemini",
+            "upload_started",
+            [
+                ("video_name", json!(video.name)),
+                ("bytes", json!(total_bytes)),
+                ("mime", json!(mime_type)),
+                ("chunks", json!(total_chunks)),
+                ("chunk_size", json!(self.config.upload_chunk_size)),
+                ("granularity", json!(session.chunk_granularity)),
+            ],
         );
 
         let mut offset = 0;
@@ -341,16 +367,20 @@ impl GeminiClient {
                 self.config.upload_chunk_size,
             );
             attempts_at_offset += 1;
-            eprintln!(
-                "[gemini] upload chunk name={} chunk={}/{} offset={} bytes={} command={} attempt={}/{}",
-                video.name,
-                chunk_index + 1,
-                total_chunks,
-                chunk.offset,
-                chunk.len(),
-                chunk.command.as_header(),
-                attempts_at_offset,
-                MAX_UPLOAD_CHUNK_ATTEMPTS
+            telemetry.log(
+                "info",
+                "gemini",
+                "upload_chunk_send",
+                [
+                    ("video_name", json!(video.name)),
+                    ("chunk", json!(chunk_index + 1)),
+                    ("chunks", json!(total_chunks)),
+                    ("offset", json!(chunk.offset)),
+                    ("bytes", json!(chunk.len())),
+                    ("command", json!(chunk.command.as_header())),
+                    ("attempt", json!(attempts_at_offset)),
+                    ("attempts", json!(MAX_UPLOAD_CHUNK_ATTEMPTS)),
+                ],
             );
 
             match self.send_upload_chunk(video, session, chunk).await {
@@ -365,16 +395,28 @@ impl GeminiClient {
                         return Err(error.into());
                     }
 
-                    eprintln!(
-                        "[gemini] upload chunk retry name={} offset={} error={}",
-                        video.name, chunk.offset, error
+                    telemetry.log(
+                        "warn",
+                        "gemini",
+                        "upload_chunk_retry",
+                        [
+                            ("video_name", json!(video.name)),
+                            ("offset", json!(chunk.offset)),
+                            ("error", json!(error.to_string())),
+                        ],
                     );
                     let received_offset = self
-                        .query_upload_offset_with_retries(video, session, chunk.offset)
+                        .query_upload_offset_with_retries(telemetry, video, session, chunk.offset)
                         .await?;
-                    eprintln!(
-                        "[gemini] upload query name={} requested_offset={} received_offset={}",
-                        video.name, chunk.offset, received_offset
+                    telemetry.log(
+                        "info",
+                        "gemini",
+                        "upload_offset_queried",
+                        [
+                            ("video_name", json!(video.name)),
+                            ("requested_offset", json!(chunk.offset)),
+                            ("received_offset", json!(received_offset)),
+                        ],
                     );
 
                     match upload_retry_decision(total_bytes, chunk, received_offset)? {
@@ -447,6 +489,7 @@ impl GeminiClient {
 
     async fn query_upload_offset_with_retries(
         &self,
+        telemetry: &AnalysisTelemetry,
         video: &VideoInput,
         session: &UploadSession,
         requested_offset: usize,
@@ -461,9 +504,17 @@ impl GeminiClient {
                     if error.is_retriable_upload_failure()
                         && attempt < MAX_UPLOAD_CHUNK_ATTEMPTS =>
                 {
-                    eprintln!(
-                        "[gemini] upload query retry name={} requested_offset={} attempt={}/{} error={}",
-                        video.name, requested_offset, attempt, MAX_UPLOAD_CHUNK_ATTEMPTS, error
+                    telemetry.log(
+                        "warn",
+                        "gemini",
+                        "upload_offset_query_retry",
+                        [
+                            ("video_name", json!(video.name)),
+                            ("requested_offset", json!(requested_offset)),
+                            ("attempt", json!(attempt)),
+                            ("attempts", json!(MAX_UPLOAD_CHUNK_ATTEMPTS)),
+                            ("error", json!(error.to_string())),
+                        ],
                     );
                     sleep(Duration::from_secs(attempt as u64)).await;
                 }
@@ -543,9 +594,16 @@ impl GeminiClient {
 
     async fn generate_content(
         &self,
+        telemetry: &AnalysisTelemetry,
         files: &[UploadedFile],
         prompt: &str,
     ) -> Result<String, GeminiError> {
+        telemetry.log(
+            "info",
+            "gemini",
+            "generate_content_request",
+            [("files", json!(files.len()))],
+        );
         let response = self
             .http
             .post(format!(
@@ -559,7 +617,14 @@ impl GeminiClient {
             .await?;
         let response: GenerateContentResponse = success_json(response).await?;
 
-        response.text().ok_or(GeminiError::EmptyResponse)
+        let text = response.text().ok_or(GeminiError::EmptyResponse)?;
+        telemetry.log(
+            "info",
+            "gemini",
+            "generate_content_response",
+            [("chars", json!(text.len()))],
+        );
+        Ok(text)
     }
 }
 

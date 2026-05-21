@@ -21,6 +21,49 @@ pub struct Analysis {
     pub video_keys: Vec<String>,
     pub response: Option<String>,
     pub error: Option<String>,
+    pub failure_diagnostic: Option<AnalysisFailureDiagnostic>,
+}
+
+#[derive(Clone, Debug, PartialEq, SurrealValue)]
+pub struct AnalysisFailureDiagnostic {
+    pub stage: String,
+    pub kind: String,
+    pub retryable: bool,
+    pub attempt: Option<i64>,
+    pub attempts: Option<i64>,
+    pub payload_bytes: Option<i64>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, SurrealValue)]
+pub struct AnalysisEvent {
+    pub id: RecordId,
+    pub analysis_key: String,
+    pub provider: String,
+    pub stage: String,
+    pub level: String,
+    pub message: String,
+    pub attempt: Option<i64>,
+    pub attempts: Option<i64>,
+    pub payload_bytes: Option<i64>,
+    pub offset_bytes: Option<i64>,
+    pub size_bytes: Option<i64>,
+    pub duration_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, SurrealValue)]
+pub struct NewAnalysisEvent {
+    pub analysis_key: String,
+    pub provider: String,
+    pub stage: String,
+    pub level: String,
+    pub message: String,
+    pub attempt: Option<i64>,
+    pub attempts: Option<i64>,
+    pub payload_bytes: Option<i64>,
+    pub offset_bytes: Option<i64>,
+    pub size_bytes: Option<i64>,
+    pub duration_ms: Option<i64>,
 }
 
 #[derive(Debug, Error)]
@@ -44,7 +87,8 @@ struct AnalysisPage {
 
 impl Analysis {
     pub async fn init(db: &Database) -> Result<(), AnalysisError> {
-        define_analysis_table(db).await
+        define_analysis_table(db).await?;
+        AnalysisEvent::init(db).await
     }
 
     pub async fn create(
@@ -97,6 +141,7 @@ impl Analysis {
                     video_keys: $video_keys,
                     response: NONE,
                     error: NONE,
+                    failure_diagnostic: NONE,
                     created_at: time::now(),
                     updated_at: time::now(),
                 };
@@ -181,6 +226,7 @@ impl Analysis {
                 status: "complete",
                 response: $response,
                 error: NONE,
+                failure_diagnostic: NONE,
                 updated_at: time::now(),
             };
             "#,
@@ -208,6 +254,7 @@ impl Analysis {
                 status: "failed",
                 response: NONE,
                 error: $error,
+                failure_diagnostic: NONE,
                 updated_at: time::now(),
             };
             "#,
@@ -215,6 +262,40 @@ impl Analysis {
         .bind(FailAnalysis {
             id: self.id.clone(),
             error: error.into(),
+        })
+        .await?
+        .check()?;
+
+        Ok(())
+    }
+
+    pub async fn fail_with_diagnostic(
+        &self,
+        db: &Database,
+        diagnostic: AnalysisFailureDiagnostic,
+    ) -> Result<(), AnalysisError> {
+        #[derive(SurrealValue)]
+        struct FailAnalysis {
+            id: RecordId,
+            error: String,
+            diagnostic: AnalysisFailureDiagnostic,
+        }
+
+        db.query(
+            r#"
+            UPDATE $id MERGE {
+                status: "failed",
+                response: NONE,
+                error: $error,
+                failure_diagnostic: $diagnostic,
+                updated_at: time::now(),
+            };
+            "#,
+        )
+        .bind(FailAnalysis {
+            id: self.id.clone(),
+            error: diagnostic.message.clone(),
+            diagnostic,
         })
         .await?
         .check()?;
@@ -235,6 +316,63 @@ impl Analysis {
     }
 }
 
+impl AnalysisEvent {
+    pub async fn init(db: &Database) -> Result<(), AnalysisError> {
+        define_analysis_event_table(db).await
+    }
+
+    pub async fn record(db: &Database, event: NewAnalysisEvent) -> Result<(), AnalysisError> {
+        db.query(
+            r#"
+            CREATE analysis_event CONTENT {
+                analysis_key: $analysis_key,
+                provider: $provider,
+                stage: $stage,
+                level: $level,
+                message: $message,
+                attempt: $attempt,
+                attempts: $attempts,
+                payload_bytes: $payload_bytes,
+                offset_bytes: $offset_bytes,
+                size_bytes: $size_bytes,
+                duration_ms: $duration_ms,
+                created_at: time::now(),
+            };
+            "#,
+        )
+        .bind(event)
+        .await?
+        .check()?;
+
+        Ok(())
+    }
+
+    pub async fn list_for_analysis(
+        db: &Database,
+        analysis_key: &str,
+    ) -> Result<Vec<Self>, AnalysisError> {
+        #[derive(SurrealValue)]
+        struct AnalysisEvents {
+            analysis_key: String,
+        }
+
+        let mut response = db
+            .query(
+                r#"
+                SELECT * FROM analysis_event
+                WHERE analysis_key = $analysis_key
+                ORDER BY created_at ASC;
+                "#,
+            )
+            .bind(AnalysisEvents {
+                analysis_key: analysis_key.to_owned(),
+            })
+            .await?;
+
+        Ok(response.take(0)?)
+    }
+}
+
 async fn define_analysis_table(db: &Database) -> Result<(), AnalysisError> {
     db.query(
         r#"
@@ -246,13 +384,47 @@ async fn define_analysis_table(db: &Database) -> Result<(), AnalysisError> {
         DEFINE FIELD IF NOT EXISTS video_keys ON TABLE analysis TYPE array<string>;
         DEFINE FIELD IF NOT EXISTS response ON TABLE analysis TYPE option<string>;
         DEFINE FIELD IF NOT EXISTS error ON TABLE analysis TYPE option<string>;
+        DEFINE FIELD IF NOT EXISTS failure_diagnostic ON TABLE analysis TYPE option<object>;
+        DEFINE FIELD IF NOT EXISTS failure_diagnostic.stage ON TABLE analysis TYPE option<string>;
+        DEFINE FIELD IF NOT EXISTS failure_diagnostic.kind ON TABLE analysis TYPE option<string>;
+        DEFINE FIELD IF NOT EXISTS failure_diagnostic.retryable ON TABLE analysis TYPE option<bool>;
+        DEFINE FIELD IF NOT EXISTS failure_diagnostic.attempt ON TABLE analysis TYPE option<int>;
+        DEFINE FIELD IF NOT EXISTS failure_diagnostic.attempts ON TABLE analysis TYPE option<int>;
+        DEFINE FIELD IF NOT EXISTS failure_diagnostic.payload_bytes ON TABLE analysis TYPE option<int>;
+        DEFINE FIELD IF NOT EXISTS failure_diagnostic.message ON TABLE analysis TYPE option<string>;
         DEFINE FIELD IF NOT EXISTS created_at ON TABLE analysis TYPE datetime;
         DEFINE FIELD IF NOT EXISTS updated_at ON TABLE analysis TYPE datetime;
         UPDATE analysis MERGE { provider: "gemini" } WHERE provider = NONE;
         UPDATE analysis MERGE { frame_sample_rate_fps: $default_frame_sample_rate_fps } WHERE frame_sample_rate_fps = NONE;
+        UPDATE analysis MERGE { failure_diagnostic: NONE } WHERE failure_diagnostic = NONE;
         "#,
     )
     .bind(("default_frame_sample_rate_fps", DEFAULT_FRAME_SAMPLE_RATE_FPS))
+    .await?
+    .check()?;
+
+    Ok(())
+}
+
+async fn define_analysis_event_table(db: &Database) -> Result<(), AnalysisError> {
+    db.query(
+        r#"
+        DEFINE TABLE IF NOT EXISTS analysis_event SCHEMAFULL;
+        DEFINE FIELD IF NOT EXISTS analysis_key ON TABLE analysis_event TYPE string;
+        DEFINE FIELD IF NOT EXISTS provider ON TABLE analysis_event TYPE string;
+        DEFINE FIELD IF NOT EXISTS stage ON TABLE analysis_event TYPE string;
+        DEFINE FIELD IF NOT EXISTS level ON TABLE analysis_event TYPE string ASSERT $value IN ["info", "warn", "error"];
+        DEFINE FIELD IF NOT EXISTS message ON TABLE analysis_event TYPE string;
+        DEFINE FIELD IF NOT EXISTS attempt ON TABLE analysis_event TYPE option<int>;
+        DEFINE FIELD IF NOT EXISTS attempts ON TABLE analysis_event TYPE option<int>;
+        DEFINE FIELD IF NOT EXISTS payload_bytes ON TABLE analysis_event TYPE option<int>;
+        DEFINE FIELD IF NOT EXISTS offset_bytes ON TABLE analysis_event TYPE option<int>;
+        DEFINE FIELD IF NOT EXISTS size_bytes ON TABLE analysis_event TYPE option<int>;
+        DEFINE FIELD IF NOT EXISTS duration_ms ON TABLE analysis_event TYPE option<int>;
+        DEFINE FIELD IF NOT EXISTS created_at ON TABLE analysis_event TYPE datetime;
+        DEFINE INDEX IF NOT EXISTS analysis_event_analysis_created ON TABLE analysis_event FIELDS analysis_key, created_at;
+        "#,
+    )
     .await?
     .check()?;
 
@@ -349,5 +521,133 @@ mod tests {
             vec![second.key(), first.key()]
         );
         assert!(!page.iter().any(|analysis| analysis.key() == third.key()));
+    }
+
+    #[tokio::test]
+    async fn fail_with_diagnostic_persists_sanitized_failure_fields() {
+        let database = crate::test::database::init()
+            .await
+            .expect("test database should initialize");
+        let analysis =
+            db::analysis::Analysis::create(&database, "Check the video", vec!["sample.mp4".into()])
+                .await
+                .expect("analysis should create");
+
+        analysis
+            .fail_with_diagnostic(
+                &database,
+                db::analysis::AnalysisFailureDiagnostic {
+                    stage: "openai.chunk".to_owned(),
+                    kind: "timeout".to_owned(),
+                    retryable: true,
+                    attempt: Some(3),
+                    attempts: Some(3),
+                    payload_bytes: Some(1_234_567),
+                    message: "request timed out".to_owned(),
+                },
+            )
+            .await
+            .expect("analysis should fail with diagnostics");
+
+        let found = db::analysis::Analysis::find(&database, &analysis.key())
+            .await
+            .expect("analysis should load")
+            .expect("analysis should exist");
+
+        assert_eq!(found.status, "failed");
+        assert_eq!(found.error.as_deref(), Some("request timed out"));
+        assert_eq!(
+            found.failure_diagnostic,
+            Some(db::analysis::AnalysisFailureDiagnostic {
+                stage: "openai.chunk".to_owned(),
+                kind: "timeout".to_owned(),
+                retryable: true,
+                attempt: Some(3),
+                attempts: Some(3),
+                payload_bytes: Some(1_234_567),
+                message: "request timed out".to_owned(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn analysis_events_are_listed_oldest_first_for_one_analysis() {
+        let database = crate::test::database::init()
+            .await
+            .expect("test database should initialize");
+        let first = db::analysis::Analysis::create(&database, "First", vec!["first.mp4".into()])
+            .await
+            .expect("first analysis should create");
+        let second = db::analysis::Analysis::create(&database, "Second", vec!["second.mp4".into()])
+            .await
+            .expect("second analysis should create");
+
+        db::analysis::AnalysisEvent::record(
+            &database,
+            db::analysis::NewAnalysisEvent {
+                analysis_key: first.key(),
+                provider: "gemini".to_owned(),
+                stage: "queued".to_owned(),
+                level: "info".to_owned(),
+                message: "analysis queued".to_owned(),
+                attempt: None,
+                attempts: None,
+                payload_bytes: None,
+                offset_bytes: None,
+                size_bytes: None,
+                duration_ms: None,
+            },
+        )
+        .await
+        .expect("event should record");
+        db::analysis::AnalysisEvent::record(
+            &database,
+            db::analysis::NewAnalysisEvent {
+                analysis_key: second.key(),
+                provider: "openai".to_owned(),
+                stage: "queued".to_owned(),
+                level: "info".to_owned(),
+                message: "other analysis queued".to_owned(),
+                attempt: None,
+                attempts: None,
+                payload_bytes: None,
+                offset_bytes: None,
+                size_bytes: None,
+                duration_ms: None,
+            },
+        )
+        .await
+        .expect("event should record");
+        db::analysis::AnalysisEvent::record(
+            &database,
+            db::analysis::NewAnalysisEvent {
+                analysis_key: first.key(),
+                provider: "gemini".to_owned(),
+                stage: "complete".to_owned(),
+                level: "info".to_owned(),
+                message: "analysis completed".to_owned(),
+                attempt: None,
+                attempts: None,
+                payload_bytes: None,
+                offset_bytes: None,
+                size_bytes: None,
+                duration_ms: Some(42),
+            },
+        )
+        .await
+        .expect("event should record");
+
+        let events = db::analysis::AnalysisEvent::list_for_analysis(&database, &first.key())
+            .await
+            .expect("events should list");
+
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.stage.as_str())
+                .collect::<Vec<_>>(),
+            vec!["queued", "complete"]
+        );
+        assert_eq!(events[1].duration_ms, Some(42));
     }
 }

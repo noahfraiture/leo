@@ -6,7 +6,7 @@ mod upload;
 
 // Pages
 pub use analyses::AnalysesPage;
-pub use analyze::{AnalysisStatusRoute, AnalyzeRoute};
+pub use analyze::{AnalysisStatusRoute, AnalyzeRoute, spawn_analysis_job};
 pub use delete::DeleteVideoRoute;
 pub use home::{HomePage, healthz};
 pub use upload::{

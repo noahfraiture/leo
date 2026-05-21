@@ -1,3 +1,5 @@
+use serde_json::{Map, Value, json};
+
 use crate::db;
 
 pub const DEFAULT_FRAME_SAMPLE_RATE_FPS: f64 = 0.2;
@@ -10,6 +12,7 @@ pub struct AnalysisRequest {
     pub videos: Vec<db::video::VideoAsset>,
     pub prompt: String,
     pub settings: AnalysisSettings,
+    pub telemetry: AnalysisTelemetry,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -25,6 +28,58 @@ impl Default for AnalysisSettings {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AnalysisTelemetry {
+    pub analysis_id: Option<String>,
+    pub provider: Option<String>,
+}
+
+impl AnalysisTelemetry {
+    pub fn new(analysis_id: impl Into<String>, provider: impl Into<String>) -> Self {
+        Self {
+            analysis_id: Some(analysis_id.into()),
+            provider: Some(provider.into()),
+        }
+    }
+
+    pub fn event_json(
+        &self,
+        level: &str,
+        component: &str,
+        event: &str,
+        fields: impl IntoIterator<Item = (&'static str, Value)>,
+    ) -> String {
+        let mut payload = Map::new();
+        payload.insert("level".to_owned(), json!(level));
+        payload.insert("component".to_owned(), json!(component));
+        payload.insert("event".to_owned(), json!(event));
+
+        if let Some(analysis_id) = &self.analysis_id {
+            payload.insert("analysis_id".to_owned(), json!(analysis_id));
+        }
+
+        if let Some(provider) = &self.provider {
+            payload.insert("provider".to_owned(), json!(provider));
+        }
+
+        for (key, value) in fields {
+            payload.insert(key.to_owned(), value);
+        }
+
+        Value::Object(payload).to_string()
+    }
+
+    pub fn log(
+        &self,
+        level: &str,
+        component: &str,
+        event: &str,
+        fields: impl IntoIterator<Item = (&'static str, Value)>,
+    ) {
+        eprintln!("{}", self.event_json(level, component, event, fields));
+    }
+}
+
 /// A sampled video frame ready to send to a vision model.
 ///
 /// Frames keep their source video and timestamp so chunk prompts can preserve
@@ -35,4 +90,37 @@ pub struct VideoFrame {
     pub timestamp_secs: f64,
     pub mime_type: &'static str,
     pub bytes: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::analysis::request::AnalysisTelemetry;
+
+    #[test]
+    fn telemetry_events_render_as_structured_json_with_correlation_fields() {
+        let telemetry = AnalysisTelemetry::new("analysis-123", "openai");
+
+        let line = telemetry.event_json(
+            "info",
+            "openai",
+            "request_retry",
+            [
+                ("stage", json!("chunk 1/1")),
+                ("attempt", json!(2)),
+                ("payload_bytes", json!(4096)),
+            ],
+        );
+        let value: serde_json::Value =
+            serde_json::from_str(&line).expect("log line should be json");
+
+        assert_eq!(value["analysis_id"], "analysis-123");
+        assert_eq!(value["provider"], "openai");
+        assert_eq!(value["component"], "openai");
+        assert_eq!(value["event"], "request_retry");
+        assert_eq!(value["stage"], "chunk 1/1");
+        assert_eq!(value["attempt"], 2);
+        assert_eq!(value["payload_bytes"], 4096);
+    }
 }

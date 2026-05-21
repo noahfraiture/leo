@@ -10,7 +10,7 @@ use tokio::time::sleep;
 use crate::analysis::{
     chunking::{ChunkingOptions, FrameChunk, chunk_frames_by_payload},
     frames::{FrameExtractionConfig, extract_video_frames},
-    request::{AnalysisRequest, VideoFrame},
+    request::{AnalysisRequest, AnalysisTelemetry, VideoFrame},
 };
 
 const DEFAULT_MODEL: &str = "gpt-5.5";
@@ -149,6 +149,7 @@ impl OpenAiClient {
     }
 
     pub async fn analyze(&self, request: AnalysisRequest) -> Result<String, OpenAiError> {
+        let telemetry = request.telemetry.clone();
         let frames = extract_video_frames(
             &request.videos,
             FrameExtractionConfig::from_sample_rate_fps(request.settings.frame_sample_rate_fps),
@@ -163,38 +164,57 @@ impl OpenAiClient {
         let estimated_frame_payload_bytes =
             frames.iter().map(openai_frame_payload_bytes).sum::<usize>();
         let chunking = ChunkingOptions::from_env();
-        eprintln!(
-            "[openai] extracted frames videos={} frames={} raw_frame_bytes={} estimated_frame_payload_bytes={} sample_rate_fps={}",
-            request.videos.len(),
-            frame_count,
-            raw_frame_bytes,
-            estimated_frame_payload_bytes,
-            request.settings.frame_sample_rate_fps,
+        telemetry.log(
+            "info",
+            "openai",
+            "frames_extracted",
+            [
+                ("videos", json!(request.videos.len())),
+                ("frames", json!(frame_count)),
+                ("raw_frame_bytes", json!(raw_frame_bytes)),
+                (
+                    "estimated_frame_payload_bytes",
+                    json!(estimated_frame_payload_bytes),
+                ),
+                (
+                    "sample_rate_fps",
+                    json!(request.settings.frame_sample_rate_fps),
+                ),
+            ],
         );
 
         let chunks = chunk_frames_by_payload(frames, chunking, openai_frame_payload_bytes);
         let chunk_count = chunks.len();
-        eprintln!(
-            "[openai] chunked frames chunks={} max_images={} max_payload_bytes={} overlap_percent={}",
-            chunk_count,
-            chunking.max_images_per_request,
-            chunking.max_payload_bytes_per_request,
-            chunking.overlap_percent,
+        telemetry.log(
+            "info",
+            "openai",
+            "frames_chunked",
+            [
+                ("chunks", json!(chunk_count)),
+                ("max_images", json!(chunking.max_images_per_request)),
+                (
+                    "max_payload_bytes",
+                    json!(chunking.max_payload_bytes_per_request),
+                ),
+                ("overlap_percent", json!(chunking.overlap_percent)),
+            ],
         );
         let mut responses = Vec::with_capacity(chunk_count);
 
         for (index, chunk) in chunks.iter().enumerate() {
             responses.push(
-                self.analyze_chunk(&request.prompt, index, chunk_count, chunk)
+                self.analyze_chunk(&telemetry, &request.prompt, index, chunk_count, chunk)
                     .await?,
             );
         }
 
-        self.summarize_chunks(&request.prompt, &responses).await
+        self.summarize_chunks(&telemetry, &request.prompt, &responses)
+            .await
     }
 
     async fn analyze_chunk(
         &self,
+        telemetry: &AnalysisTelemetry,
         prompt: &str,
         chunk_index: usize,
         chunk_count: usize,
@@ -214,26 +234,37 @@ impl OpenAiClient {
             .map(openai_frame_payload_bytes)
             .sum::<usize>();
         let stage = format!("chunk {}/{}", chunk_index + 1, chunk_count);
-        eprintln!(
-            "[openai] chunk request chunk={}/{} frames={} start_secs={:.3} end_secs={:.3} estimated_frame_payload_bytes={} json_payload_bytes={}",
-            chunk_index + 1,
-            chunk_count,
-            chunk.frames.len(),
-            chunk.start_secs,
-            chunk.end_secs,
-            estimated_frame_payload_bytes,
-            payload_bytes,
+        telemetry.log(
+            "info",
+            "openai",
+            "chunk_request",
+            [
+                ("chunk", json!(chunk_index + 1)),
+                ("chunks", json!(chunk_count)),
+                ("frames", json!(chunk.frames.len())),
+                ("start_secs", json!(chunk.start_secs)),
+                ("end_secs", json!(chunk.end_secs)),
+                (
+                    "estimated_frame_payload_bytes",
+                    json!(estimated_frame_payload_bytes),
+                ),
+                ("json_payload_bytes", json!(payload_bytes)),
+            ],
         );
 
         let response = self
-            .send_response_request(&stage, payload_bytes, &request)
+            .send_response_request(telemetry, &stage, payload_bytes, &request)
             .await?;
         let text = response.text().ok_or(OpenAiError::EmptyResponse)?;
-        eprintln!(
-            "[openai] chunk response chunk={}/{} chars={}",
-            chunk_index + 1,
-            chunk_count,
-            text.len()
+        telemetry.log(
+            "info",
+            "openai",
+            "chunk_response",
+            [
+                ("chunk", json!(chunk_index + 1)),
+                ("chunks", json!(chunk_count)),
+                ("chars", json!(text.len())),
+            ],
         );
 
         Ok(text)
@@ -241,36 +272,54 @@ impl OpenAiClient {
 
     async fn summarize_chunks(
         &self,
+        telemetry: &AnalysisTelemetry,
         prompt: &str,
         chunks: &[String],
     ) -> Result<String, OpenAiError> {
         let request = summarize_chunks_request(&self.config, prompt, chunks);
         let payload_bytes = json_payload_size(&request);
-        eprintln!(
-            "[openai] summary request chunks={} json_payload_bytes={}",
-            chunks.len(),
-            payload_bytes,
+        telemetry.log(
+            "info",
+            "openai",
+            "summary_request",
+            [
+                ("chunks", json!(chunks.len())),
+                ("json_payload_bytes", json!(payload_bytes)),
+            ],
         );
 
         let response = self
-            .send_response_request("summary", payload_bytes, &request)
+            .send_response_request(telemetry, "summary", payload_bytes, &request)
             .await?;
         let text = response.text().ok_or(OpenAiError::EmptyResponse)?;
-        eprintln!("[openai] summary response chars={}", text.len());
+        telemetry.log(
+            "info",
+            "openai",
+            "summary_response",
+            [("chars", json!(text.len()))],
+        );
 
         Ok(text)
     }
 
     async fn send_response_request(
         &self,
+        telemetry: &AnalysisTelemetry,
         stage: &str,
         payload_bytes: usize,
         body: &Value,
     ) -> Result<OpenAiResponse, OpenAiError> {
         for attempt in 1..=MAX_OPENAI_REQUEST_ATTEMPTS {
-            eprintln!(
-                "[openai] request send stage={} attempt={}/{} payload_bytes={}",
-                stage, attempt, MAX_OPENAI_REQUEST_ATTEMPTS, payload_bytes,
+            telemetry.log(
+                "info",
+                "openai",
+                "request_send",
+                [
+                    ("stage", json!(stage)),
+                    ("attempt", json!(attempt)),
+                    ("attempts", json!(MAX_OPENAI_REQUEST_ATTEMPTS)),
+                    ("payload_bytes", json!(payload_bytes)),
+                ],
             );
             let response = self
                 .http
@@ -287,18 +336,22 @@ impl OpenAiClient {
                     let failure = RequestFailure::from_error(&source);
                     let chain = error_chain(&source);
                     if failure.is_retriable() && attempt < MAX_OPENAI_REQUEST_ATTEMPTS {
-                        eprintln!(
-                            "[openai] request retry stage={} attempt={}/{} payload_bytes={} timeout={} connect={} body={} request={} error={} chain={}",
-                            stage,
-                            attempt,
-                            MAX_OPENAI_REQUEST_ATTEMPTS,
-                            payload_bytes,
-                            failure.timeout,
-                            failure.connect,
-                            failure.body,
-                            failure.request,
-                            source,
-                            chain,
+                        telemetry.log(
+                            "warn",
+                            "openai",
+                            "request_retry",
+                            [
+                                ("stage", json!(stage)),
+                                ("attempt", json!(attempt)),
+                                ("attempts", json!(MAX_OPENAI_REQUEST_ATTEMPTS)),
+                                ("payload_bytes", json!(payload_bytes)),
+                                ("timeout", json!(failure.timeout)),
+                                ("connect", json!(failure.connect)),
+                                ("body", json!(failure.body)),
+                                ("request", json!(failure.request)),
+                                ("error", json!(source.to_string())),
+                                ("chain", json!(chain)),
+                            ],
                         );
                         sleep(Duration::from_secs(attempt as u64)).await;
                         continue;
