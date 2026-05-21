@@ -1010,6 +1010,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn video_route_serves_requested_byte_range() {
+        let state = AppState::for_test().await;
+        let video = db::video::Video::upload(state.db(), "sample.mp4", b"video bytes".to_vec())
+            .await
+            .expect("video should upload");
+
+        let response = app(state)
+            .oneshot(
+                HttpRequest::builder()
+                    .uri(format!("/video/{}", video.name))
+                    .header("Range", "bytes=0-4")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        let status = response.status();
+        let accept_ranges = response
+            .headers()
+            .get("accept-ranges")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let content_range = response
+            .headers()
+            .get("content-range")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let content_length = response
+            .headers()
+            .get("content-length")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+
+        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(accept_ranges.as_deref(), Some("bytes"));
+        assert_eq!(content_range.as_deref(), Some("bytes 0-4/11"));
+        assert_eq!(content_length.as_deref(), Some("5"));
+        assert_eq!(body.as_ref(), b"video");
+    }
+
+    #[tokio::test]
+    async fn video_route_serves_open_ended_byte_range() {
+        let state = AppState::for_test().await;
+        let video = db::video::Video::upload(state.db(), "sample.mp4", b"video bytes".to_vec())
+            .await
+            .expect("video should upload");
+
+        let response = app(state)
+            .oneshot(
+                HttpRequest::builder()
+                    .uri(format!("/video/{}", video.name))
+                    .header("Range", "bytes=6-")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        let status = response.status();
+        let content_range = response
+            .headers()
+            .get("content-range")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+
+        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(content_range.as_deref(), Some("bytes 6-10/11"));
+        assert_eq!(body.as_ref(), b"bytes");
+    }
+
+    #[tokio::test]
+    async fn video_route_rejects_unsatisfiable_byte_range() {
+        let state = AppState::for_test().await;
+        let video = db::video::Video::upload(state.db(), "sample.mp4", b"video bytes".to_vec())
+            .await
+            .expect("video should upload");
+
+        let response = app(state)
+            .oneshot(
+                HttpRequest::builder()
+                    .uri(format!("/video/{}", video.name))
+                    .header("Range", "bytes=99-100")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        let status = response.status();
+        let accept_ranges = response
+            .headers()
+            .get("accept-ranges")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let content_range = response
+            .headers()
+            .get("content-range")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+
+        assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(accept_ranges.as_deref(), Some("bytes"));
+        assert_eq!(content_range.as_deref(), Some("bytes */11"));
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
     async fn video_route_returns_not_found_for_missing_video() {
         let response = test_app()
             .await
