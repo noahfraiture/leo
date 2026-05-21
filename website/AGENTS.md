@@ -93,9 +93,9 @@ curl -fsSL http://petite.at/metrics
 - `leo_analysis_jobs_total{provider="...",result="completed|failed"}`
 - `leo_upload_sessions_total{result="started|completed|failed"}`
 - `leo_upload_chunks_total{result="accepted|failed"}`
-- `leo_canary_runs_total{result="queued|setup_failed|queue_failed"}`
+- `leo_canary_runs_total{result="queued|prune_failed|setup_failed|queue_failed"}`
 
-21. Synthetic canaries are controlled by `ANALYSIS_CANARY_*` env vars in the HelmRelease. Production currently queues OpenAI and Gemini canaries on startup and then daily. The canary video is named `leo-analysis-canary.mp4`; use canary log lines to get the generated analysis ids, then inspect those `/analysis/<id>` fragments.
+21. Synthetic canaries are controlled by `ANALYSIS_CANARY_*` env vars in the HelmRelease. Production currently queues OpenAI and Gemini canaries on startup and then daily. Canary analyses and the canary video upload are hidden from normal user-facing history, and each canary cycle prunes the previous synthetic analysis for each provider before queuing the next one. The canary video is named `leo-analysis-canary.mp4` and is replaced on each run. Use canary log lines to get the latest generated analysis ids, then inspect those `/analysis/<id>` fragments while that canary is still the latest one.
 
 22. To deploy website code, push this repository first and wait for the `Publish website image` workflow. It publishes tags shaped like `prod-<run>-<short-sha>`. Then update the Leo HelmRelease image tag in `~/nix`, commit, push, reconcile Flux, and verify the deployment image on Helios.
 

@@ -43,7 +43,45 @@ pub fn spawn_canary(state: AppState) {
 }
 
 async fn run_once(state: &AppState, config: &CanaryConfig) {
-    let video = match ensure_canary_video(state.db()).await {
+    let providers = parse_providers(config);
+    if providers.is_empty() {
+        return;
+    }
+
+    for provider in providers.iter().copied() {
+        match db::analysis::Analysis::delete_canaries_for_provider(state.db(), provider).await {
+            Ok(deleted) => {
+                eprintln!(
+                    "{}",
+                    json!({
+                        "level": "info",
+                        "component": "canary",
+                        "event": "pruned",
+                        "provider": provider.to_string(),
+                        "deleted": deleted,
+                    })
+                );
+            }
+            Err(error) => {
+                state
+                    .metrics()
+                    .increment("leo_canary_runs_total", &[("result", "prune_failed")]);
+                eprintln!(
+                    "{}",
+                    json!({
+                        "level": "error",
+                        "component": "canary",
+                        "event": "prune_failed",
+                        "provider": provider.to_string(),
+                        "error": error.to_string(),
+                    })
+                );
+                return;
+            }
+        }
+    }
+
+    let video = match refresh_canary_video(state.db()).await {
         Ok(video) => video,
         Err(error) => {
             state
@@ -62,24 +100,8 @@ async fn run_once(state: &AppState, config: &CanaryConfig) {
         }
     };
 
-    for provider in &config.providers {
-        let provider = match provider.parse::<AnalysisProvider>() {
-            Ok(provider) => provider,
-            Err(error) => {
-                eprintln!(
-                    "{}",
-                    json!({
-                        "level": "error",
-                        "component": "canary",
-                        "event": "provider_parse_failed",
-                        "provider": provider,
-                        "error": error.to_string(),
-                    })
-                );
-                continue;
-            }
-        };
-        match db::analysis::Analysis::create_with_provider_and_settings(
+    for provider in providers {
+        match db::analysis::Analysis::create_canary_with_provider_and_settings(
             state.db(),
             provider,
             AnalysisSettings {
@@ -143,13 +165,32 @@ async fn run_once(state: &AppState, config: &CanaryConfig) {
     }
 }
 
-async fn ensure_canary_video(db: &db::Database) -> Result<db::video::Video, CanaryError> {
-    if let Some(asset) = db::video::Video::read_by_name(db, CANARY_VIDEO_NAME).await? {
-        return Ok(asset.video);
+fn parse_providers(config: &CanaryConfig) -> Vec<AnalysisProvider> {
+    let mut providers = Vec::new();
+    for provider in &config.providers {
+        match provider.parse::<AnalysisProvider>() {
+            Ok(provider) => providers.push(provider),
+            Err(error) => {
+                eprintln!(
+                    "{}",
+                    json!({
+                        "level": "error",
+                        "component": "canary",
+                        "event": "provider_parse_failed",
+                        "provider": provider,
+                        "error": error.to_string(),
+                    })
+                );
+            }
+        }
     }
 
+    providers
+}
+
+async fn refresh_canary_video(db: &db::Database) -> Result<db::video::Video, CanaryError> {
     let bytes = generate_canary_video().await?;
-    Ok(db::video::Video::upload(db, CANARY_VIDEO_NAME, bytes).await?)
+    Ok(db::video::Video::replace_canary(db, CANARY_VIDEO_NAME, bytes).await?)
 }
 
 async fn generate_canary_video() -> Result<Vec<u8>, CanaryError> {

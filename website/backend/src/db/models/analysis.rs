@@ -3,6 +3,7 @@ use thiserror::Error;
 
 use crate::{
     analysis::{
+        canary::DEFAULT_CANARY_PROMPT,
         provider::AnalysisProvider,
         request::{AnalysisSettings, DEFAULT_FRAME_SAMPLE_RATE_FPS},
     },
@@ -22,6 +23,7 @@ pub struct Analysis {
     pub response: Option<String>,
     pub error: Option<String>,
     pub failure_diagnostic: Option<AnalysisFailureDiagnostic>,
+    pub is_canary: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, SurrealValue)]
@@ -122,12 +124,34 @@ impl Analysis {
         prompt: impl Into<String>,
         video_keys: Vec<String>,
     ) -> Result<Self, AnalysisError> {
+        Self::create_record(db, provider, settings, prompt, video_keys, false).await
+    }
+
+    pub async fn create_canary_with_provider_and_settings(
+        db: &Database,
+        provider: AnalysisProvider,
+        settings: AnalysisSettings,
+        prompt: impl Into<String>,
+        video_keys: Vec<String>,
+    ) -> Result<Self, AnalysisError> {
+        Self::create_record(db, provider, settings, prompt, video_keys, true).await
+    }
+
+    async fn create_record(
+        db: &Database,
+        provider: AnalysisProvider,
+        settings: AnalysisSettings,
+        prompt: impl Into<String>,
+        video_keys: Vec<String>,
+        is_canary: bool,
+    ) -> Result<Self, AnalysisError> {
         #[derive(SurrealValue)]
         struct CreateAnalysis {
             provider: String,
             frame_sample_rate_fps: f64,
             prompt: String,
             video_keys: Vec<String>,
+            is_canary: bool,
         }
 
         let mut response = db
@@ -142,6 +166,7 @@ impl Analysis {
                     response: NONE,
                     error: NONE,
                     failure_diagnostic: NONE,
+                    is_canary: $is_canary,
                     created_at: time::now(),
                     updated_at: time::now(),
                 };
@@ -152,6 +177,7 @@ impl Analysis {
                 frame_sample_rate_fps: settings.frame_sample_rate_fps,
                 prompt: prompt.into(),
                 video_keys,
+                is_canary,
             })
             .await?;
 
@@ -181,7 +207,14 @@ impl Analysis {
         offset: usize,
     ) -> Result<Vec<Self>, AnalysisError> {
         let mut response = db
-            .query("SELECT * FROM analysis ORDER BY created_at DESC LIMIT $limit START $offset;")
+            .query(
+                r#"
+                SELECT * FROM analysis
+                WHERE is_canary = false
+                ORDER BY created_at DESC
+                LIMIT $limit START $offset;
+                "#,
+            )
             .bind(AnalysisPage {
                 limit: limit as i64,
                 offset: offset as i64,
@@ -189,6 +222,40 @@ impl Analysis {
             .await?;
 
         Ok(response.take(0)?)
+    }
+
+    pub async fn delete_canaries_for_provider(
+        db: &Database,
+        provider: AnalysisProvider,
+    ) -> Result<usize, AnalysisError> {
+        #[derive(SurrealValue)]
+        struct CanaryProvider {
+            provider: String,
+        }
+
+        let mut response = db
+            .query(
+                r#"
+                SELECT * FROM analysis
+                WHERE is_canary = true AND provider = $provider;
+                "#,
+            )
+            .bind(CanaryProvider {
+                provider: provider.to_string(),
+            })
+            .await?;
+        let canaries: Vec<Analysis> = response.take(0)?;
+        let deleted = canaries.len();
+
+        for analysis in canaries {
+            AnalysisEvent::delete_for_analysis(db, &analysis.key()).await?;
+            db.query("DELETE $id;")
+                .bind(AnalysisId { id: analysis.id })
+                .await?
+                .check()?;
+        }
+
+        Ok(deleted)
     }
 
     pub async fn mark_running(&self, db: &Database) -> Result<(), AnalysisError> {
@@ -371,6 +438,25 @@ impl AnalysisEvent {
 
         Ok(response.take(0)?)
     }
+
+    pub async fn delete_for_analysis(
+        db: &Database,
+        analysis_key: &str,
+    ) -> Result<(), AnalysisError> {
+        #[derive(SurrealValue)]
+        struct AnalysisEvents {
+            analysis_key: String,
+        }
+
+        db.query("DELETE analysis_event WHERE analysis_key = $analysis_key;")
+            .bind(AnalysisEvents {
+                analysis_key: analysis_key.to_owned(),
+            })
+            .await?
+            .check()?;
+
+        Ok(())
+    }
 }
 
 async fn define_analysis_table(db: &Database) -> Result<(), AnalysisError> {
@@ -392,14 +478,18 @@ async fn define_analysis_table(db: &Database) -> Result<(), AnalysisError> {
         DEFINE FIELD IF NOT EXISTS failure_diagnostic.attempts ON TABLE analysis TYPE option<int>;
         DEFINE FIELD IF NOT EXISTS failure_diagnostic.payload_bytes ON TABLE analysis TYPE option<int>;
         DEFINE FIELD IF NOT EXISTS failure_diagnostic.message ON TABLE analysis TYPE option<string>;
+        DEFINE FIELD IF NOT EXISTS is_canary ON TABLE analysis TYPE bool DEFAULT false;
         DEFINE FIELD IF NOT EXISTS created_at ON TABLE analysis TYPE datetime;
         DEFINE FIELD IF NOT EXISTS updated_at ON TABLE analysis TYPE datetime;
         UPDATE analysis MERGE { provider: "gemini" } WHERE provider = NONE;
         UPDATE analysis MERGE { frame_sample_rate_fps: $default_frame_sample_rate_fps } WHERE frame_sample_rate_fps = NONE;
         UPDATE analysis MERGE { failure_diagnostic: NONE } WHERE failure_diagnostic = NONE;
+        UPDATE analysis MERGE { is_canary: false } WHERE is_canary = NONE;
+        UPDATE analysis MERGE { is_canary: true } WHERE prompt = $default_canary_prompt;
         "#,
     )
     .bind(("default_frame_sample_rate_fps", DEFAULT_FRAME_SAMPLE_RATE_FPS))
+    .bind(("default_canary_prompt", DEFAULT_CANARY_PROMPT))
     .await?
     .check()?;
 
@@ -521,6 +611,129 @@ mod tests {
             vec![second.key(), first.key()]
         );
         assert!(!page.iter().any(|analysis| analysis.key() == third.key()));
+    }
+
+    #[tokio::test]
+    async fn list_page_excludes_canary_analyses() {
+        let database = crate::test::database::init()
+            .await
+            .expect("test database should initialize");
+
+        let visible =
+            db::analysis::Analysis::create(&database, "User prompt", vec!["user.mp4".to_owned()])
+                .await
+                .expect("visible analysis should create");
+        let hidden = db::analysis::Analysis::create_canary_with_provider_and_settings(
+            &database,
+            AnalysisProvider::OpenAi,
+            crate::analysis::request::AnalysisSettings {
+                frame_sample_rate_fps: 1.0,
+            },
+            "Canary prompt",
+            vec!["canary.mp4".to_owned()],
+        )
+        .await
+        .expect("canary analysis should create");
+
+        let page = db::analysis::Analysis::list_page(&database, 10, 0)
+            .await
+            .expect("analysis page should list");
+        let found_hidden = db::analysis::Analysis::find(&database, &hidden.key())
+            .await
+            .expect("canary should load directly")
+            .expect("canary should exist");
+
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].key(), visible.key());
+        assert!(found_hidden.is_canary);
+    }
+
+    #[tokio::test]
+    async fn delete_canaries_for_provider_removes_only_matching_canary_events() {
+        let database = crate::test::database::init()
+            .await
+            .expect("test database should initialize");
+        let regular = db::analysis::Analysis::create_with_provider(
+            &database,
+            AnalysisProvider::OpenAi,
+            "Regular prompt",
+            vec!["regular.mp4".to_owned()],
+        )
+        .await
+        .expect("regular analysis should create");
+        let openai_canary = db::analysis::Analysis::create_canary_with_provider_and_settings(
+            &database,
+            AnalysisProvider::OpenAi,
+            crate::analysis::request::AnalysisSettings {
+                frame_sample_rate_fps: 1.0,
+            },
+            "OpenAI canary",
+            vec!["canary.mp4".to_owned()],
+        )
+        .await
+        .expect("openai canary should create");
+        let gemini_canary = db::analysis::Analysis::create_canary_with_provider_and_settings(
+            &database,
+            AnalysisProvider::Gemini,
+            crate::analysis::request::AnalysisSettings {
+                frame_sample_rate_fps: 1.0,
+            },
+            "Gemini canary",
+            vec!["canary.mp4".to_owned()],
+        )
+        .await
+        .expect("gemini canary should create");
+        db::analysis::AnalysisEvent::record(
+            &database,
+            db::analysis::NewAnalysisEvent {
+                analysis_key: openai_canary.key(),
+                provider: "openai".to_owned(),
+                stage: "queued".to_owned(),
+                level: "info".to_owned(),
+                message: "canary queued".to_owned(),
+                attempt: None,
+                attempts: None,
+                payload_bytes: None,
+                offset_bytes: None,
+                size_bytes: None,
+                duration_ms: None,
+            },
+        )
+        .await
+        .expect("event should record");
+
+        let deleted = db::analysis::Analysis::delete_canaries_for_provider(
+            &database,
+            AnalysisProvider::OpenAi,
+        )
+        .await
+        .expect("openai canaries should delete");
+
+        assert_eq!(deleted, 1);
+        assert!(
+            db::analysis::Analysis::find(&database, &openai_canary.key())
+                .await
+                .expect("openai canary lookup should complete")
+                .is_none()
+        );
+        assert!(
+            db::analysis::AnalysisEvent::list_for_analysis(&database, &openai_canary.key())
+                .await
+                .expect("openai canary events should list")
+                .is_empty()
+        );
+        assert!(
+            db::analysis::Analysis::find(&database, &regular.key())
+                .await
+                .expect("regular lookup should complete")
+                .is_some()
+        );
+        assert!(
+            db::analysis::Analysis::find(&database, &gemini_canary.key())
+                .await
+                .expect("gemini canary lookup should complete")
+                .is_some()
+        );
     }
 
     #[tokio::test]

@@ -7,7 +7,7 @@ use std::{
 use surrealdb::types::{Bytes, File, RecordId, SurrealValue};
 use thiserror::Error;
 
-use crate::db::Database;
+use crate::{analysis::canary::CANARY_VIDEO_NAME, db::Database};
 
 const VIDEO_TABLE: &str = "video";
 const VIDEO_BUCKET: &str = "videos";
@@ -29,6 +29,8 @@ pub struct Video {
     pub size: u64,
     /// SurrealDB file bucket pointer for the stored video bytes.
     pub file: File,
+    /// Synthetic production health-check videos are hidden from user-facing lists.
+    pub is_canary: bool,
 }
 
 #[derive(Clone)]
@@ -58,6 +60,7 @@ struct UploadVideo {
     size: u64,
     file: File,
     bytes: Bytes,
+    is_canary: bool,
 }
 
 #[derive(SurrealValue)]
@@ -90,7 +93,7 @@ impl Video {
     /// Returns all uploaded video metadata records, newest first.
     pub async fn list(db: &Database) -> Result<Vec<Video>, VideoError> {
         let mut response = db
-            .query("SELECT * FROM video ORDER BY created_at DESC;")
+            .query("SELECT * FROM video WHERE is_canary = false ORDER BY created_at DESC;")
             .await?;
 
         Ok(response.take(0)?)
@@ -190,6 +193,28 @@ impl Video {
         name: impl Into<String>,
         bytes: impl Into<Bytes>,
     ) -> Result<Video, VideoError> {
+        Self::upload_record(db, name, bytes, false).await
+    }
+
+    pub async fn replace_canary(
+        db: &Database,
+        name: impl Into<String>,
+        bytes: impl Into<Bytes>,
+    ) -> Result<Video, VideoError> {
+        let name = name.into();
+        if let Some(existing) = Self::read_by_name(db, &name).await? {
+            existing.video.delete(db).await?;
+        }
+
+        Self::upload_record(db, name, bytes, true).await
+    }
+
+    async fn upload_record(
+        db: &Database,
+        name: impl Into<String>,
+        bytes: impl Into<Bytes>,
+        is_canary: bool,
+    ) -> Result<Video, VideoError> {
         let name = name.into();
         let bytes = bytes.into();
         let size = u64::try_from(bytes.len()).map_err(|_| VideoError::SizeOverflow)?;
@@ -205,6 +230,7 @@ impl Video {
                     path: $path,
                     size: $size,
                     file: $file,
+                    is_canary: $is_canary,
                     created_at: time::now(),
                 };
                 "#,
@@ -215,6 +241,7 @@ impl Video {
                 size,
                 file,
                 bytes,
+                is_canary,
             })
             .await?;
 
@@ -241,11 +268,15 @@ async fn define_video_table(db: &Database) -> Result<(), VideoError> {
         DEFINE FIELD IF NOT EXISTS path ON TABLE video TYPE string;
         DEFINE FIELD IF NOT EXISTS size ON TABLE video TYPE int ASSERT $value >= 0;
         DEFINE FIELD IF NOT EXISTS file ON TABLE video TYPE file<videos>;
+        DEFINE FIELD IF NOT EXISTS is_canary ON TABLE video TYPE bool DEFAULT false;
         DEFINE FIELD IF NOT EXISTS created_at ON TABLE video TYPE datetime;
         DEFINE INDEX IF NOT EXISTS video_path ON TABLE video FIELDS path UNIQUE;
         DEFINE INDEX IF NOT EXISTS video_name ON TABLE video FIELDS name UNIQUE;
+        UPDATE video MERGE { is_canary: false } WHERE is_canary = NONE;
+        UPDATE video MERGE { is_canary: true } WHERE name = $canary_video_name;
         "#,
     )
+    .bind(("canary_video_name", CANARY_VIDEO_NAME))
     .await?
     .check()?;
 
@@ -344,6 +375,59 @@ mod tests {
         assert_eq!(videos[0].name, "sample.mp4");
         assert_eq!(videos[0].size, bytes.len() as u64);
         assert_eq!(videos[0].path, video.path);
+    }
+
+    #[tokio::test]
+    async fn list_excludes_canary_videos_but_read_by_name_can_load_them() {
+        let db = crate::test::database::init()
+            .await
+            .expect("test database should initialize");
+
+        let visible = Video::upload(&db, "sample.mp4", b"video bytes".to_vec())
+            .await
+            .expect("video should upload");
+        let canary = Video::replace_canary(&db, "leo-analysis-canary.mp4", b"canary".to_vec())
+            .await
+            .expect("canary should upload");
+
+        let videos = Video::list(&db).await.expect("videos should list");
+        let loaded_canary = Video::read_by_name(&db, "leo-analysis-canary.mp4")
+            .await
+            .expect("canary lookup should complete")
+            .expect("canary should exist");
+
+        assert_eq!(videos.len(), 1);
+        assert_eq!(videos[0].id, visible.id);
+        assert!(canary.is_canary);
+        assert!(loaded_canary.video.is_canary);
+        assert_eq!(loaded_canary.bytes, b"canary");
+    }
+
+    #[tokio::test]
+    async fn replace_canary_keeps_only_the_latest_canary_video() {
+        let db = crate::test::database::init()
+            .await
+            .expect("test database should initialize");
+
+        let first = Video::replace_canary(&db, "leo-analysis-canary.mp4", b"first".to_vec())
+            .await
+            .expect("first canary should upload");
+        let second = Video::replace_canary(&db, "leo-analysis-canary.mp4", b"second".to_vec())
+            .await
+            .expect("second canary should upload");
+        let loaded = Video::read_by_name(&db, "leo-analysis-canary.mp4")
+            .await
+            .expect("canary should load")
+            .expect("canary should exist");
+
+        assert_ne!(first.file.key(), second.file.key());
+        assert_eq!(loaded.video.file.key(), second.file.key());
+        assert_eq!(loaded.bytes, b"second");
+        assert!(
+            !file_exists(&db, first.file.key())
+                .await
+                .expect("old canary file existence should be checked")
+        );
     }
 
     #[tokio::test]
