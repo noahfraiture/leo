@@ -24,6 +24,7 @@ const DEFAULT_UPLOAD_CHUNK_GRANULARITY_BYTES: usize = 256 * 1024;
 const DEFAULT_UPLOAD_CHUNK_SIZE_BYTES: usize = 8 * 1024 * 1024;
 const FILE_PROCESSING_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_UPLOAD_CHUNK_ATTEMPTS: usize = 4;
+const MAX_UPLOAD_SESSION_ATTEMPTS: usize = 3;
 
 mod prompts {
     /// Gemini currently receives the raw user prompt after the uploaded videos.
@@ -101,6 +102,24 @@ impl UploadCommand {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UploadRetryDecision {
+    RetryFromOffset(usize),
+    RestartSession,
+}
+
+#[derive(Debug)]
+enum UploadChunksError {
+    Gemini(GeminiError),
+    FinalizedWithoutResponse(GeminiError),
+}
+
+impl From<GeminiError> for UploadChunksError {
+    fn from(error: GeminiError) -> Self {
+        Self::Gemini(error)
+    }
+}
+
 #[derive(Debug, PartialEq)]
 struct UploadedFile {
     uri: String,
@@ -127,6 +146,14 @@ pub enum GeminiError {
     InvalidUploadChunkGranularity { value: String },
     #[error("Gemini upload received-size offset header was invalid: {value}")]
     InvalidUploadOffset { value: String },
+    #[error(
+        "Gemini upload finalized for {name}, but the final response was lost after {attempts} upload session attempts: {source_message}"
+    )]
+    UploadFinalizationUnknown {
+        name: String,
+        attempts: usize,
+        source_message: String,
+    },
     #[error(
         "Gemini upload request failed for {name} at offset {offset} ({bytes} bytes, timeout={timeout}, connect={connect}, body={body}): {source}"
     )]
@@ -208,16 +235,49 @@ impl GeminiClient {
 
     async fn upload_video(&self, video: &VideoInput) -> Result<UploadedFile, GeminiError> {
         let mime_type = video_mime_type(&video.name);
-        let upload_session = self.start_upload(video, mime_type).await?;
-        let upload = self
-            .upload_video_chunks(video, &upload_session, mime_type)
-            .await?;
-        let file = self.wait_for_file_active(upload.file).await?;
 
-        Ok(UploadedFile {
-            uri: file.uri,
-            mime_type: mime_type.to_owned(),
-        })
+        for attempt in 1..=MAX_UPLOAD_SESSION_ATTEMPTS {
+            if attempt > 1 {
+                eprintln!(
+                    "[gemini] restarting upload session name={} attempt={}/{}",
+                    video.name, attempt, MAX_UPLOAD_SESSION_ATTEMPTS
+                );
+            }
+
+            let upload_session = self.start_upload(video, mime_type).await?;
+            let upload = match self
+                .upload_video_chunks(video, &upload_session, mime_type)
+                .await
+            {
+                Ok(upload) => upload,
+                Err(UploadChunksError::Gemini(error)) => return Err(error),
+                Err(UploadChunksError::FinalizedWithoutResponse(error))
+                    if attempt < MAX_UPLOAD_SESSION_ATTEMPTS =>
+                {
+                    eprintln!(
+                        "[gemini] final upload response lost name={} attempt={}/{} error={}",
+                        video.name, attempt, MAX_UPLOAD_SESSION_ATTEMPTS, error
+                    );
+                    continue;
+                }
+                Err(UploadChunksError::FinalizedWithoutResponse(error)) => {
+                    return Err(GeminiError::UploadFinalizationUnknown {
+                        name: video.name.clone(),
+                        attempts: MAX_UPLOAD_SESSION_ATTEMPTS,
+                        source_message: error.to_string(),
+                    });
+                }
+            };
+
+            let file = self.wait_for_file_active(upload.file).await?;
+
+            return Ok(UploadedFile {
+                uri: file.uri,
+                mime_type: mime_type.to_owned(),
+            });
+        }
+
+        unreachable!("upload session retry loop should return")
     }
 
     async fn start_upload(
@@ -251,7 +311,7 @@ impl GeminiClient {
         video: &VideoInput,
         session: &UploadSession,
         mime_type: &'static str,
-    ) -> Result<UploadResponse, GeminiError> {
+    ) -> Result<UploadResponse, UploadChunksError> {
         let total_bytes = video.bytes.len();
         let total_chunks = upload_chunks(
             total_bytes,
@@ -302,7 +362,7 @@ impl GeminiClient {
                 }
                 Err(error) if error.is_retriable_upload_failure() => {
                     if attempts_at_offset >= MAX_UPLOAD_CHUNK_ATTEMPTS {
-                        return Err(error);
+                        return Err(error.into());
                     }
 
                     eprintln!(
@@ -317,24 +377,26 @@ impl GeminiClient {
                         video.name, chunk.offset, received_offset
                     );
 
-                    if received_offset > total_bytes {
-                        return Err(GeminiError::InvalidUploadOffset {
-                            value: received_offset.to_string(),
-                        });
-                    }
-
-                    if received_offset > offset {
-                        offset = received_offset;
-                        chunk_index = upload_chunks(
-                            offset,
-                            session.chunk_granularity,
-                            self.config.upload_chunk_size,
-                        )
-                        .len();
-                        attempts_at_offset = 0;
+                    match upload_retry_decision(total_bytes, chunk, received_offset)? {
+                        UploadRetryDecision::RestartSession => {
+                            return Err(UploadChunksError::FinalizedWithoutResponse(error));
+                        }
+                        UploadRetryDecision::RetryFromOffset(next_offset)
+                            if next_offset > offset =>
+                        {
+                            offset = next_offset;
+                            chunk_index = upload_chunks(
+                                offset,
+                                session.chunk_granularity,
+                                self.config.upload_chunk_size,
+                            )
+                            .len();
+                            attempts_at_offset = 0;
+                        }
+                        UploadRetryDecision::RetryFromOffset(_) => {}
                     }
                 }
-                Err(error) => return Err(error),
+                Err(error) => return Err(error.into()),
             }
         }
 
@@ -345,7 +407,7 @@ impl GeminiClient {
         };
         match self.send_upload_chunk(video, session, chunk).await? {
             Some(upload) => Ok(upload),
-            None => Err(GeminiError::EmptyResponse),
+            None => Err(GeminiError::EmptyResponse.into()),
         }
     }
 
@@ -669,6 +731,24 @@ fn next_upload_chunk(
             UploadCommand::Upload
         },
     }
+}
+
+fn upload_retry_decision(
+    total_bytes: usize,
+    chunk: UploadChunk,
+    received_offset: usize,
+) -> Result<UploadRetryDecision, GeminiError> {
+    if received_offset > total_bytes {
+        return Err(GeminiError::InvalidUploadOffset {
+            value: received_offset.to_string(),
+        });
+    }
+
+    if chunk.command == UploadCommand::UploadAndFinalize && received_offset == total_bytes {
+        return Ok(UploadRetryDecision::RestartSession);
+    }
+
+    Ok(UploadRetryDecision::RetryFromOffset(received_offset))
 }
 
 fn upload_offset_from_headers(headers: &HeaderMap) -> Result<usize, GeminiError> {
@@ -999,6 +1079,21 @@ mod tests {
         let offset = upload_offset_from_headers(&headers).expect("offset should parse");
 
         assert_eq!(offset, 83886080);
+    }
+
+    #[test]
+    fn upload_retry_restarts_session_when_final_chunk_was_consumed() {
+        let total_bytes = 364_996_893;
+        let final_chunk = UploadChunk {
+            offset: 360_710_144,
+            end: total_bytes,
+            command: UploadCommand::UploadAndFinalize,
+        };
+
+        let decision = upload_retry_decision(total_bytes, final_chunk, total_bytes)
+            .expect("retry decision should be valid");
+
+        assert_eq!(decision, UploadRetryDecision::RestartSession);
     }
 
     #[tokio::test]

@@ -1,10 +1,11 @@
-use std::env;
+use std::{env, error::Error as _, time::Duration};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use reqwest::{StatusCode, header::CONTENT_TYPE};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use thiserror::Error;
+use tokio::time::sleep;
 
 use crate::analysis::{
     chunking::{ChunkingOptions, FrameChunk, chunk_frames_by_payload},
@@ -16,6 +17,8 @@ const DEFAULT_MODEL: &str = "gpt-5.5";
 const DEFAULT_IMAGE_DETAIL: &str = "low";
 const RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
 const BASE64_JSON_OVERHEAD_BYTES: usize = 192;
+const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(300);
+const MAX_OPENAI_REQUEST_ATTEMPTS: usize = 3;
 
 mod prompts {
     pub const VIDEO_ANALYSIS_INSTRUCTIONS: &str = "Analyze sampled video frames. Frames are chronological, may be chunked with overlap, and include video names and timestamps. Follow the user's request; use precise timestamps when they matter.";
@@ -60,6 +63,14 @@ pub struct OpenAiConfig {
     image_detail: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RequestFailure {
+    timeout: bool,
+    connect: bool,
+    body: bool,
+    request: bool,
+}
+
 struct OpenAiChunkRequest<'a> {
     config: &'a OpenAiConfig,
     prompt: &'a str,
@@ -90,16 +101,49 @@ pub enum OpenAiError {
     Api { status: StatusCode, body: String },
     #[error("OpenAI did not return any text")]
     EmptyResponse,
+    #[error(
+        "OpenAI request failed during {stage} at attempt {attempt}/{attempts} (payload_bytes={payload_bytes}, timeout={timeout}, connect={connect}, body={body}, request={request}, chain={chain}): {source}"
+    )]
+    Request {
+        stage: String,
+        attempt: usize,
+        attempts: usize,
+        payload_bytes: usize,
+        timeout: bool,
+        connect: bool,
+        body: bool,
+        request: bool,
+        chain: String,
+        #[source]
+        source: reqwest::Error,
+    },
     #[error(transparent)]
     FrameExtraction(#[from] crate::analysis::frames::FrameExtractionError),
     #[error(transparent)]
     Http(#[from] reqwest::Error),
 }
 
+impl RequestFailure {
+    fn from_error(error: &reqwest::Error) -> Self {
+        Self {
+            timeout: error.is_timeout(),
+            connect: error.is_connect(),
+            body: error.is_body(),
+            request: error.is_request(),
+        }
+    }
+
+    fn is_retriable(self) -> bool {
+        self.timeout || self.connect || self.body || self.request
+    }
+}
+
 impl OpenAiClient {
     pub fn from_env() -> Result<Self, OpenAiError> {
         Ok(Self {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(DEFAULT_HTTP_TIMEOUT)
+                .build()?,
             config: OpenAiConfig::from_env()?,
         })
     }
@@ -114,10 +158,29 @@ impl OpenAiClient {
             return Err(OpenAiError::EmptyFrames);
         }
 
-        let chunks = chunk_frames_by_payload(frames, ChunkingOptions::from_env(), |frame| {
-            openai_frame_image_input(frame).estimated_payload_bytes()
-        });
+        let frame_count = frames.len();
+        let raw_frame_bytes = frames.iter().map(|frame| frame.bytes.len()).sum::<usize>();
+        let estimated_frame_payload_bytes =
+            frames.iter().map(openai_frame_payload_bytes).sum::<usize>();
+        let chunking = ChunkingOptions::from_env();
+        eprintln!(
+            "[openai] extracted frames videos={} frames={} raw_frame_bytes={} estimated_frame_payload_bytes={} sample_rate_fps={}",
+            request.videos.len(),
+            frame_count,
+            raw_frame_bytes,
+            estimated_frame_payload_bytes,
+            request.settings.frame_sample_rate_fps,
+        );
+
+        let chunks = chunk_frames_by_payload(frames, chunking, openai_frame_payload_bytes);
         let chunk_count = chunks.len();
+        eprintln!(
+            "[openai] chunked frames chunks={} max_images={} max_payload_bytes={} overlap_percent={}",
+            chunk_count,
+            chunking.max_images_per_request,
+            chunking.max_payload_bytes_per_request,
+            chunking.overlap_percent,
+        );
         let mut responses = Vec::with_capacity(chunk_count);
 
         for (index, chunk) in chunks.iter().enumerate() {
@@ -137,23 +200,43 @@ impl OpenAiClient {
         chunk_count: usize,
         chunk: &FrameChunk,
     ) -> Result<String, OpenAiError> {
-        let response = self
-            .http
-            .post(RESPONSES_URL)
-            .bearer_auth(&self.config.api_key)
-            .header(CONTENT_TYPE, "application/json")
-            .json(&generate_response_request(OpenAiChunkRequest {
-                config: &self.config,
-                prompt,
-                chunk_index,
-                chunk_count,
-                chunk,
-            }))
-            .send()
-            .await?;
-        let response: OpenAiResponse = success_json(response).await?;
+        let request = generate_response_request(OpenAiChunkRequest {
+            config: &self.config,
+            prompt,
+            chunk_index,
+            chunk_count,
+            chunk,
+        });
+        let payload_bytes = json_payload_size(&request);
+        let estimated_frame_payload_bytes = chunk
+            .frames
+            .iter()
+            .map(openai_frame_payload_bytes)
+            .sum::<usize>();
+        let stage = format!("chunk {}/{}", chunk_index + 1, chunk_count);
+        eprintln!(
+            "[openai] chunk request chunk={}/{} frames={} start_secs={:.3} end_secs={:.3} estimated_frame_payload_bytes={} json_payload_bytes={}",
+            chunk_index + 1,
+            chunk_count,
+            chunk.frames.len(),
+            chunk.start_secs,
+            chunk.end_secs,
+            estimated_frame_payload_bytes,
+            payload_bytes,
+        );
 
-        response.text().ok_or(OpenAiError::EmptyResponse)
+        let response = self
+            .send_response_request(&stage, payload_bytes, &request)
+            .await?;
+        let text = response.text().ok_or(OpenAiError::EmptyResponse)?;
+        eprintln!(
+            "[openai] chunk response chunk={}/{} chars={}",
+            chunk_index + 1,
+            chunk_count,
+            text.len()
+        );
+
+        Ok(text)
     }
 
     async fn summarize_chunks(
@@ -161,17 +244,83 @@ impl OpenAiClient {
         prompt: &str,
         chunks: &[String],
     ) -> Result<String, OpenAiError> {
-        let response = self
-            .http
-            .post(RESPONSES_URL)
-            .bearer_auth(&self.config.api_key)
-            .header(CONTENT_TYPE, "application/json")
-            .json(&summarize_chunks_request(&self.config, prompt, chunks))
-            .send()
-            .await?;
-        let response: OpenAiResponse = success_json(response).await?;
+        let request = summarize_chunks_request(&self.config, prompt, chunks);
+        let payload_bytes = json_payload_size(&request);
+        eprintln!(
+            "[openai] summary request chunks={} json_payload_bytes={}",
+            chunks.len(),
+            payload_bytes,
+        );
 
-        response.text().ok_or(OpenAiError::EmptyResponse)
+        let response = self
+            .send_response_request("summary", payload_bytes, &request)
+            .await?;
+        let text = response.text().ok_or(OpenAiError::EmptyResponse)?;
+        eprintln!("[openai] summary response chars={}", text.len());
+
+        Ok(text)
+    }
+
+    async fn send_response_request(
+        &self,
+        stage: &str,
+        payload_bytes: usize,
+        body: &Value,
+    ) -> Result<OpenAiResponse, OpenAiError> {
+        for attempt in 1..=MAX_OPENAI_REQUEST_ATTEMPTS {
+            eprintln!(
+                "[openai] request send stage={} attempt={}/{} payload_bytes={}",
+                stage, attempt, MAX_OPENAI_REQUEST_ATTEMPTS, payload_bytes,
+            );
+            let response = self
+                .http
+                .post(RESPONSES_URL)
+                .bearer_auth(&self.config.api_key)
+                .header(CONTENT_TYPE, "application/json")
+                .json(body)
+                .send()
+                .await;
+
+            match response {
+                Ok(response) => return success_json(response).await,
+                Err(source) => {
+                    let failure = RequestFailure::from_error(&source);
+                    let chain = error_chain(&source);
+                    if failure.is_retriable() && attempt < MAX_OPENAI_REQUEST_ATTEMPTS {
+                        eprintln!(
+                            "[openai] request retry stage={} attempt={}/{} payload_bytes={} timeout={} connect={} body={} request={} error={} chain={}",
+                            stage,
+                            attempt,
+                            MAX_OPENAI_REQUEST_ATTEMPTS,
+                            payload_bytes,
+                            failure.timeout,
+                            failure.connect,
+                            failure.body,
+                            failure.request,
+                            source,
+                            chain,
+                        );
+                        sleep(Duration::from_secs(attempt as u64)).await;
+                        continue;
+                    }
+
+                    return Err(OpenAiError::Request {
+                        stage: stage.to_owned(),
+                        attempt,
+                        attempts: MAX_OPENAI_REQUEST_ATTEMPTS,
+                        payload_bytes,
+                        timeout: failure.timeout,
+                        connect: failure.connect,
+                        body: failure.body,
+                        request: failure.request,
+                        chain,
+                        source,
+                    });
+                }
+            }
+        }
+
+        unreachable!("OpenAI request retry loop should return")
     }
 }
 
@@ -243,6 +392,32 @@ where
         status,
         body: response.text().await.unwrap_or_default(),
     })
+}
+
+fn openai_frame_payload_bytes(frame: &VideoFrame) -> usize {
+    openai_frame_image_input(frame).estimated_payload_bytes()
+}
+
+fn json_payload_size(value: &Value) -> usize {
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len())
+        .unwrap_or_default()
+}
+
+fn error_chain(error: &reqwest::Error) -> String {
+    let mut messages = Vec::new();
+    let mut source = error.source();
+
+    while let Some(error) = source {
+        messages.push(error.to_string());
+        source = error.source();
+    }
+
+    if messages.is_empty() {
+        "none".to_owned()
+    } else {
+        messages.join(" | ")
+    }
 }
 
 fn generate_response_request(request: OpenAiChunkRequest<'_>) -> Value {
@@ -349,8 +524,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        OpenAiChunkRequest, OpenAiConfig, OpenAiImageInput, generate_response_request,
-        summarize_chunks_request,
+        OpenAiChunkRequest, OpenAiConfig, OpenAiImageInput, RequestFailure,
+        generate_response_request, summarize_chunks_request,
     };
     use crate::analysis::{chunking::FrameChunk, request::VideoFrame};
 
@@ -436,5 +611,54 @@ mod tests {
 
         assert!(input.estimated_payload_bytes() > bytes.len());
         assert!(input.estimated_payload_bytes() >= "data:image/jpeg;base64,eHh4".len());
+    }
+
+    #[test]
+    fn request_failures_mark_transient_send_errors_as_retriable() {
+        assert!(
+            RequestFailure {
+                timeout: true,
+                connect: false,
+                body: false,
+                request: false,
+            }
+            .is_retriable()
+        );
+        assert!(
+            RequestFailure {
+                timeout: false,
+                connect: true,
+                body: false,
+                request: false,
+            }
+            .is_retriable()
+        );
+        assert!(
+            RequestFailure {
+                timeout: false,
+                connect: false,
+                body: true,
+                request: false,
+            }
+            .is_retriable()
+        );
+        assert!(
+            RequestFailure {
+                timeout: false,
+                connect: false,
+                body: false,
+                request: true,
+            }
+            .is_retriable()
+        );
+        assert!(
+            !RequestFailure {
+                timeout: false,
+                connect: false,
+                body: false,
+                request: false,
+            }
+            .is_retriable()
+        );
     }
 }
