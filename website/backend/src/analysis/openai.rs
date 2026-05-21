@@ -21,7 +21,7 @@ const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_OPENAI_REQUEST_ATTEMPTS: usize = 3;
 
 mod prompts {
-    pub const VIDEO_ANALYSIS_INSTRUCTIONS: &str = "Analyze sampled video frames. Frames are chronological, may be chunked with overlap, and include video names and timestamps. Follow the user's request; use precise timestamps when they matter.";
+    pub const VIDEO_ANALYSIS_INSTRUCTIONS: &str = "Analyze sampled video frames. Frames are chronological, may be chunked with overlap, and include video names and timestamps. Follow the user's request; use precise timestamps when they matter. Return plain text, not Markdown.";
 
     pub fn chunk_evidence_request(
         user_prompt: &str,
@@ -41,7 +41,7 @@ mod prompts {
 
     pub fn final_summary_request(user_prompt: &str, chunk_notes: &[String]) -> String {
         format!(
-            "User request:\n{user_prompt}\n\nChunk notes:\n{}\n\nWrite the final answer. Use timestamps only when helpful. Do not mention chunking or overlap unless relevant.",
+            "User request:\n{user_prompt}\n\nChunk notes:\n{}\n\nWrite the final answer in plain text, not Markdown. Use timestamps only when helpful. Do not mention chunking or overlap unless relevant.",
             chunk_notes
                 .iter()
                 .enumerate()
@@ -612,7 +612,7 @@ mod tests {
             request,
             json!({
                 "model": "gpt-test",
-                "instructions": "Analyze sampled video frames. Frames are chronological, may be chunked with overlap, and include video names and timestamps. Follow the user's request; use precise timestamps when they matter.",
+                "instructions": "Analyze sampled video frames. Frames are chronological, may be chunked with overlap, and include video names and timestamps. Follow the user's request; use precise timestamps when they matter. Return plain text, not Markdown.",
                 "input": [{
                     "role": "user",
                     "content": [
@@ -650,7 +650,7 @@ mod tests {
 
         assert_eq!(
             request["input"][0]["content"][0]["text"],
-            "User request:\nFind the key moment.\n\nChunk notes:\nChunk 1:\nnotes\n\nWrite the final answer. Use timestamps only when helpful. Do not mention chunking or overlap unless relevant."
+            "User request:\nFind the key moment.\n\nChunk notes:\nChunk 1:\nnotes\n\nWrite the final answer in plain text, not Markdown. Use timestamps only when helpful. Do not mention chunking or overlap unless relevant."
         );
     }
 

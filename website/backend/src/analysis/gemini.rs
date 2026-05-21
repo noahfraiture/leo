@@ -27,13 +27,11 @@ const MAX_UPLOAD_CHUNK_ATTEMPTS: usize = 4;
 const MAX_UPLOAD_SESSION_ATTEMPTS: usize = 3;
 
 mod prompts {
-    /// Gemini currently receives the raw user prompt after the uploaded videos.
-    ///
     /// Keep this function as the single edit point for Gemini prompt shaping so
     /// future provider-specific instructions do not get scattered through the
     /// request builder.
     pub fn user_prompt(prompt: &str) -> String {
-        prompt.to_owned()
+        format!("{prompt}\n\nReturn plain text, not Markdown.")
     }
 }
 
@@ -1023,7 +1021,7 @@ mod tests {
                             }
                         },
                         {
-                            "text": "Find the key moments."
+                            "text": "Find the key moments.\n\nReturn plain text, not Markdown."
                         }
                     ]
                 }]
