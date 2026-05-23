@@ -12,13 +12,10 @@ use serde_json::json;
 use crate::{
     db,
     http::{metrics::AppMetrics, ui},
+    upload::{
+        ChunkedUploadStore, MAX_VIDEO_UPLOAD_SIZE_BYTES, VIDEO_UPLOAD_CHUNK_REQUEST_LIMIT_BYTES,
+    },
 };
-
-pub const MAX_VIDEO_UPLOAD_SIZE_BYTES: usize = 4 * 1024 * 1024 * 1024;
-pub const MAX_VIDEO_UPLOAD_SIZE_LABEL: &str = "4 GiB";
-pub const VIDEO_UPLOAD_CHUNK_SIZE_BYTES: usize = 64 * 1024 * 1024;
-pub const VIDEO_UPLOAD_CHUNK_REQUEST_LIMIT_BYTES: usize =
-    VIDEO_UPLOAD_CHUNK_SIZE_BYTES + 1024 * 1024;
 
 /// Shared application services passed through axum state and reused by UI
 /// route dispatch.
@@ -30,7 +27,7 @@ pub const VIDEO_UPLOAD_CHUNK_REQUEST_LIMIT_BYTES: usize =
 #[derive(Clone)]
 pub struct AppState {
     db: db::Database,
-    chunked_uploads: ui::features::ChunkedUploadStore,
+    chunked_uploads: ChunkedUploadStore,
     metrics: AppMetrics,
     run_analysis_jobs: bool,
 }
@@ -41,9 +38,7 @@ pub async fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState {
         db,
-        chunked_uploads: ui::features::ChunkedUploadStore::new(
-            upload_bucket_path.join(".partial"),
-        )?,
+        chunked_uploads: ChunkedUploadStore::new(upload_bucket_path.join(".partial"))?,
         metrics: AppMetrics::default(),
         run_analysis_jobs: true,
     };
@@ -140,7 +135,7 @@ impl AppState {
         &self.db
     }
 
-    pub fn chunked_uploads(&self) -> &ui::features::ChunkedUploadStore {
+    pub fn chunked_uploads(&self) -> &ChunkedUploadStore {
         &self.chunked_uploads
     }
 
@@ -160,7 +155,7 @@ impl AppState {
 
         Self {
             db: test_database.db,
-            chunked_uploads: ui::features::ChunkedUploadStore::new(
+            chunked_uploads: ChunkedUploadStore::new(
                 test_database.upload_bucket_path.join(".partial"),
             )
             .expect("test chunk staging should initialize"),
@@ -178,6 +173,8 @@ mod tests {
     };
     use serde_json::{Value, json};
     use tower::ServiceExt;
+
+    use crate::upload::{MAX_VIDEO_UPLOAD_SIZE_BYTES, VIDEO_UPLOAD_CHUNK_SIZE_BYTES};
 
     use super::*;
 

@@ -18,6 +18,8 @@ pub enum RouteError {
     Analysis(#[from] crate::db::analysis::AnalysisError),
     #[error(transparent)]
     AiAnalysis(#[from] crate::analysis::error::AnalysisError),
+    #[error(transparent)]
+    AnalysisJob(#[from] crate::analysis::job::AnalysisJobError),
     #[error("{0}")]
     BadRequest(&'static str),
     #[error("failed to extract embedded route input for {route}: {message}")]
@@ -55,6 +57,26 @@ impl IntoResponse for RouteError {
                 format!("analysis route failure: {error}"),
             )
                 .into_response(),
+            Self::AnalysisJob(error) => match error {
+                crate::analysis::job::AnalysisJobError::BadRequest(message) => {
+                    (StatusCode::BAD_REQUEST, message).into_response()
+                }
+                crate::analysis::job::AnalysisJobError::Video(error) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("video route failure: {error}"),
+                )
+                    .into_response(),
+                crate::analysis::job::AnalysisJobError::Analysis(error) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("analysis route failure: {error}"),
+                )
+                    .into_response(),
+                crate::analysis::job::AnalysisJobError::AiAnalysis(error) => (
+                    StatusCode::BAD_GATEWAY,
+                    format!("analysis route failure: {error}"),
+                )
+                    .into_response(),
+            },
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message).into_response(),
             Self::EmbeddedInput { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()).into_response()

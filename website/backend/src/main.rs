@@ -5,6 +5,7 @@ mod db;
 mod http;
 #[cfg(test)]
 mod test;
+mod upload;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

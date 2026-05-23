@@ -3,7 +3,9 @@ pub mod chunking;
 pub mod error;
 pub mod frames;
 pub mod gemini;
+pub mod job;
 pub mod openai;
+pub mod prompts;
 pub mod provider;
 pub mod request;
 

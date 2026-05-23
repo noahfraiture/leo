@@ -5,12 +5,13 @@ use hypertext::prelude::*;
 use crate::{
     db,
     http::{
-        router::{AppState, MAX_VIDEO_UPLOAD_SIZE_LABEL},
+        router::AppState,
         ui::{
             NoInput, Public, Route, RouteContext, RouteError, RouteView, document,
             not_found_fragment,
         },
     },
+    upload::MAX_VIDEO_UPLOAD_SIZE_LABEL,
 };
 
 const RECENT_ANALYSIS_LIMIT: usize = 5;

@@ -10,7 +10,10 @@ use thiserror::Error;
 use tokio::time::{Instant, sleep};
 
 use crate::{
-    analysis::request::{AnalysisRequest, AnalysisSettings, AnalysisTelemetry},
+    analysis::{
+        prompts::gemini as prompts,
+        request::{AnalysisRequest, AnalysisSettings, AnalysisTelemetry},
+    },
     db,
 };
 
@@ -30,15 +33,6 @@ const DEFAULT_UPLOAD_CHUNK_SIZE_BUCKETS_BYTES: [usize; 4] = [
 const FILE_PROCESSING_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_UPLOAD_CHUNK_ATTEMPTS: usize = 4;
 const MAX_UPLOAD_SESSION_ATTEMPTS: usize = 3;
-
-mod prompts {
-    /// Keep this function as the single edit point for Gemini prompt shaping so
-    /// future provider-specific instructions do not get scattered through the
-    /// request builder.
-    pub fn user_prompt(prompt: &str) -> String {
-        format!("{prompt}\n\nReturn plain text, not Markdown.")
-    }
-}
 
 pub async fn analyze_videos(
     videos: &[db::video::VideoAsset],

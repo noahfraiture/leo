@@ -9,7 +9,7 @@ use crate::{
         request::AnalysisSettings,
     },
     db,
-    http::{router::AppState, ui},
+    http::{analysis_jobs, router::AppState},
 };
 
 pub fn spawn_canary(state: AppState) {
@@ -144,7 +144,7 @@ async fn run_once(state: &AppState, config: &CanaryConfig) {
                         "video_name": video.name,
                     })
                 );
-                ui::features::spawn_analysis_job(state.clone(), analysis);
+                analysis_jobs::spawn_analysis_job(state.clone(), analysis);
             }
             Err(error) => {
                 state
