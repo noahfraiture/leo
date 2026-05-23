@@ -4,7 +4,7 @@ use tempfile::NamedTempFile;
 use thiserror::Error;
 use tokio::{fs, process::Command};
 
-use crate::{analysis::request::VideoFrame, db};
+use crate::analysis::request::{AnalysisVideo, VideoFrame};
 
 const DEFAULT_FRAME_SAMPLE_RATE_FPS: f64 = 0.2;
 const FRAME_OUTPUT_PATTERN: &str = "frame-%06d.jpg";
@@ -50,7 +50,7 @@ impl FrameExtractionConfig {
 }
 
 pub async fn extract_video_frames(
-    videos: &[db::video::VideoAsset],
+    videos: &[AnalysisVideo],
     config: FrameExtractionConfig,
 ) -> Result<Vec<VideoFrame>, FrameExtractionError> {
     let mut frames = Vec::new();
@@ -63,7 +63,7 @@ pub async fn extract_video_frames(
 }
 
 async fn extract_single_video_frames(
-    video: &db::video::VideoAsset,
+    video: &AnalysisVideo,
     config: FrameExtractionConfig,
 ) -> Result<Vec<VideoFrame>, FrameExtractionError> {
     let mut input = NamedTempFile::new()?;
@@ -92,7 +92,7 @@ async fn extract_single_video_frames(
 
     if !output.status.success() {
         return Err(FrameExtractionError::CommandFailed {
-            name: video.video.name.clone(),
+            name: video.name.clone(),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         });
     }
@@ -100,14 +100,14 @@ async fn extract_single_video_frames(
     let files = frame_files(output_dir.path()).await?;
     if files.is_empty() {
         return Err(FrameExtractionError::Empty {
-            name: video.video.name.clone(),
+            name: video.name.clone(),
         });
     }
 
     let mut frames = Vec::with_capacity(files.len());
     for (index, path) in files.iter().enumerate() {
         frames.push(VideoFrame {
-            video_name: video.video.name.clone(),
+            video_name: video.name.clone(),
             timestamp_secs: index as f64 * seconds_per_frame,
             mime_type: "image/jpeg",
             bytes: fs::read(path).await?,

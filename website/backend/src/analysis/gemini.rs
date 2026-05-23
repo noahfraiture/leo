@@ -9,12 +9,9 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::time::{Instant, sleep};
 
-use crate::{
-    analysis::{
-        prompts::gemini as prompts,
-        request::{AnalysisRequest, AnalysisSettings, AnalysisTelemetry},
-    },
-    db,
+use crate::analysis::{
+    prompts::gemini as prompts,
+    request::{AnalysisRequest, AnalysisSettings, AnalysisTelemetry, AnalysisVideo},
 };
 
 const DEFAULT_MODEL: &str = "gemini-3-flash-preview";
@@ -34,10 +31,7 @@ const FILE_PROCESSING_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_UPLOAD_CHUNK_ATTEMPTS: usize = 4;
 const MAX_UPLOAD_SESSION_ATTEMPTS: usize = 3;
 
-pub async fn analyze_videos(
-    videos: &[db::video::VideoAsset],
-    prompt: &str,
-) -> Result<String, GeminiError> {
+pub async fn analyze_videos(videos: &[AnalysisVideo], prompt: &str) -> Result<String, GeminiError> {
     let client = GeminiClient::from_env()?;
 
     client
@@ -204,13 +198,22 @@ impl GeminiClient {
         })
     }
 
+    pub fn from_env_with_model(model: Option<String>) -> Result<Self, GeminiError> {
+        let mut client = Self::from_env()?;
+        if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
+            client.config.model = model;
+        }
+
+        Ok(client)
+    }
+
     pub async fn analyze(&self, request: AnalysisRequest) -> Result<String, GeminiError> {
         let telemetry = request.telemetry.clone();
         let videos = request
             .videos
             .iter()
             .map(|asset| VideoInput {
-                name: asset.video.name.clone(),
+                name: asset.name.clone(),
                 bytes: asset.bytes.clone(),
             })
             .collect::<Vec<_>>();

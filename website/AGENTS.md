@@ -43,6 +43,7 @@ The videos files will live in surrealdb with the new file support. They will als
 11. SurrealDB runs embedded in the backend process. Do not add a required local SurrealDB server task unless the architecture changes.
 12. Prefer public struct fields for simple data models over trivial accessor methods.
 - Keep LLM-facing workflow code under `backend/src/analysis/`: persisted job orchestration belongs in `analysis/job.rs`, provider prompt text belongs in `analysis/prompts/`, and UI feature files should only translate HTTP inputs and render views.
+- Keep CLI local-video analysis on `analysis::request::AnalysisVideo`; it should not go through upload routes, SurrealDB file buckets, or HTTP UI code.
 
 ### Production Debugging
 

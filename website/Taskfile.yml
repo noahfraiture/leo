@@ -91,6 +91,12 @@ tasks:
     cmds:
       - task run
 
+  backend:analyze:
+    desc: Analyze local videos from the CLI
+    dir: backend
+    cmds:
+      - cargo run -- analyze {{.CLI_ARGS}}
+
   backend:watch:
     dir: backend
     cmds:

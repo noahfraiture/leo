@@ -1,7 +1,5 @@
 use serde_json::{Map, Value, json};
 
-use crate::db;
-
 pub const DEFAULT_FRAME_SAMPLE_RATE_FPS: f64 = 0.2;
 
 /// Provider-agnostic analysis input built by the background job.
@@ -9,10 +7,16 @@ pub const DEFAULT_FRAME_SAMPLE_RATE_FPS: f64 = 0.2;
 /// Providers decide whether to upload the original video bytes directly or to
 /// convert them into sampled frames before calling their model API.
 pub struct AnalysisRequest {
-    pub videos: Vec<db::video::VideoAsset>,
+    pub videos: Vec<AnalysisVideo>,
     pub prompt: String,
     pub settings: AnalysisSettings,
     pub telemetry: AnalysisTelemetry,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnalysisVideo {
+    pub name: String,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

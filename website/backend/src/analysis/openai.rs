@@ -117,6 +117,15 @@ impl OpenAiClient {
         })
     }
 
+    pub fn from_env_with_model(model: Option<String>) -> Result<Self, OpenAiError> {
+        let mut client = Self::from_env()?;
+        if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
+            client.config.model = model;
+        }
+
+        Ok(client)
+    }
+
     pub async fn analyze(&self, request: AnalysisRequest) -> Result<String, OpenAiError> {
         let telemetry = request.telemetry.clone();
         let frames = extract_video_frames(

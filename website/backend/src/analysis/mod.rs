@@ -13,13 +13,11 @@ use std::str::FromStr;
 
 use error::AnalysisError;
 use provider::AnalysisProvider;
-use request::{AnalysisRequest, AnalysisSettings, AnalysisTelemetry};
-
-use crate::db;
+use request::{AnalysisRequest, AnalysisSettings, AnalysisTelemetry, AnalysisVideo};
 
 pub async fn analyze_videos(
     provider: AnalysisProvider,
-    videos: Vec<db::video::VideoAsset>,
+    videos: Vec<AnalysisVideo>,
     prompt: impl Into<String>,
     settings: AnalysisSettings,
 ) -> Result<String, AnalysisError> {
@@ -35,7 +33,7 @@ pub async fn analyze_videos(
 
 pub async fn analyze_videos_with_telemetry(
     provider: AnalysisProvider,
-    videos: Vec<db::video::VideoAsset>,
+    videos: Vec<AnalysisVideo>,
     prompt: impl Into<String>,
     settings: AnalysisSettings,
     telemetry: AnalysisTelemetry,

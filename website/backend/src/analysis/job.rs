@@ -5,8 +5,11 @@ use thiserror::Error;
 
 use crate::{
     analysis::{
-        self as ai_analysis, error::AnalysisError as AiAnalysisError, gemini::GeminiError,
-        openai::OpenAiError, request::AnalysisTelemetry,
+        self as ai_analysis,
+        error::AnalysisError as AiAnalysisError,
+        gemini::GeminiError,
+        openai::OpenAiError,
+        request::{AnalysisTelemetry, AnalysisVideo},
     },
     db,
 };
@@ -117,7 +120,10 @@ pub async fn run_analysis_job(
         let Some(video) = db::video::Video::read_by_file_key(db, key).await? else {
             return Err(AnalysisJobError::BadRequest("selected video was not found"));
         };
-        videos.push(video);
+        videos.push(AnalysisVideo {
+            name: video.video.name,
+            bytes: video.bytes,
+        });
     }
     let total_video_bytes = videos.iter().map(|asset| asset.bytes.len() as i64).sum();
     record_analysis_event(
