@@ -32,6 +32,7 @@ impl Default for AnalysisSettings {
 pub struct AnalysisTelemetry {
     pub analysis_id: Option<String>,
     pub provider: Option<String>,
+    pub is_canary: bool,
 }
 
 impl AnalysisTelemetry {
@@ -39,7 +40,13 @@ impl AnalysisTelemetry {
         Self {
             analysis_id: Some(analysis_id.into()),
             provider: Some(provider.into()),
+            is_canary: false,
         }
+    }
+
+    pub fn with_canary(mut self, is_canary: bool) -> Self {
+        self.is_canary = is_canary;
+        self
     }
 
     pub fn event_json(
@@ -61,6 +68,8 @@ impl AnalysisTelemetry {
         if let Some(provider) = &self.provider {
             payload.insert("provider".to_owned(), json!(provider));
         }
+
+        payload.insert("is_canary".to_owned(), json!(self.is_canary));
 
         for (key, value) in fields {
             payload.insert(key.to_owned(), value);
@@ -100,7 +109,7 @@ mod tests {
 
     #[test]
     fn telemetry_events_render_as_structured_json_with_correlation_fields() {
-        let telemetry = AnalysisTelemetry::new("analysis-123", "openai");
+        let telemetry = AnalysisTelemetry::new("analysis-123", "openai").with_canary(true);
 
         let line = telemetry.event_json(
             "info",
@@ -117,6 +126,7 @@ mod tests {
 
         assert_eq!(value["analysis_id"], "analysis-123");
         assert_eq!(value["provider"], "openai");
+        assert_eq!(value["is_canary"], true);
         assert_eq!(value["component"], "openai");
         assert_eq!(value["event"], "request_retry");
         assert_eq!(value["stage"], "chunk 1/1");

@@ -73,7 +73,7 @@ Useful log fields include `analysis_id`, `provider`, `component`, `event`, `stag
 18. Provider-specific events to look for:
 
 - OpenAI: `frames_extracted`, `frames_chunked`, `chunk_request`, `request_send`, `request_retry`, `summary_response`.
-- Gemini: `upload_started`, `upload_chunk_send`, `upload_chunk_retry`, `upload_offset_queried`, `upload_final_response_lost`, `generate_content_response`.
+- Gemini: `upload_chunk_size_selected`, `upload_started`, `upload_chunk_send`, `upload_chunk_retry`, `upload_offset_queried`, `upload_completed`, `upload_final_response_lost`, `generate_content_response`.
 - Job lifecycle: `analysis_job` `started` / `failed`, plus persisted analysis events `queued`, `running`, `videos_loaded`, `complete`.
 - Uploads: `session_started`, `chunk_accepted`, `chunk_failed`, `session_completed`; chunk logs include browser retry headers as `client_attempt` and `total_chunks`.
 
@@ -97,20 +97,22 @@ curl -fsSL http://petite.at/metrics
 
 21. Synthetic canaries are controlled by `ANALYSIS_CANARY_*` env vars in the HelmRelease. Production currently queues OpenAI and Gemini canaries on startup and then daily. Canary analyses and the canary video upload are hidden from normal user-facing history, and each canary cycle prunes the previous synthetic analysis for each provider before queuing the next one. The canary video is named `leo-analysis-canary.mp4` and is replaced on each run. Use canary log lines to get the latest generated analysis ids, then inspect those `/analysis/<id>` fragments while that canary is still the latest one.
 
-22. To deploy website code, push this repository first and wait for the `Publish website image` workflow. It publishes tags shaped like `prod-<run>-<short-sha>`. Then update the Leo HelmRelease image tag in `~/nix`, commit, push, reconcile Flux, and verify the deployment image on Helios.
+22. Gemini upload chunk-size experiments are selected from `GEMINI_UPLOAD_CHUNK_SIZE_BUCKETS_BYTES` when set, otherwise the default buckets are 8, 16, 32, and 64 MiB. `GEMINI_UPLOAD_CHUNK_SIZE_BYTES` forces one fixed chunk size and disables bucketing. The bucket is selected deterministically from the analysis id; canary analyses are marked with `is_canary: true` and use the first bucket so they can be excluded from production-traffic analysis. Use `upload_completed` log fields `is_canary`, `chunk_size`, `chunks`, `send_attempts`, `retry_count`, `timeout_retries`, `bytes`, and `duration_ms` to compare production traffic.
+
+23. To deploy website code, push this repository first and wait for the `Publish website image` workflow. It publishes tags shaped like `prod-<run>-<short-sha>`. Then update the Leo HelmRelease image tag in `~/nix`, commit, push, reconcile Flux, and verify the deployment image on Helios.
 
 ### Backend UI
 
-23. Keep a single mounted page `Route` / `RouteView` pair per file.
-24. Keep backend UI feature files page-oriented. Extract a shared file only when markup or logic is meaningfully reused.
-25. Do not extract a render helper that is called only once from the same file unless it materially improves readability.
-26. Meaningful composable fragments should be embedded `Route` / `RouteView` types in their own file, not plain helper functions.
-27. Full pages render through `document()`. `fragment()` is the HTMX and embedding render surface.
-28. Prefer DaisyUI classes and semantic state tokens over raw Tailwind color utilities when DaisyUI has an equivalent.
-29. Prefer native axum extractors such as `Path`, `Query`, `Form`, `Multipart`, and tuples of extractors for route input. Match the existing `Route::Input = (Path<T>, NoInput)` style for path-only UI routes instead of hand-parsing request URIs.
-30. Only introduce custom input/extractor types when they add validation or behavior that axum extractors cannot express cleanly, such as parsing repeated HTML form fields into `Vec<T>`.
+24. Keep a single mounted page `Route` / `RouteView` pair per file.
+25. Keep backend UI feature files page-oriented. Extract a shared file only when markup or logic is meaningfully reused.
+26. Do not extract a render helper that is called only once from the same file unless it materially improves readability.
+27. Meaningful composable fragments should be embedded `Route` / `RouteView` types in their own file, not plain helper functions.
+28. Full pages render through `document()`. `fragment()` is the HTMX and embedding render surface.
+29. Prefer DaisyUI classes and semantic state tokens over raw Tailwind color utilities when DaisyUI has an equivalent.
+30. Prefer native axum extractors such as `Path`, `Query`, `Form`, `Multipart`, and tuples of extractors for route input. Match the existing `Route::Input = (Path<T>, NoInput)` style for path-only UI routes instead of hand-parsing request URIs.
+31. Only introduce custom input/extractor types when they add validation or behavior that axum extractors cannot express cleanly, such as parsing repeated HTML form fields into `Vec<T>`.
 
 ### Tests
 
-31. Keep tests focused on non-trivial behavior and shared contracts.
-32. Do not add tests for straightforward UI composition or refactor-only changes unless the user asked for them or the change introduces logic.
+32. Keep tests focused on non-trivial behavior and shared contracts.
+33. Do not add tests for straightforward UI composition or refactor-only changes unless the user asked for them or the change introduces logic.

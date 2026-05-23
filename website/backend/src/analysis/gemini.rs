@@ -21,7 +21,12 @@ const GENERATE_URL_PREFIX: &str = "https://generativelanguage.googleapis.com/v1b
 const DEFAULT_FILE_PROCESSING_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_UPLOAD_CHUNK_GRANULARITY_BYTES: usize = 256 * 1024;
-const DEFAULT_UPLOAD_CHUNK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_UPLOAD_CHUNK_SIZE_BUCKETS_BYTES: [usize; 4] = [
+    8 * 1024 * 1024,
+    16 * 1024 * 1024,
+    32 * 1024 * 1024,
+    64 * 1024 * 1024,
+];
 const FILE_PROCESSING_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_UPLOAD_CHUNK_ATTEMPTS: usize = 4;
 const MAX_UPLOAD_SESSION_ATTEMPTS: usize = 3;
@@ -60,7 +65,7 @@ struct GeminiConfig {
     api_key: String,
     model: String,
     file_processing_timeout: Duration,
-    upload_chunk_size: usize,
+    upload_chunk_size_buckets: Vec<usize>,
 }
 
 struct VideoInput {
@@ -215,8 +220,30 @@ impl GeminiClient {
                 bytes: asset.bytes.clone(),
             })
             .collect::<Vec<_>>();
+        let upload_chunk_size =
+            select_upload_chunk_size(&telemetry, &self.config.upload_chunk_size_buckets);
+        let bucket_index = self
+            .config
+            .upload_chunk_size_buckets
+            .iter()
+            .position(|bucket| *bucket == upload_chunk_size)
+            .unwrap_or_default();
+        telemetry.log(
+            "info",
+            "gemini",
+            "upload_chunk_size_selected",
+            [
+                ("chunk_size", json!(upload_chunk_size)),
+                ("bucket_index", json!(bucket_index)),
+                (
+                    "bucket_count",
+                    json!(self.config.upload_chunk_size_buckets.len()),
+                ),
+                ("strategy", json!("analysis_id_hash")),
+            ],
+        );
 
-        self.analyze_inputs(&telemetry, &videos, &request.prompt)
+        self.analyze_inputs(&telemetry, &videos, &request.prompt, upload_chunk_size)
             .await
     }
 
@@ -225,11 +252,15 @@ impl GeminiClient {
         telemetry: &AnalysisTelemetry,
         videos: &[VideoInput],
         prompt: &str,
+        upload_chunk_size: usize,
     ) -> Result<String, GeminiError> {
         let mut files = Vec::with_capacity(videos.len());
 
         for video in videos {
-            files.push(self.upload_video(telemetry, video).await?);
+            files.push(
+                self.upload_video(telemetry, video, upload_chunk_size)
+                    .await?,
+            );
         }
 
         self.generate_content(telemetry, &files, prompt).await
@@ -239,6 +270,7 @@ impl GeminiClient {
         &self,
         telemetry: &AnalysisTelemetry,
         video: &VideoInput,
+        upload_chunk_size: usize,
     ) -> Result<UploadedFile, GeminiError> {
         let mime_type = video_mime_type(&video.name);
 
@@ -258,7 +290,13 @@ impl GeminiClient {
 
             let upload_session = self.start_upload(video, mime_type).await?;
             let upload = match self
-                .upload_video_chunks(telemetry, video, &upload_session, mime_type)
+                .upload_video_chunks(
+                    telemetry,
+                    video,
+                    &upload_session,
+                    mime_type,
+                    upload_chunk_size,
+                )
                 .await
             {
                 Ok(upload) => upload,
@@ -331,14 +369,13 @@ impl GeminiClient {
         video: &VideoInput,
         session: &UploadSession,
         mime_type: &'static str,
+        upload_chunk_size: usize,
     ) -> Result<UploadResponse, UploadChunksError> {
+        let started_at = Instant::now();
+        let mut stats = UploadStats::default();
         let total_bytes = video.bytes.len();
-        let total_chunks = upload_chunks(
-            total_bytes,
-            session.chunk_granularity,
-            self.config.upload_chunk_size,
-        )
-        .len();
+        let total_chunks =
+            upload_chunks(total_bytes, session.chunk_granularity, upload_chunk_size).len();
         telemetry.log(
             "info",
             "gemini",
@@ -348,7 +385,7 @@ impl GeminiClient {
                 ("bytes", json!(total_bytes)),
                 ("mime", json!(mime_type)),
                 ("chunks", json!(total_chunks)),
-                ("chunk_size", json!(self.config.upload_chunk_size)),
+                ("chunk_size", json!(upload_chunk_size)),
                 ("granularity", json!(session.chunk_granularity)),
             ],
         );
@@ -362,9 +399,10 @@ impl GeminiClient {
                 total_bytes,
                 offset,
                 session.chunk_granularity,
-                self.config.upload_chunk_size,
+                upload_chunk_size,
             );
             attempts_at_offset += 1;
+            stats.record_send_attempt();
             telemetry.log(
                 "info",
                 "gemini",
@@ -382,7 +420,19 @@ impl GeminiClient {
             );
 
             match self.send_upload_chunk(video, session, chunk).await {
-                Ok(Some(upload)) => return Ok(upload),
+                Ok(Some(upload)) => {
+                    log_upload_completed(
+                        telemetry,
+                        video,
+                        &stats,
+                        total_bytes,
+                        total_chunks,
+                        upload_chunk_size,
+                        session.chunk_granularity,
+                        started_at.elapsed().as_millis() as i64,
+                    );
+                    return Ok(upload);
+                }
                 Ok(None) => {
                     offset = chunk.end;
                     chunk_index += 1;
@@ -403,9 +453,11 @@ impl GeminiClient {
                             ("error", json!(error.to_string())),
                         ],
                     );
+                    stats.record_retry(&error);
                     let received_offset = self
                         .query_upload_offset_with_retries(telemetry, video, session, chunk.offset)
                         .await?;
+                    stats.record_offset_query();
                     telemetry.log(
                         "info",
                         "gemini",
@@ -425,12 +477,9 @@ impl GeminiClient {
                             if next_offset > offset =>
                         {
                             offset = next_offset;
-                            chunk_index = upload_chunks(
-                                offset,
-                                session.chunk_granularity,
-                                self.config.upload_chunk_size,
-                            )
-                            .len();
+                            chunk_index =
+                                upload_chunks(offset, session.chunk_granularity, upload_chunk_size)
+                                    .len();
                             attempts_at_offset = 0;
                         }
                         UploadRetryDecision::RetryFromOffset(_) => {}
@@ -445,8 +494,21 @@ impl GeminiClient {
             end: total_bytes,
             command: UploadCommand::UploadAndFinalize,
         };
+        stats.record_send_attempt();
         match self.send_upload_chunk(video, session, chunk).await? {
-            Some(upload) => Ok(upload),
+            Some(upload) => {
+                log_upload_completed(
+                    telemetry,
+                    video,
+                    &stats,
+                    total_bytes,
+                    total_chunks,
+                    upload_chunk_size,
+                    session.chunk_granularity,
+                    started_at.elapsed().as_millis() as i64,
+                );
+                Ok(upload)
+            }
             None => Err(GeminiError::EmptyResponse.into()),
         }
     }
@@ -641,18 +703,153 @@ impl GeminiConfig {
             .and_then(|value| value.parse::<u64>().ok())
             .map(Duration::from_secs)
             .unwrap_or(DEFAULT_FILE_PROCESSING_TIMEOUT);
-        let upload_chunk_size = env::var("GEMINI_UPLOAD_CHUNK_SIZE_BYTES")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(DEFAULT_UPLOAD_CHUNK_SIZE_BYTES);
+        let upload_chunk_size = env::var("GEMINI_UPLOAD_CHUNK_SIZE_BYTES").ok();
+        let upload_chunk_size_buckets = upload_chunk_size_buckets_from_values(
+            upload_chunk_size.as_deref(),
+            env::var("GEMINI_UPLOAD_CHUNK_SIZE_BUCKETS_BYTES")
+                .ok()
+                .as_deref(),
+        );
 
         Ok(Self {
             api_key,
             model,
             file_processing_timeout,
-            upload_chunk_size,
+            upload_chunk_size_buckets,
         })
+    }
+}
+
+#[derive(Default)]
+struct UploadStats {
+    send_attempts: usize,
+    retry_count: usize,
+    timeout_retries: usize,
+    connect_retries: usize,
+    body_retries: usize,
+    api_retries: usize,
+    offset_queries: usize,
+}
+
+impl UploadStats {
+    fn record_send_attempt(&mut self) {
+        self.send_attempts += 1;
+    }
+
+    fn record_retry(&mut self, error: &GeminiError) {
+        match error {
+            GeminiError::UploadRequest {
+                timeout,
+                connect,
+                body,
+                ..
+            } => self.record_upload_retry(*timeout, *connect, *body),
+            GeminiError::Api { .. } => self.record_api_retry(),
+            _ => self.retry_count += 1,
+        }
+    }
+
+    fn record_upload_retry(&mut self, timeout: bool, connect: bool, body: bool) {
+        self.retry_count += 1;
+        if timeout {
+            self.timeout_retries += 1;
+        }
+        if connect {
+            self.connect_retries += 1;
+        }
+        if body {
+            self.body_retries += 1;
+        }
+    }
+
+    fn record_api_retry(&mut self) {
+        self.retry_count += 1;
+        self.api_retries += 1;
+    }
+
+    fn record_offset_query(&mut self) {
+        self.offset_queries += 1;
+    }
+
+    fn summary_fields(
+        &self,
+        chunk_size_bytes: usize,
+        logical_chunks: usize,
+        video_size_bytes: usize,
+        chunk_granularity_bytes: usize,
+        duration_ms: i64,
+    ) -> Value {
+        json!({
+            "chunk_size_bytes": chunk_size_bytes,
+            "logical_chunks": logical_chunks,
+            "video_size_bytes": video_size_bytes,
+            "chunk_granularity_bytes": chunk_granularity_bytes,
+            "send_attempts": self.send_attempts,
+            "retry_count": self.retry_count,
+            "timeout_retries": self.timeout_retries,
+            "connect_retries": self.connect_retries,
+            "body_retries": self.body_retries,
+            "api_retries": self.api_retries,
+            "offset_queries": self.offset_queries,
+            "duration_ms": duration_ms,
+        })
+    }
+}
+
+fn log_upload_completed(
+    telemetry: &AnalysisTelemetry,
+    video: &VideoInput,
+    stats: &UploadStats,
+    total_bytes: usize,
+    total_chunks: usize,
+    upload_chunk_size: usize,
+    chunk_granularity: usize,
+    duration_ms: i64,
+) {
+    telemetry.log(
+        "info",
+        "gemini",
+        "upload_completed",
+        [
+            ("video_name", json!(video.name)),
+            ("bytes", json!(total_bytes)),
+            ("chunks", json!(total_chunks)),
+            ("chunk_size", json!(upload_chunk_size)),
+            ("granularity", json!(chunk_granularity)),
+            ("send_attempts", json!(stats.send_attempts)),
+            ("retry_count", json!(stats.retry_count)),
+            ("timeout_retries", json!(stats.timeout_retries)),
+            ("connect_retries", json!(stats.connect_retries)),
+            ("body_retries", json!(stats.body_retries)),
+            ("api_retries", json!(stats.api_retries)),
+            ("offset_queries", json!(stats.offset_queries)),
+            ("duration_ms", json!(duration_ms)),
+        ],
+    );
+}
+
+fn upload_chunk_size_buckets_from_values(
+    fixed_chunk_size: Option<&str>,
+    bucket_list: Option<&str>,
+) -> Vec<usize> {
+    if let Some(chunk_size) = fixed_chunk_size
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+    {
+        return vec![chunk_size];
+    }
+
+    let buckets = bucket_list
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .collect::<Vec<_>>();
+
+    if buckets.is_empty() {
+        DEFAULT_UPLOAD_CHUNK_SIZE_BUCKETS_BYTES.to_vec()
+    } else {
+        buckets
     }
 }
 
@@ -764,6 +961,41 @@ fn upload_chunks(
     }
 
     chunks
+}
+
+fn select_upload_chunk_size(telemetry: &AnalysisTelemetry, buckets: &[usize]) -> usize {
+    let buckets = if buckets.is_empty() {
+        DEFAULT_UPLOAD_CHUNK_SIZE_BUCKETS_BYTES.as_slice()
+    } else {
+        buckets
+    };
+    if telemetry.is_canary {
+        return buckets[0];
+    }
+
+    let Some(analysis_id) = telemetry
+        .analysis_id
+        .as_deref()
+        .filter(|analysis_id| !analysis_id.is_empty())
+    else {
+        return buckets[0];
+    };
+
+    buckets[stable_bucket_index(analysis_id, buckets.len())]
+}
+
+fn stable_bucket_index(value: &str, bucket_count: usize) -> usize {
+    if bucket_count == 0 {
+        return 0;
+    }
+
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+
+    (hash as usize) % bucket_count
 }
 
 fn next_upload_chunk(
@@ -1120,6 +1352,55 @@ mod tests {
     }
 
     #[test]
+    fn upload_chunk_size_bucket_is_stable_for_analysis_id() {
+        let buckets = vec![8, 16, 32, 64];
+        let telemetry = AnalysisTelemetry::new("analysis-123", "gemini");
+
+        let selected = select_upload_chunk_size(&telemetry, &buckets);
+
+        assert!(buckets.contains(&selected));
+        assert_eq!(selected, select_upload_chunk_size(&telemetry, &buckets));
+        assert_eq!(
+            selected,
+            select_upload_chunk_size(&AnalysisTelemetry::new("analysis-123", "gemini"), &buckets)
+        );
+        assert_eq!(
+            select_upload_chunk_size(&AnalysisTelemetry::default(), &buckets),
+            8
+        );
+    }
+
+    #[test]
+    fn canary_upload_chunk_size_uses_first_bucket() {
+        let buckets = vec![8, 16, 32, 64];
+        let telemetry = AnalysisTelemetry::new("analysis-123", "gemini").with_canary(true);
+
+        assert_eq!(select_upload_chunk_size(&telemetry, &buckets), 8);
+    }
+
+    #[test]
+    fn upload_stats_count_retries_and_summary_fields() {
+        let mut stats = UploadStats::default();
+
+        stats.record_send_attempt();
+        stats.record_upload_retry(true, false, false);
+        stats.record_offset_query();
+        stats.record_send_attempt();
+        stats.record_api_retry();
+
+        let fields = stats.summary_fields(32, 4, 20, 12, 1_234);
+
+        assert_eq!(fields["chunk_size_bytes"], json!(32));
+        assert_eq!(fields["logical_chunks"], json!(4));
+        assert_eq!(fields["send_attempts"], json!(2));
+        assert_eq!(fields["retry_count"], json!(2));
+        assert_eq!(fields["timeout_retries"], json!(1));
+        assert_eq!(fields["api_retries"], json!(1));
+        assert_eq!(fields["offset_queries"], json!(1));
+        assert_eq!(fields["duration_ms"], json!(1_234));
+    }
+
+    #[test]
     fn upload_session_reads_chunk_granularity_header() {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -1178,7 +1459,7 @@ mod tests {
                 api_key: "test-key".to_owned(),
                 model: "test-model".to_owned(),
                 file_processing_timeout: Duration::from_secs(1),
-                upload_chunk_size: 8,
+                upload_chunk_size_buckets: vec![8],
             },
         };
         let video = VideoInput {

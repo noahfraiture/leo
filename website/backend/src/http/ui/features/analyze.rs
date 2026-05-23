@@ -253,7 +253,8 @@ async fn run_analysis_job(
 ) -> Result<(), RouteError> {
     let db = state.db().clone();
     let started_at = Instant::now();
-    let telemetry = AnalysisTelemetry::new(analysis.key(), analysis.provider.clone());
+    let telemetry = AnalysisTelemetry::new(analysis.key(), analysis.provider.clone())
+        .with_canary(analysis.is_canary);
     telemetry.log(
         "info",
         "analysis_job",
