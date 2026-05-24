@@ -259,15 +259,17 @@ fn analysis_entry(
                 (analysis_body(analysis))
             </section>
 
-            <button
-                class="btn btn-error w-full"
-                type="button"
-                aria-label=(delete_label)
-                hx-post=(delete_path)
-                hx-target="closest article"
-                hx-swap="delete">
-                "Delete analysis"
-            </button>
+            <div class="flex justify-end">
+                <button
+                    class="btn btn-error btn-sm"
+                    type="button"
+                    aria-label=(delete_label)
+                    hx-post=(delete_path)
+                    hx-target="closest article"
+                    hx-swap="delete">
+                    "Delete analysis"
+                </button>
+            </div>
         </article>
     }
 }
