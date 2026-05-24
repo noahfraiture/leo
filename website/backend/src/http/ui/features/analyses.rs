@@ -215,63 +215,58 @@ fn analysis_entry(
     let delete_label = "Delete analysis";
 
     rsx! {
-        <article class="relative rounded-box border border-base-300 bg-base-100 shadow-sm">
-            <details class="collapse collapse-arrow">
-                <summary class="collapse-title space-y-3 pr-28">
-                    <div class="flex flex-wrap items-start justify-between gap-3">
-                        <div class="min-w-0 space-y-1">
-                            <h2 class="truncate text-base font-semibold text-base-content">
-                                (analysis.prompt.as_str())
-                            </h2>
-                            <p class="truncate text-sm text-base-content/60">
-                                (selected_video_names(&analysis.video_keys, video_names))
-                            </p>
-                            <time
-                                class="block text-xs text-base-content/50"
-                                datetime=(analysis.created_at.to_string())>
-                                (analysis_started_at_label(analysis))
-                            </time>
-                        </div>
-                        <div class="flex flex-wrap items-center gap-2">
-                            <span class="badge badge-outline">
-                                (analysis.provider.as_str())
-                            </span>
-                            (status_badge(analysis.status.as_str()))
-                        </div>
-                    </div>
-                </summary>
-                <div class="collapse-content space-y-4">
-                    <section class="space-y-2">
-                        <h3 class="text-sm font-semibold text-base-content">"Videos"</h3>
-                        <ul class="list-disc space-y-1 pl-5 text-sm text-base-content/70">
-                            @for name in selected_video_names_vec(&analysis.video_keys, video_names) {
-                                <li>(name)</li>
-                            }
-                        </ul>
-                    </section>
-
-                    <section class="space-y-2">
-                        <h3 class="text-sm font-semibold text-base-content">"Prompt"</h3>
-                        <p class="whitespace-pre-wrap text-sm leading-6 text-base-content/80">
-                            (analysis.prompt.as_str())
-                        </p>
-                    </section>
-
-                    <section class="space-y-2">
-                        <h3 class="text-sm font-semibold text-base-content">"Response"</h3>
-                        (analysis_body(analysis))
-                    </section>
+        <article class="space-y-5 rounded-box border border-base-300 bg-base-100 p-5 shadow-sm">
+            <div class="flex flex-wrap items-start justify-between gap-3">
+                <div class="min-w-0 space-y-1">
+                    <h2 class="truncate text-base font-semibold text-base-content">
+                        (analysis.prompt.as_str())
+                    </h2>
+                    <p class="truncate text-sm text-base-content/60">
+                        (selected_video_names(&analysis.video_keys, video_names))
+                    </p>
+                    <time
+                        class="block text-xs text-base-content/50"
+                        datetime=(analysis.created_at.to_string())>
+                        (analysis_started_at_label(analysis))
+                    </time>
                 </div>
-            </details>
+                <div class="flex flex-wrap items-center gap-2">
+                    <span class="badge badge-outline">
+                        (analysis.provider.as_str())
+                    </span>
+                    (status_badge(analysis.status.as_str()))
+                </div>
+            </div>
+
+            <section class="space-y-2">
+                <h3 class="text-sm font-semibold text-base-content">"Videos"</h3>
+                <ul class="list-disc space-y-1 pl-5 text-sm text-base-content/70">
+                    @for name in selected_video_names_vec(&analysis.video_keys, video_names) {
+                        <li>(name)</li>
+                    }
+                </ul>
+            </section>
+
+            <section class="space-y-2">
+                <h3 class="text-sm font-semibold text-base-content">"Prompt"</h3>
+                <p class="whitespace-pre-wrap text-sm leading-6 text-base-content/80">
+                    (analysis.prompt.as_str())
+                </p>
+            </section>
+
+            <section class="space-y-2">
+                <h3 class="text-sm font-semibold text-base-content">"Response"</h3>
+                (analysis_body(analysis))
+            </section>
+
             <button
-                class="btn btn-ghost btn-xs absolute right-10 top-5 z-20 text-error hover:bg-error hover:text-error-content"
+                class="btn btn-error w-full"
                 type="button"
                 aria-label=(delete_label)
-                onclick="event.stopPropagation()"
                 hx-post=(delete_path)
                 hx-target="closest article"
                 hx-swap="delete">
-                "Delete"
+                "Delete analysis"
             </button>
         </article>
     }

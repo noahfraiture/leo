@@ -640,9 +640,9 @@ mod tests {
         assert!(html.contains(&format!(r#"hx-post="/analyses/{}/delete""#, analysis.key())));
         assert!(html.contains(r#"hx-target="closest article""#));
         assert!(html.contains(r#"hx-swap="delete""#));
-        assert!(html.contains(r#"onclick="event.stopPropagation()""#));
-        assert!(html.contains("<summary"));
-        assert!(html.contains("absolute right-10 top-5 z-20"));
+        assert!(html.contains("btn btn-error w-full"));
+        assert!(html.contains("Delete analysis"));
+        assert!(!html.contains("<summary"));
         assert!(!html.contains(r#"<input type="checkbox""#));
         assert!(html.contains("sample.mp4"));
         assert!(html.contains("List the visible actions"));

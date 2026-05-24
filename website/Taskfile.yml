@@ -17,12 +17,12 @@ tasks:
       - backend:build
 
   run:
-    desc: Build if needed and run the local backend once
+    desc: Build and run the local backend once
     deps:
-      - backend:build
+      - css:build
     dir: backend
     cmds:
-      - ./target/debug/video-analysis
+      - cargo run
 
   dev:
     desc: Restart the backend on source changes
@@ -55,14 +55,6 @@ tasks:
   css:build:
     deps:
       - css:install
-    method: timestamp
-    sources:
-      - package.json
-      - pnpm-lock.yaml
-      - backend/src/http/ui/styles.css
-      - backend/src/http/ui/**/*.rs
-    generates:
-      - backend/src/http/ui/styles.generated.css
     cmds:
       - pnpm run build:css
 
@@ -76,14 +68,6 @@ tasks:
     dir: backend
     deps:
       - css:build
-    method: timestamp
-    sources:
-      - Cargo.toml
-      - Cargo.lock
-      - src/**/*.rs
-      - src/**/*.css
-    generates:
-      - target/debug/video-analysis
     cmds:
       - cargo build
 
