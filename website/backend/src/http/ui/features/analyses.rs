@@ -238,9 +238,10 @@ fn analysis_entry(
                         </span>
                         (status_badge(analysis.status.as_str()))
                         <button
-                            class="btn btn-ghost btn-xs text-error hover:bg-error hover:text-error-content"
+                            class="btn btn-ghost btn-xs relative z-10 text-error hover:bg-error hover:text-error-content"
                             type="button"
                             aria-label=(delete_label)
+                            onclick="event.stopPropagation()"
                             hx-post=(delete_path)
                             hx-target="closest article"
                             hx-swap="delete">

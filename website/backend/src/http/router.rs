@@ -640,6 +640,8 @@ mod tests {
         assert!(html.contains(&format!(r#"hx-post="/analyses/{}/delete""#, analysis.key())));
         assert!(html.contains(r#"hx-target="closest article""#));
         assert!(html.contains(r#"hx-swap="delete""#));
+        assert!(html.contains(r#"onclick="event.stopPropagation()""#));
+        assert!(html.contains("relative z-10"));
         assert!(html.contains("sample.mp4"));
         assert!(html.contains("List the visible actions"));
         assert!(html.contains("A person moves through the frame."));
