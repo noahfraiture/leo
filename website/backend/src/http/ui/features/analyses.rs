@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use axum::{extract::Query, http::StatusCode};
+use axum::{
+    extract::{Path, Query},
+    http::StatusCode,
+};
 use hypertext::prelude::*;
 use serde::Deserialize;
 
@@ -19,6 +22,8 @@ use crate::{
 const PAGE_SIZE: usize = 20;
 
 pub struct AnalysesPage;
+pub struct ClearAnalysesRoute;
+pub struct DeleteAnalysisRoute;
 
 pub struct AnalysesPageView {
     analyses: Vec<db::analysis::Analysis>,
@@ -44,20 +49,41 @@ impl Route for AnalysesPage {
         _granted: (),
         (Query(input), _): Self::Input,
     ) -> Result<Self::View, RouteError> {
-        let page = input.page.max(1);
-        let offset = (page - 1) * PAGE_SIZE;
-        let mut analyses =
-            db::analysis::Analysis::list_page(context.state().db(), PAGE_SIZE + 1, offset).await?;
-        let has_next_page = analyses.len() > PAGE_SIZE;
-        analyses.truncate(PAGE_SIZE);
-        let videos = db::video::Video::list(context.state().db()).await?;
+        load_analyses_page(context.state(), input.page).await
+    }
+}
 
-        Ok(AnalysesPageView {
-            analyses,
-            videos,
-            page,
-            has_next_page,
-        })
+#[async_trait]
+impl Route for ClearAnalysesRoute {
+    type Input = NoInput;
+    type Authz = Public;
+    type View = AnalysesPageView;
+
+    async fn handle(
+        context: &RouteContext,
+        _granted: (),
+        _input: Self::Input,
+    ) -> Result<Self::View, RouteError> {
+        db::analysis::Analysis::clear_history(context.state().db()).await?;
+        load_analyses_page(context.state(), 1).await
+    }
+}
+
+pub struct DeleteAnalysisView;
+
+#[async_trait]
+impl Route for DeleteAnalysisRoute {
+    type Input = (Path<String>, NoInput);
+    type Authz = Public;
+    type View = DeleteAnalysisView;
+
+    async fn handle(
+        context: &RouteContext,
+        _granted: (),
+        (Path(analysis_key), _): Self::Input,
+    ) -> Result<Self::View, RouteError> {
+        db::analysis::Analysis::hide_from_history(context.state().db(), &analysis_key).await?;
+        Ok(DeleteAnalysisView)
     }
 }
 
@@ -71,15 +97,7 @@ impl RouteView for AnalysesPageView {
                     (top_bar())
 
                     <section class="space-y-6">
-                        <div class="space-y-2">
-                            <p class="text-sm font-semibold uppercase tracking-[0.22em] text-base-content/60">
-                                "History"
-                            </p>
-                            <h1 class="text-3xl font-semibold text-base-content">"Analysis history"</h1>
-                            <p class="max-w-2xl text-sm leading-6 text-base-content/70">
-                                "Review previous video selections, prompts, and saved responses."
-                            </p>
-                        </div>
+                        (history_header(!self.analyses.is_empty()))
 
                         (analysis_history(&self.analyses, &self.videos))
                         (pagination(self.page, self.has_next_page))
@@ -96,6 +114,32 @@ impl RouteView for AnalysesPageView {
     fn fragment_status() -> StatusCode {
         StatusCode::NOT_FOUND
     }
+}
+
+impl RouteView for DeleteAnalysisView {
+    fn document(&self, _state: &AppState) -> impl Renderable {
+        not_found_fragment()
+    }
+
+    fn fragment(&self, _state: &AppState) -> impl Renderable {
+        rsx! {}
+    }
+}
+
+async fn load_analyses_page(state: &AppState, page: usize) -> Result<AnalysesPageView, RouteError> {
+    let page = page.max(1);
+    let offset = (page - 1) * PAGE_SIZE;
+    let mut analyses = db::analysis::Analysis::list_page(state.db(), PAGE_SIZE + 1, offset).await?;
+    let has_next_page = analyses.len() > PAGE_SIZE;
+    analyses.truncate(PAGE_SIZE);
+    let videos = db::video::Video::list(state.db()).await?;
+
+    Ok(AnalysesPageView {
+        analyses,
+        videos,
+        page,
+        has_next_page,
+    })
 }
 
 pub(super) fn analysis_history(
@@ -136,10 +180,40 @@ fn top_bar() -> impl Renderable {
     }
 }
 
+fn history_header(can_clear: bool) -> impl Renderable {
+    rsx! {
+        <div class="flex flex-wrap items-end justify-between gap-4">
+            <div class="space-y-2">
+                <p class="text-sm font-semibold uppercase tracking-[0.22em] text-base-content/60">
+                    "History"
+                </p>
+                <h1 class="text-3xl font-semibold text-base-content">"Analysis history"</h1>
+                <p class="max-w-2xl text-sm leading-6 text-base-content/70">
+                    "Review previous video selections, prompts, and saved responses."
+                </p>
+            </div>
+            <form method="post" action="/analyses/clear">
+                @if can_clear {
+                    <button class="btn btn-sm btn-outline btn-error" type="submit">
+                        "Clear history"
+                    </button>
+                } @else {
+                    <button class="btn btn-sm btn-outline btn-error" type="submit" disabled="disabled">
+                        "Clear history"
+                    </button>
+                }
+            </form>
+        </div>
+    }
+}
+
 fn analysis_entry(
     analysis: &db::analysis::Analysis,
     video_names: &HashMap<String, String>,
 ) -> impl Renderable {
+    let delete_path = format!("/analyses/{}/delete", analysis.key());
+    let delete_label = "Delete analysis";
+
     rsx! {
         <article class="collapse collapse-arrow rounded-box border border-base-300 bg-base-100 shadow-sm">
             <input type="checkbox" />
@@ -152,12 +226,26 @@ fn analysis_entry(
                         <p class="truncate text-sm text-base-content/60">
                             (selected_video_names(&analysis.video_keys, video_names))
                         </p>
+                        <time
+                            class="block text-xs text-base-content/50"
+                            datetime=(analysis.created_at.to_string())>
+                            (analysis_started_at_label(analysis))
+                        </time>
                     </div>
                     <div class="flex flex-wrap items-center gap-2">
                         <span class="badge badge-outline">
                             (analysis.provider.as_str())
                         </span>
                         (status_badge(analysis.status.as_str()))
+                        <button
+                            class="btn btn-ghost btn-xs text-error hover:bg-error hover:text-error-content"
+                            type="button"
+                            aria-label=(delete_label)
+                            hx-post=(delete_path)
+                            hx-target="closest article"
+                            hx-swap="delete">
+                            "Delete"
+                        </button>
                     </div>
                 </div>
             </div>
@@ -246,6 +334,13 @@ fn video_names_by_key(videos: &[db::video::Video]) -> HashMap<String, String> {
         .iter()
         .map(|video| (video.file.key().to_owned(), video.name.clone()))
         .collect()
+}
+
+fn analysis_started_at_label(analysis: &db::analysis::Analysis) -> String {
+    format!(
+        "Started {}",
+        analysis.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+    )
 }
 
 fn selected_video_names(video_keys: &[String], video_names: &HashMap<String, String>) -> String {

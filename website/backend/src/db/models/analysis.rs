@@ -1,4 +1,4 @@
-use surrealdb::types::{RecordId, RecordIdKey, SurrealValue};
+use surrealdb::types::{Datetime, RecordId, RecordIdKey, SurrealValue};
 use thiserror::Error;
 
 use crate::{
@@ -24,6 +24,9 @@ pub struct Analysis {
     pub error: Option<String>,
     pub failure_diagnostic: Option<AnalysisFailureDiagnostic>,
     pub is_canary: bool,
+    pub history_hidden: bool,
+    pub created_at: Datetime,
+    pub updated_at: Datetime,
 }
 
 #[derive(Clone, Debug, PartialEq, SurrealValue)]
@@ -152,6 +155,7 @@ impl Analysis {
             prompt: String,
             video_keys: Vec<String>,
             is_canary: bool,
+            history_hidden: bool,
         }
 
         let mut response = db
@@ -167,6 +171,7 @@ impl Analysis {
                     error: NONE,
                     failure_diagnostic: NONE,
                     is_canary: $is_canary,
+                    history_hidden: $history_hidden,
                     created_at: time::now(),
                     updated_at: time::now(),
                 };
@@ -178,6 +183,7 @@ impl Analysis {
                 prompt: prompt.into(),
                 video_keys,
                 is_canary,
+                history_hidden: false,
             })
             .await?;
 
@@ -210,7 +216,7 @@ impl Analysis {
             .query(
                 r#"
                 SELECT * FROM analysis
-                WHERE is_canary = false
+                WHERE is_canary = false AND history_hidden = false
                 ORDER BY created_at DESC
                 LIMIT $limit START $offset;
                 "#,
@@ -222,6 +228,49 @@ impl Analysis {
             .await?;
 
         Ok(response.take(0)?)
+    }
+
+    pub async fn clear_history(db: &Database) -> Result<usize, AnalysisError> {
+        let mut response = db
+            .query(
+                r#"
+                SELECT * FROM analysis
+                WHERE is_canary = false AND history_hidden = false;
+                UPDATE analysis MERGE {
+                    history_hidden: true,
+                    updated_at: time::now(),
+                }
+                WHERE is_canary = false AND history_hidden = false;
+                "#,
+            )
+            .await?;
+        let visible: Vec<Analysis> = response.take(0)?;
+        response.check()?;
+
+        Ok(visible.len())
+    }
+
+    pub async fn hide_from_history(
+        db: &Database,
+        key: &str,
+    ) -> Result<Option<Self>, AnalysisError> {
+        let mut response = db
+            .query(
+                r#"
+                UPDATE $id MERGE {
+                    history_hidden: true,
+                    updated_at: time::now(),
+                }
+                WHERE is_canary = false;
+                "#,
+            )
+            .bind(AnalysisId {
+                id: analysis_id(key),
+            })
+            .await?;
+
+        let mut updated: Vec<Analysis> = response.take(0)?;
+        Ok(updated.pop())
     }
 
     pub async fn delete_canaries_for_provider(
@@ -479,12 +528,14 @@ async fn define_analysis_table(db: &Database) -> Result<(), AnalysisError> {
         DEFINE FIELD IF NOT EXISTS failure_diagnostic.payload_bytes ON TABLE analysis TYPE option<int>;
         DEFINE FIELD IF NOT EXISTS failure_diagnostic.message ON TABLE analysis TYPE option<string>;
         DEFINE FIELD IF NOT EXISTS is_canary ON TABLE analysis TYPE bool DEFAULT false;
+        DEFINE FIELD IF NOT EXISTS history_hidden ON TABLE analysis TYPE bool DEFAULT false;
         DEFINE FIELD IF NOT EXISTS created_at ON TABLE analysis TYPE datetime;
         DEFINE FIELD IF NOT EXISTS updated_at ON TABLE analysis TYPE datetime;
         UPDATE analysis MERGE { provider: "gemini" } WHERE provider = NONE;
         UPDATE analysis MERGE { frame_sample_rate_fps: $default_frame_sample_rate_fps } WHERE frame_sample_rate_fps = NONE;
         UPDATE analysis MERGE { failure_diagnostic: NONE } WHERE failure_diagnostic = NONE;
         UPDATE analysis MERGE { is_canary: false } WHERE is_canary = NONE;
+        UPDATE analysis MERGE { history_hidden: false } WHERE history_hidden = NONE;
         UPDATE analysis MERGE { is_canary: true } WHERE prompt = $default_canary_prompt;
         "#,
     )
@@ -646,6 +697,105 @@ mod tests {
         assert_eq!(page.len(), 1);
         assert_eq!(page[0].key(), visible.key());
         assert!(found_hidden.is_canary);
+    }
+
+    #[tokio::test]
+    async fn clear_history_hides_regular_analyses_without_deleting_records() {
+        let database = crate::test::database::init()
+            .await
+            .expect("test database should initialize");
+
+        let visible =
+            db::analysis::Analysis::create(&database, "User prompt", vec!["user.mp4".to_owned()])
+                .await
+                .expect("visible analysis should create");
+        let canary = db::analysis::Analysis::create_canary_with_provider_and_settings(
+            &database,
+            AnalysisProvider::OpenAi,
+            crate::analysis::request::AnalysisSettings {
+                frame_sample_rate_fps: 1.0,
+            },
+            "Canary prompt",
+            vec!["canary.mp4".to_owned()],
+        )
+        .await
+        .expect("canary analysis should create");
+
+        let hidden = db::analysis::Analysis::clear_history(&database)
+            .await
+            .expect("analysis history should clear");
+
+        let page = db::analysis::Analysis::list_page(&database, 10, 0)
+            .await
+            .expect("analysis page should list");
+        let found_visible = db::analysis::Analysis::find(&database, &visible.key())
+            .await
+            .expect("visible analysis should load directly")
+            .expect("visible analysis should still exist");
+        let found_canary = db::analysis::Analysis::find(&database, &canary.key())
+            .await
+            .expect("canary should load directly")
+            .expect("canary should still exist");
+
+        assert_eq!(hidden, 1);
+        assert!(page.is_empty());
+        assert!(found_visible.history_hidden);
+        assert!(!found_canary.history_hidden);
+    }
+
+    #[tokio::test]
+    async fn hide_from_history_hides_one_regular_analysis_without_deleting_record() {
+        let database = crate::test::database::init()
+            .await
+            .expect("test database should initialize");
+
+        let hidden =
+            db::analysis::Analysis::create(&database, "Hide me", vec!["hide.mp4".to_owned()])
+                .await
+                .expect("hidden analysis should create");
+        let visible =
+            db::analysis::Analysis::create(&database, "Keep me", vec!["keep.mp4".to_owned()])
+                .await
+                .expect("visible analysis should create");
+        let canary = db::analysis::Analysis::create_canary_with_provider_and_settings(
+            &database,
+            AnalysisProvider::OpenAi,
+            crate::analysis::request::AnalysisSettings {
+                frame_sample_rate_fps: 1.0,
+            },
+            "Canary prompt",
+            vec!["canary.mp4".to_owned()],
+        )
+        .await
+        .expect("canary analysis should create");
+
+        let updated = db::analysis::Analysis::hide_from_history(&database, &hidden.key())
+            .await
+            .expect("analysis should hide from history")
+            .expect("analysis should be updated");
+        let canary_update = db::analysis::Analysis::hide_from_history(&database, &canary.key())
+            .await
+            .expect("canary hide should be ignored");
+
+        let page = db::analysis::Analysis::list_page(&database, 10, 0)
+            .await
+            .expect("analysis page should list");
+        let found_hidden = db::analysis::Analysis::find(&database, &hidden.key())
+            .await
+            .expect("hidden analysis should load directly")
+            .expect("hidden analysis should still exist");
+        let found_canary = db::analysis::Analysis::find(&database, &canary.key())
+            .await
+            .expect("canary should load directly")
+            .expect("canary should still exist");
+
+        assert_eq!(updated.key(), hidden.key());
+        assert!(updated.history_hidden);
+        assert!(canary_update.is_none());
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].key(), visible.key());
+        assert!(found_hidden.history_hidden);
+        assert!(!found_canary.history_hidden);
     }
 
     #[tokio::test]

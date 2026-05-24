@@ -67,6 +67,14 @@ pub fn app(state: AppState) -> Router {
             "/analyses",
             ui::route::<ui::features::AnalysesPage>(MethodFilter::GET),
         )
+        .route(
+            "/analyses/clear",
+            ui::route::<ui::features::ClearAnalysesRoute>(MethodFilter::POST),
+        )
+        .route(
+            "/analyses/{analysis_key}/delete",
+            ui::route::<ui::features::DeleteAnalysisRoute>(MethodFilter::POST),
+        )
         .route("/healthz", get(ui::features::healthz))
         .route("/metrics", get(crate::http::metrics::serve_metrics))
         .route("/video/{key}", get(crate::http::video::serve))
@@ -187,6 +195,13 @@ mod tests {
 
     async fn response_json(response: Response) -> Value {
         serde_json::from_str(&response_text(response).await).expect("response body should be json")
+    }
+
+    fn analysis_started_at_label(analysis: &db::analysis::Analysis) -> String {
+        format!(
+            "Started {}",
+            analysis.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+        )
     }
 
     async fn test_app() -> Router {
@@ -348,6 +363,8 @@ mod tests {
         assert!(html.contains("sample.mp4"));
         assert!(html.contains("Summarize the uploaded video"));
         assert!(html.contains("The video contains a short test scene."));
+        assert!(html.contains(&analysis_started_at_label(&analysis)));
+        assert!(html.contains(&format!(r#"datetime="{}""#, analysis.created_at)));
     }
 
     #[tokio::test]
@@ -618,9 +635,137 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert!(html.contains("Analysis history"));
+        assert!(html.contains("Clear history"));
+        assert!(html.contains(r#"action="/analyses/clear""#));
+        assert!(html.contains(&format!(r#"hx-post="/analyses/{}/delete""#, analysis.key())));
+        assert!(html.contains(r#"hx-target="closest article""#));
+        assert!(html.contains(r#"hx-swap="delete""#));
         assert!(html.contains("sample.mp4"));
         assert!(html.contains("List the visible actions"));
         assert!(html.contains("A person moves through the frame."));
+        assert!(html.contains(&analysis_started_at_label(&analysis)));
+        assert!(html.contains(&format!(r#"datetime="{}""#, analysis.created_at)));
+    }
+
+    #[tokio::test]
+    async fn clear_analyses_route_hides_history_without_deleting_records() {
+        let state = AppState::for_test().await;
+        let video = db::video::Video::upload(state.db(), "sample.mp4", b"video bytes".to_vec())
+            .await
+            .expect("video should upload");
+        let analysis = db::analysis::Analysis::create(
+            state.db(),
+            "Clear this from history",
+            vec![video.file.key().to_owned()],
+        )
+        .await
+        .expect("analysis should create");
+        analysis
+            .complete(state.db(), "This response remains stored.")
+            .await
+            .expect("analysis should complete");
+        let app = app(state.clone());
+
+        let response = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/analyses/clear")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        let status = response.status();
+        let html = response_text(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains("No analyses have been run yet."));
+        assert!(!html.contains("Clear this from history"));
+
+        let found = db::analysis::Analysis::find(state.db(), &analysis.key())
+            .await
+            .expect("analysis should load directly")
+            .expect("analysis should still exist");
+        assert!(found.history_hidden);
+        assert_eq!(
+            found.response.as_deref(),
+            Some("This response remains stored.")
+        );
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/analyses")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        let html = response_text(response).await;
+
+        assert!(html.contains("No analyses have been run yet."));
+        assert!(!html.contains("Clear this from history"));
+    }
+
+    #[tokio::test]
+    async fn delete_analysis_route_hides_item_and_returns_empty_htmx_fragment() {
+        let state = AppState::for_test().await;
+        let analysis = db::analysis::Analysis::create(
+            state.db(),
+            "Delete this one analysis",
+            vec!["sample.mp4".to_owned()],
+        )
+        .await
+        .expect("analysis should create");
+        analysis
+            .complete(state.db(), "This response remains stored.")
+            .await
+            .expect("analysis should complete");
+        let app = app(state.clone());
+
+        let response = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri(format!("/analyses/{}/delete", analysis.key()))
+                    .header("HX-Request", "true")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        let status = response.status();
+        let html = response_text(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.is_empty());
+
+        let found = db::analysis::Analysis::find(state.db(), &analysis.key())
+            .await
+            .expect("analysis should load directly")
+            .expect("analysis should still exist");
+        assert!(found.history_hidden);
+        assert_eq!(
+            found.response.as_deref(),
+            Some("This response remains stored.")
+        );
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/analyses")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        let html = response_text(response).await;
+
+        assert!(html.contains("No analyses have been run yet."));
+        assert!(!html.contains("Delete this one analysis"));
     }
 
     #[tokio::test]
