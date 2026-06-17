@@ -7,8 +7,9 @@ use crate::analysis::{
     gemini::GeminiClient,
     openai::OpenAiClient,
     provider::AnalysisProvider,
-    request::{AnalysisRequest, AnalysisSettings, AnalysisTelemetry, AnalysisVideo},
+    request::{AnalysisRequest, AnalysisSettings, AnalysisTelemetry},
 };
+use crate::media::AnalysisVideo;
 
 #[derive(Parser)]
 #[command(name = "video-analysis")]

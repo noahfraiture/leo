@@ -1,5 +1,7 @@
 use serde_json::{Map, Value, json};
 
+use crate::media::AnalysisVideo;
+
 pub const DEFAULT_FRAME_SAMPLE_RATE_FPS: f64 = 0.2;
 
 /// Provider-agnostic analysis input built by the background job.
@@ -11,12 +13,6 @@ pub struct AnalysisRequest {
     pub prompt: String,
     pub settings: AnalysisSettings,
     pub telemetry: AnalysisTelemetry,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct AnalysisVideo {
-    pub name: String,
-    pub bytes: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -91,18 +87,6 @@ impl AnalysisTelemetry {
     ) {
         eprintln!("{}", self.event_json(level, component, event, fields));
     }
-}
-
-/// A sampled video frame ready to send to a vision model.
-///
-/// Frames keep their source video and timestamp so chunk prompts can preserve
-/// temporal context even when multiple videos are analyzed together.
-#[derive(Clone, Debug, PartialEq)]
-pub struct VideoFrame {
-    pub video_name: String,
-    pub timestamp_secs: f64,
-    pub mime_type: &'static str,
-    pub bytes: Vec<u8>,
 }
 
 #[cfg(test)]

@@ -9,5 +9,5 @@ pub enum AnalysisError {
     #[error(transparent)]
     OpenAi(#[from] crate::analysis::openai::OpenAiError),
     #[error(transparent)]
-    FrameExtraction(#[from] crate::analysis::frames::FrameExtractionError),
+    FrameExtraction(#[from] crate::media::frames::FrameExtractionError),
 }

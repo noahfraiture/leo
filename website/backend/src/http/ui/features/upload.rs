@@ -11,11 +11,10 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
+    app::AppState,
     db,
-    http::{
-        router::AppState,
-        ui::{Public, Route, RouteContext, RouteError, RouteView, document},
-    },
+    http::ui::{Public, Route, RouteContext, RouteError, RouteView, document},
+    upload::ChunkedUploadError,
 };
 
 use super::home::video_workspace;
@@ -142,7 +141,7 @@ pub async fn start_chunked_upload(
                     "error": error.to_string(),
                 })
             );
-            error.into_response()
+            upload_error_response(error)
         }
     }
 }
@@ -166,7 +165,7 @@ pub async fn upload_chunk(
 
     match state
         .chunked_uploads()
-        .append_chunk(&upload_id, chunk_index, bytes)
+        .append_chunk(&upload_id, chunk_index, &bytes)
         .await
     {
         Ok(()) => {
@@ -206,7 +205,7 @@ pub async fn upload_chunk(
                     "error": error.to_string(),
                 })
             );
-            error.into_response()
+            upload_error_response(error)
         }
     }
 }
@@ -217,7 +216,7 @@ pub async fn complete_chunked_upload(
 ) -> Response {
     let (filename, bytes) = match state.chunked_uploads().complete(&upload_id).await {
         Ok(upload) => upload,
-        Err(error) => return error.into_response(),
+        Err(error) => return upload_error_response(error),
     };
 
     if let Err(error) = db::video::Video::upload(state.db(), filename, bytes).await {
@@ -251,6 +250,30 @@ pub async fn cancel_chunked_upload(
 ) -> Response {
     match state.chunked_uploads().cancel(&upload_id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => error.into_response(),
+        Err(error) => upload_error_response(error),
+    }
+}
+
+fn upload_error_response(error: ChunkedUploadError) -> Response {
+    let message = error.to_string();
+
+    match error {
+        ChunkedUploadError::NotFound => (StatusCode::NOT_FOUND, message).into_response(),
+        ChunkedUploadError::EmptyUpload
+        | ChunkedUploadError::MissingFilename
+        | ChunkedUploadError::EmptyChunk => (StatusCode::BAD_REQUEST, message).into_response(),
+        ChunkedUploadError::UploadTooLarge | ChunkedUploadError::ChunkTooLarge => {
+            (StatusCode::PAYLOAD_TOO_LARGE, message).into_response()
+        }
+        ChunkedUploadError::OutOfOrder { .. } => (StatusCode::CONFLICT, message).into_response(),
+        ChunkedUploadError::TooManyBytes
+        | ChunkedUploadError::IncompleteUpload
+        | ChunkedUploadError::ByteCountMismatch
+        | ChunkedUploadError::SizeOverflow => (StatusCode::BAD_REQUEST, message).into_response(),
+        ChunkedUploadError::Io(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("chunked upload failure: {error}"),
+        )
+            .into_response(),
     }
 }

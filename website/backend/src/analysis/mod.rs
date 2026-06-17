@@ -1,7 +1,5 @@
-pub mod canary;
 pub mod chunking;
 pub mod error;
-pub mod frames;
 pub mod gemini;
 pub mod job;
 pub mod openai;
@@ -13,7 +11,9 @@ use std::str::FromStr;
 
 use error::AnalysisError;
 use provider::AnalysisProvider;
-use request::{AnalysisRequest, AnalysisSettings, AnalysisTelemetry, AnalysisVideo};
+use request::{AnalysisRequest, AnalysisSettings, AnalysisTelemetry};
+
+use crate::media::AnalysisVideo;
 
 pub async fn analyze_videos(
     provider: AnalysisProvider,
@@ -53,21 +53,4 @@ pub async fn analyze_videos_with_telemetry(
 
 pub fn provider_from_value(value: &str) -> Result<AnalysisProvider, AnalysisError> {
     Ok(AnalysisProvider::from_str(value)?)
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::analysis::canary::CanaryConfig;
-
-    #[test]
-    fn canary_config_parses_enabled_provider_list_and_interval() {
-        let config =
-            CanaryConfig::from_values("true", "openai, gemini", "3600", "Run the health check")
-                .expect("config should parse");
-
-        assert!(config.enabled);
-        assert_eq!(config.providers, vec!["openai", "gemini"]);
-        assert_eq!(config.interval_secs, Some(3600));
-        assert_eq!(config.prompt, "Run the health check");
-    }
 }

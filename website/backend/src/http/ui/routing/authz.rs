@@ -5,7 +5,7 @@ use axum::{
 };
 use thiserror::Error;
 
-use crate::http::router::AppState;
+use crate::app::AppState;
 
 /// Request metadata available to typed authorization rules before the handler
 /// starts. This is intentionally small; route-specific data should come from

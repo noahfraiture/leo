@@ -1,4 +1,4 @@
-use crate::http::router::AppState;
+use crate::app::AppState;
 use hypertext::{Raw, prelude::*};
 
 const STYLES: &str = include_str!("styles.generated.css");

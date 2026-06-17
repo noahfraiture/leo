@@ -5,7 +5,7 @@ use axum::{
 };
 use hypertext::prelude::*;
 
-use crate::http::router::AppState;
+use crate::app::AppState;
 
 use super::{Authz, RouteContext, RouteError};
 

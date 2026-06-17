@@ -9,13 +9,10 @@ use hypertext::prelude::*;
 use serde::Deserialize;
 
 use crate::{
+    app::AppState,
     db,
-    http::{
-        router::AppState,
-        ui::{
-            NoInput, Public, Route, RouteContext, RouteError, RouteView, document,
-            not_found_fragment,
-        },
+    http::ui::{
+        NoInput, Public, Route, RouteContext, RouteError, RouteView, document, not_found_fragment,
     },
 };
 

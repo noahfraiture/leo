@@ -1,9 +1,12 @@
 #![allow(dead_code)]
 
 mod analysis;
+mod app;
+mod canary;
 mod cli;
 mod db;
 mod http;
+mod media;
 #[cfg(test)]
 mod test;
 mod upload;

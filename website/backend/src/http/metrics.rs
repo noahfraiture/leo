@@ -90,7 +90,7 @@ impl AppMetrics {
 }
 
 pub async fn serve_metrics(
-    axum::extract::State(state): axum::extract::State<crate::http::router::AppState>,
+    axum::extract::State(state): axum::extract::State<crate::app::AppState>,
 ) -> Response {
     (
         [("content-type", "text/plain; version=0.0.4; charset=utf-8")],

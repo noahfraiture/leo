@@ -6,12 +6,9 @@ use serde::Deserialize;
 
 use crate::{
     analysis::job::{self as analysis_job, AnalysisSnapshot, AnalysisSubmission},
+    app::{self, AppState},
     db,
-    http::{
-        analysis_jobs,
-        router::AppState,
-        ui::{NoInput, Public, Route, RouteContext, RouteError, RouteView, not_found_fragment},
-    },
+    http::ui::{NoInput, Public, Route, RouteContext, RouteError, RouteView, not_found_fragment},
 };
 
 pub struct AnalyzeRoute;
@@ -62,7 +59,7 @@ impl Route for AnalyzeRoute {
         );
 
         if context.state().runs_analysis_jobs() {
-            analysis_jobs::spawn_analysis_job(context.state().clone(), analysis);
+            app::spawn_analysis_job(context.state().clone(), analysis);
         }
 
         Ok(snapshot.into())

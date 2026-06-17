@@ -10,39 +10,18 @@ use axum::{
 use serde_json::json;
 
 use crate::{
+    app::AppState,
     db,
-    http::{metrics::AppMetrics, ui},
-    upload::{
-        ChunkedUploadStore, MAX_VIDEO_UPLOAD_SIZE_BYTES, VIDEO_UPLOAD_CHUNK_REQUEST_LIMIT_BYTES,
-    },
+    http::ui,
+    upload::{MAX_VIDEO_UPLOAD_SIZE_BYTES, VIDEO_UPLOAD_CHUNK_REQUEST_LIMIT_BYTES},
 };
-
-/// Shared application services passed through axum state and reused by UI
-/// route dispatch.
-///
-/// This must stay cheap to clone because axum state extraction and the custom
-/// route adapter pass cloned `AppState` values through per-request async
-/// boundaries rather than sharing a mutable singleton. Fields should therefore
-/// be handles or internally shared types, not large owned payloads.
-#[derive(Clone)]
-pub struct AppState {
-    db: db::Database,
-    chunked_uploads: ChunkedUploadStore,
-    metrics: AppMetrics,
-    run_analysis_jobs: bool,
-}
 
 pub async fn run(
     db: db::Database,
     upload_bucket_path: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let state = AppState {
-        db,
-        chunked_uploads: ChunkedUploadStore::new(upload_bucket_path.join(".partial"))?,
-        metrics: AppMetrics::default(),
-        run_analysis_jobs: true,
-    };
-    crate::http::canary::spawn_canary(state.clone());
+    let state = AppState::new(db, upload_bucket_path, true)?;
+    crate::canary::spawn_canary(state.clone());
 
     let port = env::var("PORT")
         .unwrap_or_else(|_| "8080".to_owned())
@@ -136,41 +115,6 @@ async fn log_request(request: Request, next: Next) -> Response {
     );
 
     next.run(request).await
-}
-
-impl AppState {
-    pub fn db(&self) -> &db::Database {
-        &self.db
-    }
-
-    pub fn chunked_uploads(&self) -> &ChunkedUploadStore {
-        &self.chunked_uploads
-    }
-
-    pub fn metrics(&self) -> &AppMetrics {
-        &self.metrics
-    }
-
-    pub fn runs_analysis_jobs(&self) -> bool {
-        self.run_analysis_jobs
-    }
-
-    #[cfg(test)]
-    pub async fn for_test() -> Self {
-        let test_database = crate::test::database::init_with_bucket_path()
-            .await
-            .expect("test database should initialize");
-
-        Self {
-            db: test_database.db,
-            chunked_uploads: ChunkedUploadStore::new(
-                test_database.upload_bucket_path.join(".partial"),
-            )
-            .expect("test chunk staging should initialize"),
-            metrics: AppMetrics::default(),
-            run_analysis_jobs: false,
-        }
-    }
 }
 
 #[cfg(test)]

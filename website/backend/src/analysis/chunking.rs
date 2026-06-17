@@ -1,6 +1,6 @@
 use std::env;
 
-use crate::analysis::request::VideoFrame;
+use crate::media::VideoFrame;
 
 const SAFE_OPENAI_MAX_IMAGES_PER_REQUEST: usize = 450;
 const SAFE_OPENAI_MAX_PAYLOAD_BYTES_PER_REQUEST: usize = 45 * 1024 * 1024;
@@ -171,7 +171,7 @@ fn env_f64(name: &str, default: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{ChunkingOptions, chunk_frames};
-    use crate::analysis::request::VideoFrame;
+    use crate::media::VideoFrame;
 
     fn frame(video_name: &str, timestamp_secs: f64, bytes: usize) -> VideoFrame {
         VideoFrame {

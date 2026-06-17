@@ -5,11 +5,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use axum::{
-    body::Bytes,
-    http::StatusCode,
-    response::{IntoResponse, Response},
-};
 use serde::Serialize;
 use thiserror::Error;
 use tokio::{
@@ -130,7 +125,7 @@ impl ChunkedUploadStore {
         &self,
         upload_id: &str,
         chunk_index: u64,
-        bytes: Bytes,
+        bytes: &[u8],
     ) -> Result<(), ChunkedUploadError> {
         if bytes.is_empty() {
             return Err(ChunkedUploadError::EmptyChunk);
@@ -170,7 +165,7 @@ impl ChunkedUploadStore {
             .append(true)
             .open(&session.partial_path)
             .await?;
-        file.write_all(&bytes).await?;
+        file.write_all(bytes).await?;
 
         session.received_bytes = received_bytes;
         session.next_chunk_index += 1;
@@ -257,30 +252,6 @@ impl ChunkedUploadStore {
         }
 
         Ok(())
-    }
-}
-
-impl IntoResponse for ChunkedUploadError {
-    fn into_response(self) -> Response {
-        match self {
-            Self::NotFound => (StatusCode::NOT_FOUND, self.to_string()).into_response(),
-            Self::EmptyUpload | Self::MissingFilename | Self::EmptyChunk => {
-                (StatusCode::BAD_REQUEST, self.to_string()).into_response()
-            }
-            Self::UploadTooLarge | Self::ChunkTooLarge => {
-                (StatusCode::PAYLOAD_TOO_LARGE, self.to_string()).into_response()
-            }
-            Self::OutOfOrder { .. } => (StatusCode::CONFLICT, self.to_string()).into_response(),
-            Self::TooManyBytes
-            | Self::IncompleteUpload
-            | Self::ByteCountMismatch
-            | Self::SizeOverflow => (StatusCode::BAD_REQUEST, self.to_string()).into_response(),
-            Self::Io(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("chunked upload failure: {error}"),
-            )
-                .into_response(),
-        }
     }
 }
 

@@ -3,10 +3,10 @@ use thiserror::Error;
 
 use crate::{
     analysis::{
-        canary::DEFAULT_CANARY_PROMPT,
         provider::AnalysisProvider,
         request::{AnalysisSettings, DEFAULT_FRAME_SAMPLE_RATE_FPS},
     },
+    canary::DEFAULT_CANARY_PROMPT,
     db::Database,
 };
 

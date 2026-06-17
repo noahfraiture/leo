@@ -7,7 +7,7 @@ use std::{
 use surrealdb::types::{Bytes, File, RecordId, SurrealValue};
 use thiserror::Error;
 
-use crate::{analysis::canary::CANARY_VIDEO_NAME, db::Database};
+use crate::{canary::CANARY_VIDEO_NAME, db::Database};
 
 const VIDEO_TABLE: &str = "video";
 const VIDEO_BUCKET: &str = "videos";

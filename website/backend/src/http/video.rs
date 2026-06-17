@@ -8,7 +8,11 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::{db, http::router::AppState};
+use crate::{
+    app::AppState,
+    db,
+    media::playback::{ByteRange, content_type, parse_byte_range},
+};
 
 pub async fn serve(
     Path(video_name): Path<String>,
@@ -94,66 +98,5 @@ fn insert_header(
 ) {
     if let Ok(value) = HeaderValue::from_str(&value.to_string()) {
         headers.insert(name, value);
-    }
-}
-
-#[derive(Clone, Copy)]
-struct ByteRange {
-    start: usize,
-    end: usize,
-}
-
-fn parse_byte_range(value: &str, total_len: usize) -> Option<ByteRange> {
-    if total_len == 0 {
-        return None;
-    }
-
-    let spec = value.trim().strip_prefix("bytes=")?;
-    if spec.contains(',') {
-        return None;
-    }
-
-    let (start, end) = spec.split_once('-')?;
-    if start.is_empty() {
-        return suffix_byte_range(end, total_len);
-    }
-
-    let start = start.parse::<usize>().ok()?;
-    if start >= total_len {
-        return None;
-    }
-
-    let end = if end.is_empty() {
-        total_len - 1
-    } else {
-        end.parse::<usize>().ok()?.min(total_len - 1)
-    };
-
-    if end < start {
-        return None;
-    }
-
-    Some(ByteRange { start, end })
-}
-
-fn suffix_byte_range(value: &str, total_len: usize) -> Option<ByteRange> {
-    let suffix_len = value.parse::<usize>().ok()?;
-    if suffix_len == 0 {
-        return None;
-    }
-
-    let suffix_len = suffix_len.min(total_len);
-    Some(ByteRange {
-        start: total_len - suffix_len,
-        end: total_len - 1,
-    })
-}
-
-fn content_type(name: &str) -> &'static str {
-    match name.rsplit_once('.').map(|(_, extension)| extension) {
-        Some(extension) if extension.eq_ignore_ascii_case("webm") => "video/webm",
-        Some(extension) if extension.eq_ignore_ascii_case("mov") => "video/quicktime",
-        Some(extension) if extension.eq_ignore_ascii_case("avi") => "video/x-msvideo",
-        _ => "video/mp4",
     }
 }

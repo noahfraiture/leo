@@ -3,13 +3,10 @@ use axum::http::StatusCode;
 use hypertext::prelude::*;
 
 use crate::{
+    app::AppState,
     db,
-    http::{
-        router::AppState,
-        ui::{
-            NoInput, Public, Route, RouteContext, RouteError, RouteView, document,
-            not_found_fragment,
-        },
+    http::ui::{
+        NoInput, Public, Route, RouteContext, RouteError, RouteView, document, not_found_fragment,
     },
     upload::MAX_VIDEO_UPLOAD_SIZE_LABEL,
 };

@@ -3,11 +3,9 @@ use axum::extract::Path;
 use hypertext::prelude::*;
 
 use crate::{
+    app::AppState,
     db,
-    http::{
-        router::AppState,
-        ui::{NoInput, Public, Route, RouteContext, RouteError, RouteView, not_found_fragment},
-    },
+    http::ui::{NoInput, Public, Route, RouteContext, RouteError, RouteView, not_found_fragment},
 };
 
 use super::home::video_workspace;

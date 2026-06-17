@@ -1,6 +1,6 @@
 use axum::http::request::Parts;
 
-use crate::http::router::AppState;
+use crate::app::AppState;
 
 use super::AuthzRequest;
 

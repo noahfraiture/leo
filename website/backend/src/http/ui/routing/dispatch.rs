@@ -5,7 +5,7 @@ use axum::{
 };
 use axum_htmx::HxRequest;
 
-use crate::http::router::AppState;
+use crate::app::AppState;
 
 use super::{Authz, AuthzRequest, Route, RouteContext, RouteError, RouteView};
 

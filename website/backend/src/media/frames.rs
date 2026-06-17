@@ -4,7 +4,7 @@ use tempfile::NamedTempFile;
 use thiserror::Error;
 use tokio::{fs, process::Command};
 
-use crate::analysis::request::{AnalysisVideo, VideoFrame};
+use crate::media::{AnalysisVideo, VideoFrame};
 
 const DEFAULT_FRAME_SAMPLE_RATE_FPS: f64 = 0.2;
 const FRAME_OUTPUT_PATTERN: &str = "frame-%06d.jpg";

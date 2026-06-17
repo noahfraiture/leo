@@ -1,32 +1,38 @@
-use std::{env, time::Duration};
+use std::time::Duration;
 
 use reqwest::{
     StatusCode,
     header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderMap},
 };
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::time::{Instant, sleep};
 
 use crate::analysis::{
     prompts::gemini as prompts,
-    request::{AnalysisRequest, AnalysisSettings, AnalysisTelemetry, AnalysisVideo},
+    request::{AnalysisRequest, AnalysisSettings, AnalysisTelemetry},
+};
+use crate::media::AnalysisVideo;
+
+mod config;
+mod dto;
+mod upload;
+
+use config::{DEFAULT_HTTP_TIMEOUT, GeminiConfig};
+use dto::{
+    GenerateContentResponse, GetFileResponse, UploadResponse, UploadedFile, UploadedFileResponse,
+};
+use upload::{
+    UploadChunk, UploadChunksError, UploadCommand, UploadRetryDecision, UploadSession, UploadStats,
+    VideoInput, log_upload_completed, next_upload_chunk, select_upload_chunk_size, upload_chunks,
+    upload_offset_from_headers, upload_retry_decision, upload_session_from_headers,
+    video_mime_type,
 };
 
-const DEFAULT_MODEL: &str = "gemini-3-flash-preview";
 const UPLOAD_URL: &str = "https://generativelanguage.googleapis.com/upload/v1beta/files";
 const API_URL_PREFIX: &str = "https://generativelanguage.googleapis.com/v1beta";
 const GENERATE_URL_PREFIX: &str = "https://generativelanguage.googleapis.com/v1beta/models";
-const DEFAULT_FILE_PROCESSING_TIMEOUT: Duration = Duration::from_secs(300);
-const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(300);
-const DEFAULT_UPLOAD_CHUNK_GRANULARITY_BYTES: usize = 256 * 1024;
-const DEFAULT_UPLOAD_CHUNK_SIZE_BUCKETS_BYTES: [usize; 4] = [
-    8 * 1024 * 1024,
-    16 * 1024 * 1024,
-    32 * 1024 * 1024,
-    64 * 1024 * 1024,
-];
 const FILE_PROCESSING_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_UPLOAD_CHUNK_ATTEMPTS: usize = 4;
 const MAX_UPLOAD_SESSION_ATTEMPTS: usize = 3;
@@ -47,75 +53,6 @@ pub async fn analyze_videos(videos: &[AnalysisVideo], prompt: &str) -> Result<St
 pub struct GeminiClient {
     http: reqwest::Client,
     config: GeminiConfig,
-}
-
-struct GeminiConfig {
-    api_key: String,
-    model: String,
-    file_processing_timeout: Duration,
-    upload_chunk_size_buckets: Vec<usize>,
-}
-
-struct VideoInput {
-    name: String,
-    bytes: Vec<u8>,
-}
-
-struct UploadSession {
-    url: String,
-    chunk_granularity: usize,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct UploadChunk {
-    offset: usize,
-    end: usize,
-    command: UploadCommand,
-}
-
-impl UploadChunk {
-    fn len(self) -> usize {
-        self.end - self.offset
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum UploadCommand {
-    Upload,
-    UploadAndFinalize,
-}
-
-impl UploadCommand {
-    fn as_header(self) -> &'static str {
-        match self {
-            Self::Upload => "upload",
-            Self::UploadAndFinalize => "upload, finalize",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum UploadRetryDecision {
-    RetryFromOffset(usize),
-    RestartSession,
-}
-
-#[derive(Debug)]
-enum UploadChunksError {
-    Gemini(GeminiError),
-    FinalizedWithoutResponse(GeminiError),
-}
-
-impl From<GeminiError> for UploadChunksError {
-    fn from(error: GeminiError) -> Self {
-        Self::Gemini(error)
-    }
-}
-
-#[derive(Debug, PartialEq)]
-struct UploadedFile {
-    uri: String,
-    mime_type: String,
 }
 
 #[derive(Debug, Error)]
@@ -685,171 +622,6 @@ impl GeminiClient {
     }
 }
 
-impl GeminiConfig {
-    fn from_env() -> Result<Self, GeminiError> {
-        let api_key = env::var("GEMINI_API_KEY")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .ok_or(GeminiError::MissingApiKey)?;
-        let model = env::var("GEMINI_MODEL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
-        let file_processing_timeout = env::var("GEMINI_FILE_PROCESSING_TIMEOUT_SECS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .map(Duration::from_secs)
-            .unwrap_or(DEFAULT_FILE_PROCESSING_TIMEOUT);
-        let upload_chunk_size = env::var("GEMINI_UPLOAD_CHUNK_SIZE_BYTES").ok();
-        let upload_chunk_size_buckets = upload_chunk_size_buckets_from_values(
-            upload_chunk_size.as_deref(),
-            env::var("GEMINI_UPLOAD_CHUNK_SIZE_BUCKETS_BYTES")
-                .ok()
-                .as_deref(),
-        );
-
-        Ok(Self {
-            api_key,
-            model,
-            file_processing_timeout,
-            upload_chunk_size_buckets,
-        })
-    }
-}
-
-#[derive(Default)]
-struct UploadStats {
-    send_attempts: usize,
-    retry_count: usize,
-    timeout_retries: usize,
-    connect_retries: usize,
-    body_retries: usize,
-    api_retries: usize,
-    offset_queries: usize,
-}
-
-impl UploadStats {
-    fn record_send_attempt(&mut self) {
-        self.send_attempts += 1;
-    }
-
-    fn record_retry(&mut self, error: &GeminiError) {
-        match error {
-            GeminiError::UploadRequest {
-                timeout,
-                connect,
-                body,
-                ..
-            } => self.record_upload_retry(*timeout, *connect, *body),
-            GeminiError::Api { .. } => self.record_api_retry(),
-            _ => self.retry_count += 1,
-        }
-    }
-
-    fn record_upload_retry(&mut self, timeout: bool, connect: bool, body: bool) {
-        self.retry_count += 1;
-        if timeout {
-            self.timeout_retries += 1;
-        }
-        if connect {
-            self.connect_retries += 1;
-        }
-        if body {
-            self.body_retries += 1;
-        }
-    }
-
-    fn record_api_retry(&mut self) {
-        self.retry_count += 1;
-        self.api_retries += 1;
-    }
-
-    fn record_offset_query(&mut self) {
-        self.offset_queries += 1;
-    }
-
-    fn summary_fields(
-        &self,
-        chunk_size_bytes: usize,
-        logical_chunks: usize,
-        video_size_bytes: usize,
-        chunk_granularity_bytes: usize,
-        duration_ms: i64,
-    ) -> Value {
-        json!({
-            "chunk_size_bytes": chunk_size_bytes,
-            "logical_chunks": logical_chunks,
-            "video_size_bytes": video_size_bytes,
-            "chunk_granularity_bytes": chunk_granularity_bytes,
-            "send_attempts": self.send_attempts,
-            "retry_count": self.retry_count,
-            "timeout_retries": self.timeout_retries,
-            "connect_retries": self.connect_retries,
-            "body_retries": self.body_retries,
-            "api_retries": self.api_retries,
-            "offset_queries": self.offset_queries,
-            "duration_ms": duration_ms,
-        })
-    }
-}
-
-fn log_upload_completed(
-    telemetry: &AnalysisTelemetry,
-    video: &VideoInput,
-    stats: &UploadStats,
-    total_bytes: usize,
-    total_chunks: usize,
-    upload_chunk_size: usize,
-    chunk_granularity: usize,
-    duration_ms: i64,
-) {
-    telemetry.log(
-        "info",
-        "gemini",
-        "upload_completed",
-        [
-            ("video_name", json!(video.name)),
-            ("bytes", json!(total_bytes)),
-            ("chunks", json!(total_chunks)),
-            ("chunk_size", json!(upload_chunk_size)),
-            ("granularity", json!(chunk_granularity)),
-            ("send_attempts", json!(stats.send_attempts)),
-            ("retry_count", json!(stats.retry_count)),
-            ("timeout_retries", json!(stats.timeout_retries)),
-            ("connect_retries", json!(stats.connect_retries)),
-            ("body_retries", json!(stats.body_retries)),
-            ("api_retries", json!(stats.api_retries)),
-            ("offset_queries", json!(stats.offset_queries)),
-            ("duration_ms", json!(duration_ms)),
-        ],
-    );
-}
-
-fn upload_chunk_size_buckets_from_values(
-    fixed_chunk_size: Option<&str>,
-    bucket_list: Option<&str>,
-) -> Vec<usize> {
-    if let Some(chunk_size) = fixed_chunk_size
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-    {
-        return vec![chunk_size];
-    }
-
-    let buckets = bucket_list
-        .unwrap_or_default()
-        .split(',')
-        .filter_map(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .collect::<Vec<_>>();
-
-    if buckets.is_empty() {
-        DEFAULT_UPLOAD_CHUNK_SIZE_BUCKETS_BYTES.to_vec()
-    } else {
-        buckets
-    }
-}
-
 async fn success_headers(response: reqwest::Response) -> Result<HeaderMap, GeminiError> {
     let status = response.status();
 
@@ -892,170 +664,6 @@ async fn success_upload_chunk(response: reqwest::Response) -> Result<(), GeminiE
     })
 }
 
-fn upload_session_from_headers(headers: &HeaderMap) -> Result<UploadSession, GeminiError> {
-    let url = headers
-        .get("x-goog-upload-url")
-        .ok_or(GeminiError::MissingUploadUrl)?
-        .to_str()?
-        .to_owned();
-    let chunk_granularity = match headers.get("x-goog-upload-chunk-granularity") {
-        Some(value) => {
-            let value = value.to_str()?;
-            value
-                .parse::<usize>()
-                .map_err(|_| GeminiError::InvalidUploadChunkGranularity {
-                    value: value.to_owned(),
-                })?
-        }
-        None => DEFAULT_UPLOAD_CHUNK_GRANULARITY_BYTES,
-    };
-
-    Ok(UploadSession {
-        url,
-        chunk_granularity: chunk_granularity.max(1),
-    })
-}
-
-fn upload_chunks(
-    total_bytes: usize,
-    chunk_granularity: usize,
-    preferred_chunk_size: usize,
-) -> Vec<UploadChunk> {
-    if total_bytes == 0 {
-        return vec![UploadChunk {
-            offset: 0,
-            end: 0,
-            command: UploadCommand::UploadAndFinalize,
-        }];
-    }
-
-    let chunk_granularity = chunk_granularity.max(1);
-    let preferred_chunk_size = preferred_chunk_size.max(chunk_granularity);
-    let chunk_size = (preferred_chunk_size / chunk_granularity)
-        .saturating_mul(chunk_granularity)
-        .max(chunk_granularity);
-    let mut chunks = Vec::new();
-    let mut offset = 0;
-
-    while offset < total_bytes {
-        let remaining = total_bytes - offset;
-        let is_last = remaining <= chunk_size;
-        let end = if is_last {
-            total_bytes
-        } else {
-            offset + chunk_size
-        };
-        chunks.push(UploadChunk {
-            offset,
-            end,
-            command: if is_last {
-                UploadCommand::UploadAndFinalize
-            } else {
-                UploadCommand::Upload
-            },
-        });
-        offset = end;
-    }
-
-    chunks
-}
-
-fn select_upload_chunk_size(telemetry: &AnalysisTelemetry, buckets: &[usize]) -> usize {
-    let buckets = if buckets.is_empty() {
-        DEFAULT_UPLOAD_CHUNK_SIZE_BUCKETS_BYTES.as_slice()
-    } else {
-        buckets
-    };
-    if telemetry.is_canary {
-        return buckets[0];
-    }
-
-    let Some(analysis_id) = telemetry
-        .analysis_id
-        .as_deref()
-        .filter(|analysis_id| !analysis_id.is_empty())
-    else {
-        return buckets[0];
-    };
-
-    buckets[stable_bucket_index(analysis_id, buckets.len())]
-}
-
-fn stable_bucket_index(value: &str, bucket_count: usize) -> usize {
-    if bucket_count == 0 {
-        return 0;
-    }
-
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in value.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-
-    (hash as usize) % bucket_count
-}
-
-fn next_upload_chunk(
-    total_bytes: usize,
-    offset: usize,
-    chunk_granularity: usize,
-    preferred_chunk_size: usize,
-) -> UploadChunk {
-    let chunk_granularity = chunk_granularity.max(1);
-    let preferred_chunk_size = preferred_chunk_size.max(chunk_granularity);
-    let chunk_size = (preferred_chunk_size / chunk_granularity)
-        .saturating_mul(chunk_granularity)
-        .max(chunk_granularity);
-    let remaining = total_bytes - offset;
-    let is_last = remaining <= chunk_size;
-    let end = if is_last {
-        total_bytes
-    } else {
-        offset + chunk_size
-    };
-
-    UploadChunk {
-        offset,
-        end,
-        command: if is_last {
-            UploadCommand::UploadAndFinalize
-        } else {
-            UploadCommand::Upload
-        },
-    }
-}
-
-fn upload_retry_decision(
-    total_bytes: usize,
-    chunk: UploadChunk,
-    received_offset: usize,
-) -> Result<UploadRetryDecision, GeminiError> {
-    if received_offset > total_bytes {
-        return Err(GeminiError::InvalidUploadOffset {
-            value: received_offset.to_string(),
-        });
-    }
-
-    if chunk.command == UploadCommand::UploadAndFinalize && received_offset == total_bytes {
-        return Ok(UploadRetryDecision::RestartSession);
-    }
-
-    Ok(UploadRetryDecision::RetryFromOffset(received_offset))
-}
-
-fn upload_offset_from_headers(headers: &HeaderMap) -> Result<usize, GeminiError> {
-    let value = headers
-        .get("x-goog-upload-size-received")
-        .ok_or(GeminiError::MissingUploadOffset)?
-        .to_str()?;
-
-    value
-        .parse::<usize>()
-        .map_err(|_| GeminiError::InvalidUploadOffset {
-            value: value.to_owned(),
-        })
-}
-
 fn generate_content_request(files: &[UploadedFile], prompt: &str) -> Value {
     let mut parts = files
         .iter()
@@ -1078,143 +686,10 @@ fn generate_content_request(files: &[UploadedFile], prompt: &str) -> Value {
     })
 }
 
-fn video_mime_type(name: &str) -> &'static str {
-    match name.rsplit_once('.').map(|(_, extension)| extension) {
-        Some(extension) if extension.eq_ignore_ascii_case("mp4") => "video/mp4",
-        Some(extension) if extension.eq_ignore_ascii_case("mpeg") => "video/mpeg",
-        Some(extension) if extension.eq_ignore_ascii_case("mov") => "video/quicktime",
-        Some(extension) if extension.eq_ignore_ascii_case("avi") => "video/avi",
-        Some(extension) if extension.eq_ignore_ascii_case("flv") => "video/x-flv",
-        Some(extension) if extension.eq_ignore_ascii_case("mpg") => "video/mpg",
-        Some(extension) if extension.eq_ignore_ascii_case("webm") => "video/webm",
-        Some(extension) if extension.eq_ignore_ascii_case("wmv") => "video/wmv",
-        Some(extension) if extension.eq_ignore_ascii_case("3gp") => "video/3gpp",
-        _ => "video/mp4",
-    }
-}
-
-#[derive(Deserialize)]
-struct UploadResponse {
-    file: UploadedFileResponse,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum GetFileResponse {
-    Wrapped { file: UploadedFileResponse },
-    Direct(UploadedFileResponse),
-}
-
-impl GetFileResponse {
-    fn into_file(self) -> UploadedFileResponse {
-        match self {
-            Self::Wrapped { file } | Self::Direct(file) => file,
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct UploadedFileResponse {
-    name: String,
-    uri: String,
-    #[serde(default, deserialize_with = "deserialize_file_state")]
-    state: FileState,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FileState {
-    Unspecified,
-    Processing,
-    Active,
-    Failed,
-}
-
-impl Default for FileState {
-    fn default() -> Self {
-        Self::Unspecified
-    }
-}
-
-impl FileState {
-    fn is_active(self) -> bool {
-        matches!(self, Self::Active)
-    }
-
-    fn is_failed(self) -> bool {
-        matches!(self, Self::Failed)
-    }
-
-    fn is_waitable(self) -> bool {
-        matches!(self, Self::Unspecified | Self::Processing)
-    }
-}
-
-fn deserialize_file_state<'de, D>(deserializer: D) -> Result<FileState, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let state = Option::<String>::deserialize(deserializer)?;
-
-    Ok(match state.as_deref() {
-        Some("ACTIVE") => FileState::Active,
-        Some("FAILED") => FileState::Failed,
-        Some("PROCESSING") => FileState::Processing,
-        _ => FileState::Unspecified,
-    })
-}
-
-#[derive(Deserialize)]
-struct GenerateContentResponse {
-    #[serde(default)]
-    candidates: Vec<Candidate>,
-}
-
-impl GenerateContentResponse {
-    fn text(self) -> Option<String> {
-        let text = self
-            .candidates
-            .into_iter()
-            .flat_map(|candidate| candidate.content.parts)
-            .filter_map(|part| part.text)
-            .filter(|text| !text.trim().is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-
-        if text.is_empty() { None } else { Some(text) }
-    }
-}
-
-#[derive(Deserialize)]
-struct Candidate {
-    content: Content,
-}
-
-#[derive(Deserialize)]
-struct Content {
-    #[serde(default)]
-    parts: Vec<ResponsePart>,
-}
-
-#[derive(Deserialize)]
-struct ResponsePart {
-    text: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
-
-    #[test]
-    fn video_mime_type_maps_supported_extensions() {
-        assert_eq!(video_mime_type("clip.mp4"), "video/mp4");
-        assert_eq!(video_mime_type("clip.mov"), "video/quicktime");
-        assert_eq!(video_mime_type("clip.avi"), "video/avi");
-        assert_eq!(video_mime_type("clip.webm"), "video/webm");
-        assert_eq!(video_mime_type("clip.wmv"), "video/wmv");
-        assert_eq!(video_mime_type("clip.3gp"), "video/3gpp");
-        assert_eq!(video_mime_type("clip.unknown"), "video/mp4");
-    }
 
     #[test]
     fn generate_content_request_puts_uploaded_videos_before_prompt() {
@@ -1256,185 +731,6 @@ mod tests {
                 }]
             })
         );
-    }
-
-    #[test]
-    fn upload_response_keeps_file_name_uri_and_state() {
-        let response: UploadResponse = serde_json::from_value(json!({
-            "file": {
-                "name": "files/46pyf29h2xti",
-                "uri": "https://generativelanguage.googleapis.com/v1beta/files/46pyf29h2xti",
-                "state": "PROCESSING"
-            }
-        }))
-        .expect("upload response should deserialize");
-
-        assert_eq!(response.file.name, "files/46pyf29h2xti");
-        assert_eq!(
-            response.file.uri,
-            "https://generativelanguage.googleapis.com/v1beta/files/46pyf29h2xti"
-        );
-        assert_eq!(response.file.state, FileState::Processing);
-    }
-
-    #[test]
-    fn get_file_response_accepts_direct_file_shape() {
-        let response: GetFileResponse = serde_json::from_value(json!({
-            "name": "files/46pyf29h2xti",
-            "uri": "https://generativelanguage.googleapis.com/v1beta/files/46pyf29h2xti",
-            "state": "ACTIVE"
-        }))
-        .expect("get file response should deserialize");
-        let file = response.into_file();
-
-        assert_eq!(file.name, "files/46pyf29h2xti");
-        assert_eq!(file.state, FileState::Active);
-    }
-
-    #[test]
-    fn upload_chunks_split_large_files_on_preferred_boundaries() {
-        let chunks = upload_chunks(36, 4, 16);
-
-        assert_eq!(
-            chunks,
-            vec![
-                UploadChunk {
-                    offset: 0,
-                    end: 16,
-                    command: UploadCommand::Upload,
-                },
-                UploadChunk {
-                    offset: 16,
-                    end: 32,
-                    command: UploadCommand::Upload,
-                },
-                UploadChunk {
-                    offset: 32,
-                    end: 36,
-                    command: UploadCommand::UploadAndFinalize,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn upload_chunks_respect_google_chunk_granularity() {
-        let chunks = upload_chunks(37, 6, 16);
-
-        assert_eq!(
-            chunks,
-            vec![
-                UploadChunk {
-                    offset: 0,
-                    end: 12,
-                    command: UploadCommand::Upload,
-                },
-                UploadChunk {
-                    offset: 12,
-                    end: 24,
-                    command: UploadCommand::Upload,
-                },
-                UploadChunk {
-                    offset: 24,
-                    end: 36,
-                    command: UploadCommand::Upload,
-                },
-                UploadChunk {
-                    offset: 36,
-                    end: 37,
-                    command: UploadCommand::UploadAndFinalize,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn upload_chunk_size_bucket_is_stable_for_analysis_id() {
-        let buckets = vec![8, 16, 32, 64];
-        let telemetry = AnalysisTelemetry::new("analysis-123", "gemini");
-
-        let selected = select_upload_chunk_size(&telemetry, &buckets);
-
-        assert!(buckets.contains(&selected));
-        assert_eq!(selected, select_upload_chunk_size(&telemetry, &buckets));
-        assert_eq!(
-            selected,
-            select_upload_chunk_size(&AnalysisTelemetry::new("analysis-123", "gemini"), &buckets)
-        );
-        assert_eq!(
-            select_upload_chunk_size(&AnalysisTelemetry::default(), &buckets),
-            8
-        );
-    }
-
-    #[test]
-    fn canary_upload_chunk_size_uses_first_bucket() {
-        let buckets = vec![8, 16, 32, 64];
-        let telemetry = AnalysisTelemetry::new("analysis-123", "gemini").with_canary(true);
-
-        assert_eq!(select_upload_chunk_size(&telemetry, &buckets), 8);
-    }
-
-    #[test]
-    fn upload_stats_count_retries_and_summary_fields() {
-        let mut stats = UploadStats::default();
-
-        stats.record_send_attempt();
-        stats.record_upload_retry(true, false, false);
-        stats.record_offset_query();
-        stats.record_send_attempt();
-        stats.record_api_retry();
-
-        let fields = stats.summary_fields(32, 4, 20, 12, 1_234);
-
-        assert_eq!(fields["chunk_size_bytes"], json!(32));
-        assert_eq!(fields["logical_chunks"], json!(4));
-        assert_eq!(fields["send_attempts"], json!(2));
-        assert_eq!(fields["retry_count"], json!(2));
-        assert_eq!(fields["timeout_retries"], json!(1));
-        assert_eq!(fields["api_retries"], json!(1));
-        assert_eq!(fields["offset_queries"], json!(1));
-        assert_eq!(fields["duration_ms"], json!(1_234));
-    }
-
-    #[test]
-    fn upload_session_reads_chunk_granularity_header() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-goog-upload-url",
-            "https://uploads.example/session".parse().unwrap(),
-        );
-        headers.insert("x-goog-upload-chunk-granularity", "262144".parse().unwrap());
-
-        let session = upload_session_from_headers(&headers).expect("session should parse");
-
-        assert_eq!(session.url, "https://uploads.example/session");
-        assert_eq!(session.chunk_granularity, 262144);
-    }
-
-    #[test]
-    fn upload_offset_reads_resumable_query_header() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-goog-upload-size-received", "83886080".parse().unwrap());
-
-        let offset = upload_offset_from_headers(&headers).expect("offset should parse");
-
-        assert_eq!(offset, 83886080);
-    }
-
-    #[test]
-    fn upload_retry_restarts_session_when_final_chunk_was_consumed() {
-        let total_bytes = 364_996_893;
-        let final_chunk = UploadChunk {
-            offset: 360_710_144,
-            end: total_bytes,
-            command: UploadCommand::UploadAndFinalize,
-        };
-
-        let decision = upload_retry_decision(total_bytes, final_chunk, total_bytes)
-            .expect("retry decision should be valid");
-
-        assert_eq!(decision, UploadRetryDecision::RestartSession);
     }
 
     #[tokio::test]
@@ -1489,15 +785,5 @@ mod tests {
             }
             other => panic!("expected upload request error, got {other}"),
         }
-    }
-
-    #[test]
-    fn file_state_detects_ready_and_failed_states() {
-        assert!(FileState::Active.is_active());
-        assert!(!FileState::Processing.is_active());
-        assert!(FileState::Failed.is_failed());
-        assert!(FileState::Unspecified.is_waitable());
-        assert!(FileState::Processing.is_waitable());
-        assert!(!FileState::Failed.is_waitable());
     }
 }

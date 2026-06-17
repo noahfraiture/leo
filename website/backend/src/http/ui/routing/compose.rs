@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use axum::extract::FromRequestParts;
 use hypertext::{Buffer, Renderable};
 
-use crate::http::router::AppState;
+use crate::app::AppState;
 
 use super::{Authz, ReuseGranted, Route, RouteContext, RouteError, RouteView};
 
@@ -262,7 +262,7 @@ mod tests {
     use hypertext::prelude::*;
 
     use super::*;
-    use crate::http::router::AppState;
+    use crate::app::AppState;
 
     async fn test_context(headers: HeaderMap) -> RouteContext {
         let request = axum::http::Request::builder()

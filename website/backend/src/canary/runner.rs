@@ -3,14 +3,12 @@ use tempfile::Builder;
 use tokio::{fs, process::Command, time::sleep};
 
 use crate::{
-    analysis::{
-        canary::{CANARY_VIDEO_NAME, CanaryConfig},
-        provider::AnalysisProvider,
-        request::AnalysisSettings,
-    },
+    analysis::{provider::AnalysisProvider, request::AnalysisSettings},
+    app::{self, AppState},
     db,
-    http::{analysis_jobs, router::AppState},
 };
+
+use super::{CANARY_VIDEO_NAME, CanaryConfig};
 
 pub fn spawn_canary(state: AppState) {
     let config = match CanaryConfig::from_env() {
@@ -144,7 +142,7 @@ async fn run_once(state: &AppState, config: &CanaryConfig) {
                         "video_name": video.name,
                     })
                 );
-                analysis_jobs::spawn_analysis_job(state.clone(), analysis);
+                app::spawn_analysis_job(state.clone(), analysis);
             }
             Err(error) => {
                 state
