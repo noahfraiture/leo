@@ -1,3 +1,5 @@
+//! Provider request settings and structured telemetry helpers.
+
 use serde_json::{Map, Value, json};
 
 use crate::media::AnalysisVideo;

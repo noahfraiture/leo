@@ -1,3 +1,5 @@
+//! Environment configuration for synthetic analysis canaries.
+
 use std::{env, str::FromStr, time::Duration};
 
 use thiserror::Error;

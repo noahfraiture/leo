@@ -1,3 +1,5 @@
+//! Home workspace page for upload, video playback, and analysis submission.
+
 use async_trait::async_trait;
 use axum::http::StatusCode;
 use hypertext::prelude::*;

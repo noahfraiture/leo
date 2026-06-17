@@ -1,3 +1,5 @@
+//! Shared in-memory media payload types used by analysis providers.
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct AnalysisVideo {
     pub name: String,

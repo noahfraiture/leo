@@ -1,3 +1,5 @@
+//! Video deletion route and updated video workspace fragment.
+
 use async_trait::async_trait;
 use axum::extract::Path;
 use hypertext::prelude::*;

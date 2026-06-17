@@ -1,3 +1,5 @@
+//! Page-oriented backend UI feature routes and views.
+
 mod analyses;
 mod analyze;
 mod delete;

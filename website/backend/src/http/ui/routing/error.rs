@@ -1,3 +1,5 @@
+//! Route error type and HTTP response mapping for UI handlers.
+
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},

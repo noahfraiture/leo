@@ -1,3 +1,5 @@
+//! Analysis history page and history-management routes.
+
 use std::collections::HashMap;
 
 use async_trait::async_trait;

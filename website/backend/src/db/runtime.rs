@@ -1,3 +1,5 @@
+//! Embedded SurrealDB runtime initialization and local path resolution.
+
 use std::{
     env, fs,
     path::{Path, PathBuf},

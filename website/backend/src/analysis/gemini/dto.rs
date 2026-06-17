@@ -1,3 +1,5 @@
+//! Gemini API response shapes and file-state parsing.
+
 use serde::{Deserialize, Deserializer};
 
 #[derive(Debug, PartialEq)]

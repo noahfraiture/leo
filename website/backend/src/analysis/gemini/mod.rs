@@ -1,3 +1,5 @@
+//! Gemini provider client orchestration.
+
 use std::time::Duration;
 
 use reqwest::{

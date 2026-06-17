@@ -1,3 +1,5 @@
+//! Per-request context passed to typed UI route handlers.
+
 use axum::http::request::Parts;
 
 use crate::app::AppState;

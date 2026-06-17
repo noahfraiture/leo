@@ -1,3 +1,5 @@
+//! Shared HTML document shell and common UI fragments.
+
 use crate::app::AppState;
 use hypertext::{Raw, prelude::*};
 

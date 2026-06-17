@@ -1,3 +1,5 @@
+//! Error type that normalizes provider and frame extraction failures.
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]

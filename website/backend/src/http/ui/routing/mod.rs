@@ -1,3 +1,5 @@
+//! Typed UI route abstraction over axum extractors and hypertext rendering.
+
 mod authz;
 mod compose;
 mod context;

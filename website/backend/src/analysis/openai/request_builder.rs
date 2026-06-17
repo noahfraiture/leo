@@ -1,3 +1,5 @@
+//! OpenAI Responses API request construction for frame chunks and summaries.
+
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 

@@ -1,3 +1,5 @@
+//! OpenAI provider configuration loaded from environment variables.
+
 use std::{env, time::Duration};
 
 use super::OpenAiError;

@@ -1,3 +1,5 @@
+//! Chunked upload session state and staging-file assembly.
+
 use std::{
     collections::HashMap,
     path::PathBuf,

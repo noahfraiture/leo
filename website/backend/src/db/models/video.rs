@@ -1,3 +1,5 @@
+//! SurrealDB persistence and file-bucket storage for uploaded videos.
+
 use std::{
     env, fs,
     path::{Path, PathBuf},

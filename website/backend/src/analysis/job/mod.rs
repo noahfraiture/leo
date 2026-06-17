@@ -1,3 +1,5 @@
+//! Persisted analysis job submission, execution, events, and diagnostics.
+
 mod diagnostics;
 mod events;
 mod runner;

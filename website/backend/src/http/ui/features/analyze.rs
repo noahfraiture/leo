@@ -1,3 +1,5 @@
+//! Analysis submission and status fragment routes.
+
 use async_trait::async_trait;
 use axum::extract::Path;
 use axum_extra::extract::Form;

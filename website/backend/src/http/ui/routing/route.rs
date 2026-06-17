@@ -1,3 +1,5 @@
+//! Core typed route and route view traits.
+
 use async_trait::async_trait;
 use axum::{
     http::StatusCode,

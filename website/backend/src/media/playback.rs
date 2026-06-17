@@ -1,3 +1,5 @@
+//! Video playback helpers for byte ranges and content types.
+
 #[derive(Clone, Copy)]
 pub struct ByteRange {
     pub start: usize,

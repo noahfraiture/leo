@@ -1,3 +1,5 @@
+//! Database model and runtime exports.
+
 mod models;
 mod runtime;
 

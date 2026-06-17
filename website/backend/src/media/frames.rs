@@ -1,3 +1,5 @@
+//! ffmpeg-backed video frame extraction.
+
 use std::{env, io::Write, path::Path};
 
 use tempfile::NamedTempFile;

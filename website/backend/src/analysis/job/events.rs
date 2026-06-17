@@ -1,3 +1,5 @@
+//! Persistence helpers for analysis job event history.
+
 use crate::{analysis::job::AnalysisJobError, db};
 
 #[derive(Clone, Copy, Default)]

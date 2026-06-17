@@ -1,3 +1,5 @@
+//! Synthetic canary video generation and analysis job scheduling.
+
 use serde_json::json;
 use tempfile::Builder;
 use tokio::{fs, process::Command, time::sleep};

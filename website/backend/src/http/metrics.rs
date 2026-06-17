@@ -1,3 +1,5 @@
+//! In-process metrics collection and Prometheus rendering.
+
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},

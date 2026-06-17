@@ -1,3 +1,5 @@
+//! Frame chunking utilities for splitting sampled images into provider payloads.
+
 use std::env;
 
 use crate::media::VideoFrame;

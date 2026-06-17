@@ -1,3 +1,5 @@
+//! Failure diagnostic mapping for persisted analysis jobs.
+
 use serde_json::json;
 
 use crate::{

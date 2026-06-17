@@ -1,3 +1,5 @@
+//! Background analysis job execution and provider dispatch.
+
 use std::time::Instant;
 
 use serde_json::json;

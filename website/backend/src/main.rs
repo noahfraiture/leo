@@ -1,3 +1,5 @@
+//! Binary entrypoint for the video analysis service and local analysis CLI.
+
 #![allow(dead_code)]
 
 mod analysis;

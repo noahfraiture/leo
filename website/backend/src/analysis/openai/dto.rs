@@ -1,3 +1,5 @@
+//! OpenAI response DTOs and text extraction.
+
 use serde::Deserialize;
 
 #[derive(Deserialize)]

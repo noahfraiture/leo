@@ -1,3 +1,5 @@
+//! Authorization traits and reusable grant helpers for UI routes.
+
 use async_trait::async_trait;
 use axum::{
     http::{HeaderMap, StatusCode},

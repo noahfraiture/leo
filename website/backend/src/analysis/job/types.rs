@@ -1,3 +1,5 @@
+//! Public analysis job input, snapshot, and error types.
+
 use thiserror::Error;
 
 use crate::{analysis::error::AnalysisError as AiAnalysisError, db};

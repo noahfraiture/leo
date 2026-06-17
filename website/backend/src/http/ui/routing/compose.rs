@@ -1,3 +1,5 @@
+//! Helpers for embedding one typed UI route view inside another.
+
 use std::marker::PhantomData;
 
 use async_trait::async_trait;

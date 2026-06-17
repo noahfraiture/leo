@@ -1,3 +1,5 @@
+//! Axum dispatch adapter for typed UI routes and HTMX fragment rendering.
+
 use axum::{
     extract::{FromRequest, FromRequestParts, Request, State},
     response::{IntoResponse, Response},

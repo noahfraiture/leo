@@ -1,3 +1,5 @@
+//! Server-rendered UI routing and feature modules.
+
 mod document;
 pub mod features;
 mod routing;

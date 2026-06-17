@@ -1,3 +1,5 @@
+//! Multipart and chunked upload routes for video files.
+
 use async_trait::async_trait;
 use axum::{
     Json,

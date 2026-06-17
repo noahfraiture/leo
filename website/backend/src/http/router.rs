@@ -1,3 +1,5 @@
+//! Axum router construction, server startup, and route integration tests.
+
 use std::{env, path::PathBuf};
 
 use axum::{

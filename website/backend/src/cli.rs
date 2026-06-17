@@ -1,3 +1,5 @@
+//! Command-line interface for serving the app or analyzing local videos.
+
 use std::{error::Error, path::PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};

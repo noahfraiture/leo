@@ -1,7 +1,9 @@
+//! Gemini resumable upload chunking, retry, and telemetry helpers.
+
 use reqwest::header::HeaderMap;
-use serde_json::json;
 #[cfg(test)]
 use serde_json::Value;
+use serde_json::json;
 
 use crate::analysis::{
     gemini::config::DEFAULT_UPLOAD_CHUNK_SIZE_BUCKETS_BYTES, request::AnalysisTelemetry,

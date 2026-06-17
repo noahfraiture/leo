@@ -1,3 +1,5 @@
+//! SurrealDB persistence for analysis records, events, and diagnostics.
+
 use surrealdb::types::{Datetime, RecordId, RecordIdKey, SurrealValue};
 use thiserror::Error;
 

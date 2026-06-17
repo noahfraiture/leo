@@ -1,3 +1,5 @@
+//! OpenAI prompt text and chunk/summary prompt builders.
+
 pub const VIDEO_ANALYSIS_INSTRUCTIONS: &str = "Analyze sampled video frames. Frames are chronological, may be chunked with overlap, and include video names and timestamps. Follow the user's request; use precise timestamps when they matter. Return plain text, not Markdown.";
 
 pub fn chunk_evidence_request(

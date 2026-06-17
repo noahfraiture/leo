@@ -1,3 +1,5 @@
+//! OpenAI provider client orchestration.
+
 use std::{error::Error as _, time::Duration};
 
 use reqwest::{StatusCode, header::CONTENT_TYPE};

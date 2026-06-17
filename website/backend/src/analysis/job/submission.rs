@@ -1,3 +1,5 @@
+//! Analysis submission validation and queued job creation.
+
 use crate::{
     analysis::{
         self as ai_analysis,

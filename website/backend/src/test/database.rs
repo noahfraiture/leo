@@ -1,3 +1,5 @@
+//! Test database initialization helpers.
+
 use std::{
     env, fs,
     path::PathBuf,

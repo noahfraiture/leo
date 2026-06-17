@@ -1,3 +1,5 @@
+//! Application-level services shared by HTTP routes and background workers.
+
 use std::path::PathBuf;
 
 use crate::{

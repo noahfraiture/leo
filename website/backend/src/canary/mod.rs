@@ -1,3 +1,5 @@
+//! Synthetic production canary configuration and scheduler.
+
 mod config;
 mod runner;
 

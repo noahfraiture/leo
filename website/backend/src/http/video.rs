@@ -1,3 +1,5 @@
+//! HTTP video byte serving with range request support.
+
 use axum::{
     body::Body,
     extract::{Path, State},

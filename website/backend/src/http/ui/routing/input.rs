@@ -1,3 +1,5 @@
+//! Empty route input extractor for routes that do not need request data.
+
 use axum::{
     extract::{FromRequest, FromRequestParts, Request},
     http::request::Parts,
