@@ -7,6 +7,7 @@ use tokio::fs;
 
 use crate::analysis::{
     gemini::GeminiClient,
+    mistral::MistralClient,
     openai::OpenAiClient,
     provider::AnalysisProvider,
     request::{AnalysisRequest, AnalysisSettings, AnalysisTelemetry},
@@ -44,6 +45,7 @@ pub struct AnalyzeArgs {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum ProviderArg {
     Gemini,
+    Mistral,
     Openai,
 }
 
@@ -57,6 +59,7 @@ impl From<ProviderArg> for AnalysisProvider {
     fn from(provider: ProviderArg) -> Self {
         match provider {
             ProviderArg::Gemini => Self::Gemini,
+            ProviderArg::Mistral => Self::Mistral,
             ProviderArg::Openai => Self::OpenAi,
         }
     }
@@ -79,6 +82,11 @@ pub async fn analyze(args: AnalyzeArgs) -> Result<(), Box<dyn Error>> {
     let response = match provider {
         AnalysisProvider::Gemini => {
             GeminiClient::from_env_with_model(args.model)?
+                .analyze(request)
+                .await?
+        }
+        AnalysisProvider::Mistral => {
+            MistralClient::from_env_with_model(args.model)?
                 .analyze(request)
                 .await?
         }
@@ -161,6 +169,30 @@ mod tests {
         assert_eq!(args.model.as_deref(), Some("gpt-test"));
         assert_eq!(args.prompt, "Summarize the videos");
         assert_eq!(args.videos.len(), 2);
+    }
+
+    #[test]
+    fn analyze_command_accepts_mistral_provider() {
+        let cli = Cli::try_parse_from([
+            "video-analysis",
+            "analyze",
+            "--provider",
+            "mistral",
+            "--model",
+            "mistral-small-latest",
+            "--prompt",
+            "Summarize the video",
+            "sample.mp4",
+        ])
+        .expect("cli should parse");
+
+        let Some(Command::Analyze(args)) = cli.command else {
+            panic!("expected analyze command");
+        };
+        assert_eq!(args.provider, ProviderArg::Mistral);
+        assert_eq!(args.model.as_deref(), Some("mistral-small-latest"));
+        assert_eq!(args.prompt, "Summarize the video");
+        assert_eq!(args.videos.len(), 1);
     }
 
     #[test]

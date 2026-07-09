@@ -100,7 +100,7 @@ fn intro() -> impl Renderable {
         <div class="space-y-2">
             <h1 class="text-3xl font-semibold text-base-content">"Upload videos"</h1>
             <p class="max-w-2xl text-base-content/70">
-                "A server-rendered workspace for video uploads and AI analysis with OpenAI and Gemini."
+                "A server-rendered workspace for video uploads and AI analysis with OpenAI, Gemini, and Mistral."
             </p>
         </div>
     }
@@ -284,7 +284,7 @@ fn analysis_prompt(videos: &[db::video::Video]) -> impl Renderable {
 
 fn frame_sampling_selection() -> impl Renderable {
     rsx! {
-        <fieldset class="space-y-3" "x-show"="provider === 'openai'" "x-cloak"="">
+        <fieldset class="space-y-3" "x-show"="provider === 'openai' || provider === 'mistral'" "x-cloak"="">
             <legend class="text-sm font-medium text-base-content">"Frame sampling"</legend>
             <div class="join flex-wrap">
                 <input
@@ -333,9 +333,9 @@ fn analysis_provider_selection() -> impl Renderable {
     rsx! {
         <fieldset class="space-y-3">
             <legend class="text-sm font-medium text-base-content">"Provider"</legend>
-            <div id="provider-switch" class="join">
+            <div id="provider-switch" class="flex flex-wrap gap-2">
                 <input
-                    class="btn join-item"
+                    class="btn"
                     type="radio"
                     name="provider"
                     value="gemini"
@@ -343,12 +343,19 @@ fn analysis_provider_selection() -> impl Renderable {
                     aria-label="Gemini"
                     checked="checked" />
                 <input
-                    class="btn join-item"
+                    class="btn"
                     type="radio"
                     name="provider"
                     value="openai"
                     "x-model"="provider"
                     aria-label="OpenAI" />
+                <input
+                    class="btn"
+                    type="radio"
+                    name="provider"
+                    value="mistral"
+                    "x-model"="provider"
+                    aria-label="Mistral" />
             </div>
         </fieldset>
     }

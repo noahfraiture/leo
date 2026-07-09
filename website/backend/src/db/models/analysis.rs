@@ -515,7 +515,7 @@ async fn define_analysis_table(db: &Database) -> Result<(), AnalysisError> {
         r#"
         DEFINE TABLE IF NOT EXISTS analysis SCHEMAFULL;
         DEFINE FIELD IF NOT EXISTS status ON TABLE analysis TYPE string ASSERT $value IN ["queued", "running", "complete", "failed"];
-        DEFINE FIELD IF NOT EXISTS provider ON TABLE analysis TYPE string DEFAULT "gemini" ASSERT $value IN ["gemini", "openai"];
+        DEFINE FIELD OVERWRITE provider ON TABLE analysis TYPE string DEFAULT "gemini" ASSERT $value IN ["gemini", "openai", "mistral"];
         DEFINE FIELD IF NOT EXISTS frame_sample_rate_fps ON TABLE analysis TYPE float DEFAULT 0.2 ASSERT $value > 0;
         DEFINE FIELD IF NOT EXISTS prompt ON TABLE analysis TYPE string;
         DEFINE FIELD IF NOT EXISTS video_keys ON TABLE analysis TYPE array<string>;
@@ -602,6 +602,88 @@ mod tests {
             .expect("analysis should exist");
 
         assert_eq!(found.provider, "openai");
+    }
+
+    #[tokio::test]
+    async fn create_with_provider_accepts_mistral() {
+        let database = crate::test::database::init()
+            .await
+            .expect("test database should initialize");
+
+        let analysis = db::analysis::Analysis::create_with_provider(
+            &database,
+            AnalysisProvider::Mistral,
+            "Summarize the video",
+            vec!["sample.mp4".to_owned()],
+        )
+        .await
+        .expect("analysis should create");
+        let found = db::analysis::Analysis::find(&database, &analysis.key())
+            .await
+            .expect("analysis should load")
+            .expect("analysis should exist");
+
+        assert_eq!(found.provider, "mistral");
+    }
+
+    #[tokio::test]
+    async fn provider_allowlist_migration_preserves_existing_analysis_and_accepts_mistral() {
+        let database = crate::test::database::init()
+            .await
+            .expect("test database should initialize");
+        let existing = db::analysis::Analysis::create_with_provider(
+            &database,
+            AnalysisProvider::OpenAi,
+            "Existing analysis",
+            vec!["existing.mp4".to_owned()],
+        )
+        .await
+        .expect("existing analysis should create");
+
+        database
+            .query(
+                r#"
+                DEFINE FIELD OVERWRITE provider ON TABLE analysis
+                    TYPE string
+                    DEFAULT "gemini"
+                    ASSERT $value IN ["gemini", "openai"];
+                "#,
+            )
+            .await
+            .expect("former provider allowlist should apply")
+            .check()
+            .expect("former provider allowlist should be valid");
+        assert!(
+            db::analysis::Analysis::create_with_provider(
+                &database,
+                AnalysisProvider::Mistral,
+                "Rejected before migration",
+                vec!["rejected.mp4".to_owned()],
+            )
+            .await
+            .is_err(),
+            "former provider allowlist should reject Mistral"
+        );
+
+        super::define_analysis_table(&database)
+            .await
+            .expect("analysis table migration should succeed");
+
+        let found = db::analysis::Analysis::find(&database, &existing.key())
+            .await
+            .expect("existing analysis should load")
+            .expect("existing analysis should survive migration");
+        let mistral = db::analysis::Analysis::create_with_provider(
+            &database,
+            AnalysisProvider::Mistral,
+            "Accepted after migration",
+            vec!["accepted.mp4".to_owned()],
+        )
+        .await
+        .expect("Mistral analysis should create after migration");
+
+        assert_eq!(found.provider, "openai");
+        assert_eq!(mistral.provider, "mistral");
     }
 
     #[tokio::test]

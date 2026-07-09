@@ -9,6 +9,8 @@ pub enum AnalysisError {
     #[error(transparent)]
     Gemini(#[from] crate::analysis::gemini::GeminiError),
     #[error(transparent)]
+    Mistral(#[from] crate::analysis::mistral::MistralError),
+    #[error(transparent)]
     OpenAi(#[from] crate::analysis::openai::OpenAiError),
     #[error(transparent)]
     FrameExtraction(#[from] crate::media::frames::FrameExtractionError),
