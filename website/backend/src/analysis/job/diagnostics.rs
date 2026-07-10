@@ -6,12 +6,14 @@ use crate::{
     analysis::{
         error::AnalysisError as AiAnalysisError,
         gemini::GeminiError,
+        gemma::GemmaError,
         job::{
             AnalysisJobError,
             events::{EventNumbers, record_analysis_event},
         },
         mistral::MistralError,
         openai::OpenAiError,
+        qwen::QwenError,
         request::AnalysisTelemetry,
     },
     db,
@@ -94,6 +96,36 @@ fn failure_diagnostic(
             payload_bytes: None,
             message: error.to_string(),
         },
+        AnalysisJobError::AiAnalysis(AiAnalysisError::Gemma(GemmaError::Request {
+            stage,
+            attempt,
+            attempts,
+            payload_bytes,
+            timeout,
+            connect,
+            body,
+            request,
+            ..
+        })) => db::analysis::AnalysisFailureDiagnostic {
+            stage: format!("gemma.{stage}"),
+            kind: request_failure_kind(*timeout, *connect, *body, *request).to_owned(),
+            retryable: true,
+            attempt: Some(*attempt as i64),
+            attempts: Some(*attempts as i64),
+            payload_bytes: Some(*payload_bytes as i64),
+            message: error.to_string(),
+        },
+        AnalysisJobError::AiAnalysis(AiAnalysisError::Gemma(GemmaError::Api {
+            status, ..
+        })) => db::analysis::AnalysisFailureDiagnostic {
+            stage: "gemma.api".to_owned(),
+            kind: format!("http_{}", status.as_u16()),
+            retryable: status.is_server_error(),
+            attempt: None,
+            attempts: None,
+            payload_bytes: None,
+            message: error.to_string(),
+        },
         AnalysisJobError::AiAnalysis(AiAnalysisError::Mistral(MistralError::Request {
             stage,
             attempt,
@@ -153,6 +185,36 @@ fn failure_diagnostic(
             payload_bytes: None,
             message: error.to_string(),
         },
+        AnalysisJobError::AiAnalysis(AiAnalysisError::Qwen(QwenError::Request {
+            stage,
+            attempt,
+            attempts,
+            payload_bytes,
+            timeout,
+            connect,
+            body,
+            request,
+            ..
+        })) => db::analysis::AnalysisFailureDiagnostic {
+            stage: format!("qwen.{stage}"),
+            kind: request_failure_kind(*timeout, *connect, *body, *request).to_owned(),
+            retryable: true,
+            attempt: Some(*attempt as i64),
+            attempts: Some(*attempts as i64),
+            payload_bytes: Some(*payload_bytes as i64),
+            message: error.to_string(),
+        },
+        AnalysisJobError::AiAnalysis(AiAnalysisError::Qwen(QwenError::Api { status, .. })) => {
+            db::analysis::AnalysisFailureDiagnostic {
+                stage: "qwen.api".to_owned(),
+                kind: format!("http_{}", status.as_u16()),
+                retryable: status.is_server_error(),
+                attempt: None,
+                attempts: None,
+                payload_bytes: None,
+                message: error.to_string(),
+            }
+        }
         AnalysisJobError::AiAnalysis(AiAnalysisError::Gemini(GeminiError::UploadRequest {
             offset,
             bytes,
@@ -260,7 +322,8 @@ mod tests {
     use super::failure_diagnostic;
     use crate::{
         analysis::{
-            error::AnalysisError as AiAnalysisError, job::AnalysisJobError, mistral::MistralError,
+            error::AnalysisError as AiAnalysisError, gemma::GemmaError, job::AnalysisJobError,
+            mistral::MistralError, qwen::QwenError,
         },
         media::frames::FrameExtractionError,
     };
@@ -270,6 +333,44 @@ mod tests {
             .get("not a url")
             .build()
             .expect_err("relative URL should be rejected")
+    }
+
+    #[test]
+    fn failure_diagnostic_maps_gemma_api_failures() {
+        let diagnostic = failure_diagnostic(
+            "gemma",
+            &AnalysisJobError::AiAnalysis(AiAnalysisError::Gemma(GemmaError::Api {
+                status: StatusCode::BAD_GATEWAY,
+                body: "upstream failed".to_owned(),
+            })),
+        );
+
+        assert_eq!(diagnostic.stage, "gemma.api");
+        assert_eq!(diagnostic.kind, "http_502");
+        assert!(diagnostic.retryable);
+        assert_eq!(
+            diagnostic.message,
+            "Gemma API returned 502 Bad Gateway: upstream failed"
+        );
+    }
+
+    #[test]
+    fn failure_diagnostic_maps_qwen_api_failures() {
+        let diagnostic = failure_diagnostic(
+            "qwen",
+            &AnalysisJobError::AiAnalysis(AiAnalysisError::Qwen(QwenError::Api {
+                status: StatusCode::BAD_GATEWAY,
+                body: "upstream failed".to_owned(),
+            })),
+        );
+
+        assert_eq!(diagnostic.stage, "qwen.api");
+        assert_eq!(diagnostic.kind, "http_502");
+        assert!(diagnostic.retryable);
+        assert_eq!(
+            diagnostic.message,
+            "Qwen API returned 502 Bad Gateway: upstream failed"
+        );
     }
 
     #[test]

@@ -7,9 +7,11 @@ use tokio::fs;
 
 use crate::analysis::{
     gemini::GeminiClient,
+    gemma::GemmaClient,
     mistral::MistralClient,
     openai::OpenAiClient,
     provider::AnalysisProvider,
+    qwen::QwenClient,
     request::{AnalysisRequest, AnalysisSettings, AnalysisTelemetry},
 };
 use crate::media::AnalysisVideo;
@@ -45,8 +47,10 @@ pub struct AnalyzeArgs {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum ProviderArg {
     Gemini,
+    Gemma,
     Mistral,
     Openai,
+    Qwen,
 }
 
 impl Cli {
@@ -59,8 +63,10 @@ impl From<ProviderArg> for AnalysisProvider {
     fn from(provider: ProviderArg) -> Self {
         match provider {
             ProviderArg::Gemini => Self::Gemini,
+            ProviderArg::Gemma => Self::Gemma,
             ProviderArg::Mistral => Self::Mistral,
             ProviderArg::Openai => Self::OpenAi,
+            ProviderArg::Qwen => Self::Qwen,
         }
     }
 }
@@ -85,6 +91,11 @@ pub async fn analyze(args: AnalyzeArgs) -> Result<(), Box<dyn Error>> {
                 .analyze(request)
                 .await?
         }
+        AnalysisProvider::Gemma => {
+            GemmaClient::from_env_with_model(args.model)?
+                .analyze(request)
+                .await?
+        }
         AnalysisProvider::Mistral => {
             MistralClient::from_env_with_model(args.model)?
                 .analyze(request)
@@ -92,6 +103,11 @@ pub async fn analyze(args: AnalyzeArgs) -> Result<(), Box<dyn Error>> {
         }
         AnalysisProvider::OpenAi => {
             OpenAiClient::from_env_with_model(args.model)?
+                .analyze(request)
+                .await?
+        }
+        AnalysisProvider::Qwen => {
+            QwenClient::from_env_with_model(args.model)?
                 .analyze(request)
                 .await?
         }
@@ -169,6 +185,48 @@ mod tests {
         assert_eq!(args.model.as_deref(), Some("gpt-test"));
         assert_eq!(args.prompt, "Summarize the videos");
         assert_eq!(args.videos.len(), 2);
+    }
+
+    #[test]
+    fn analyze_command_accepts_gemma_provider() {
+        let cli = Cli::try_parse_from([
+            "video-analysis",
+            "analyze",
+            "--provider",
+            "gemma",
+            "--prompt",
+            "Summarize the video",
+            "sample.mp4",
+        ])
+        .expect("cli should parse");
+
+        let Some(Command::Analyze(args)) = cli.command else {
+            panic!("expected analyze command");
+        };
+        assert_eq!(args.provider, ProviderArg::Gemma);
+        assert_eq!(args.prompt, "Summarize the video");
+        assert_eq!(args.videos.len(), 1);
+    }
+
+    #[test]
+    fn analyze_command_accepts_qwen_provider() {
+        let cli = Cli::try_parse_from([
+            "video-analysis",
+            "analyze",
+            "--provider",
+            "qwen",
+            "--prompt",
+            "Summarize the video",
+            "sample.mp4",
+        ])
+        .expect("cli should parse");
+
+        let Some(Command::Analyze(args)) = cli.command else {
+            panic!("expected analyze command");
+        };
+        assert_eq!(args.provider, ProviderArg::Qwen);
+        assert_eq!(args.prompt, "Summarize the video");
+        assert_eq!(args.videos.len(), 1);
     }
 
     #[test]

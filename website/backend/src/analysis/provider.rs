@@ -10,8 +10,10 @@ use thiserror::Error;
 #[serde(rename_all = "kebab-case")]
 pub enum AnalysisProvider {
     Gemini,
+    Gemma,
     Mistral,
     OpenAi,
+    Qwen,
 }
 
 #[derive(Debug, Error)]
@@ -24,8 +26,10 @@ impl AnalysisProvider {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Gemini => "gemini",
+            Self::Gemma => "gemma",
             Self::Mistral => "mistral",
             Self::OpenAi => "openai",
+            Self::Qwen => "qwen",
         }
     }
 }
@@ -48,8 +52,10 @@ impl FromStr for AnalysisProvider {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
             "gemini" => Ok(Self::Gemini),
+            "gemma" => Ok(Self::Gemma),
             "mistral" => Ok(Self::Mistral),
             "openai" | "open-ai" => Ok(Self::OpenAi),
+            "qwen" => Ok(Self::Qwen),
             _ => Err(ProviderParseError {
                 value: value.to_owned(),
             }),
@@ -72,6 +78,14 @@ mod tests {
         assert_eq!(
             AnalysisProvider::from_str("OpenAI").expect("provider should parse"),
             AnalysisProvider::OpenAi
+        );
+        assert_eq!(
+            AnalysisProvider::from_str("Gemma").expect("provider should parse"),
+            AnalysisProvider::Gemma
+        );
+        assert_eq!(
+            AnalysisProvider::from_str("Qwen").expect("provider should parse"),
+            AnalysisProvider::Qwen
         );
     }
 

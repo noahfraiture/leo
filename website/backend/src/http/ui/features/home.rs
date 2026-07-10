@@ -100,7 +100,7 @@ fn intro() -> impl Renderable {
         <div class="space-y-2">
             <h1 class="text-3xl font-semibold text-base-content">"Upload videos"</h1>
             <p class="max-w-2xl text-base-content/70">
-                "A server-rendered workspace for video uploads and AI analysis with OpenAI, Gemini, and Mistral."
+                "A server-rendered workspace for video uploads and AI analysis with OpenAI, Gemini, Gemma, Mistral, and Qwen."
             </p>
         </div>
     }
@@ -284,7 +284,7 @@ fn analysis_prompt(videos: &[db::video::Video]) -> impl Renderable {
 
 fn frame_sampling_selection() -> impl Renderable {
     rsx! {
-        <fieldset class="space-y-3" "x-show"="provider === 'openai' || provider === 'mistral'" "x-cloak"="">
+        <fieldset class="space-y-3" "x-show"="provider === 'openai' || provider === 'gemma' || provider === 'mistral' || provider === 'qwen'" "x-cloak"="">
             <legend class="text-sm font-medium text-base-content">"Frame sampling"</legend>
             <div class="join flex-wrap">
                 <input
@@ -353,9 +353,23 @@ fn analysis_provider_selection() -> impl Renderable {
                     class="btn"
                     type="radio"
                     name="provider"
+                    value="gemma"
+                    "x-model"="provider"
+                    aria-label="Gemma" />
+                <input
+                    class="btn"
+                    type="radio"
+                    name="provider"
                     value="mistral"
                     "x-model"="provider"
                     aria-label="Mistral" />
+                <input
+                    class="btn"
+                    type="radio"
+                    name="provider"
+                    value="qwen"
+                    "x-model"="provider"
+                    aria-label="Qwen" />
             </div>
         </fieldset>
     }

@@ -223,7 +223,7 @@ mod tests {
             .expect("provider switch should render");
 
         assert!(html.contains("Video analysis"));
-        assert!(html.contains("OpenAI, Gemini, and Mistral"));
+        assert!(html.contains("OpenAI, Gemini, Gemma, Mistral, and Qwen"));
         assert!(html.contains("<html lang=en>") || html.contains(r#"<html lang="en">"#));
         assert!(!html.contains("<html lang=en data-theme="));
         assert!(!html.contains(r#"<html lang="en" data-theme="#));
@@ -239,18 +239,24 @@ mod tests {
         assert!(html.contains(r#"x-data="videoPlayer"#));
         assert!(html.contains(r#"id="provider-switch""#));
         assert!(provider_switch.contains(r#"class="flex flex-wrap gap-2""#));
-        assert_eq!(provider_switch.matches(r#"class="btn""#).count(), 3);
+        assert_eq!(provider_switch.matches(r#"class="btn""#).count(), 5);
         assert!(!provider_switch.contains("join"));
         assert!(!provider_switch.contains("join-item"));
         assert!(html.contains(r#"name="provider""#));
         assert!(html.contains(r#"value="gemini""#));
         assert!(html.contains(r#"value="openai""#));
+        assert!(html.contains(r#"value="gemma""#));
         assert!(html.contains(r#"value="mistral""#));
+        assert!(html.contains(r#"value="qwen""#));
         assert!(html.contains(r#"aria-label="Gemini""#));
         assert!(html.contains(r#"aria-label="OpenAI""#));
+        assert!(html.contains(r#"aria-label="Gemma""#));
         assert!(html.contains(r#"aria-label="Mistral""#));
+        assert!(html.contains(r#"aria-label="Qwen""#));
         assert!(html.contains(r#"x-model="provider""#));
-        assert!(html.contains(r#"x-show="provider === 'openai' || provider === 'mistral'""#));
+        assert!(html.contains(
+            r#"x-show="provider === 'openai' || provider === 'gemma' || provider === 'mistral' || provider === 'qwen'""#
+        ));
         assert!(html.contains("x-cloak"));
         assert!(html.contains(r#"name="frame_sample_rate_fps""#));
         assert!(html.contains(r#"value="2""#));
@@ -462,6 +468,68 @@ mod tests {
         assert!(html.contains(r#"hx-get="/analysis/"#));
         assert!(html.contains(r#"hx-trigger="every 2s""#));
         assert!(!html.contains(r#"hx-trigger="load, every 2s""#));
+    }
+
+    #[tokio::test]
+    async fn analyze_route_accepts_gemma_provider() {
+        let state = AppState::for_test().await;
+        let video = db::video::Video::upload(state.db(), "sample.mp4", b"video bytes".to_vec())
+            .await
+            .expect("video should upload");
+        let body = format!(
+            "provider=gemma&video_keys={}&frame_sample_rate_fps=0.2&prompt=Summarize+the+video",
+            video.file.key()
+        );
+
+        let response = app(state)
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/analysis")
+                    .header("HX-Request", "true")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        let status = response.status();
+        let html = response_text(response).await;
+
+        assert_eq!(status, StatusCode::OK, "{html}");
+        assert!(html.contains("Analysis queued"));
+        assert!(html.contains(r#"hx-get="/analysis/"#));
+    }
+
+    #[tokio::test]
+    async fn analyze_route_accepts_qwen_provider() {
+        let state = AppState::for_test().await;
+        let video = db::video::Video::upload(state.db(), "sample.mp4", b"video bytes".to_vec())
+            .await
+            .expect("video should upload");
+        let body = format!(
+            "provider=qwen&video_keys={}&frame_sample_rate_fps=1&prompt=Summarize+the+video",
+            video.file.key()
+        );
+
+        let response = app(state)
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/analysis")
+                    .header("HX-Request", "true")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        let status = response.status();
+        let html = response_text(response).await;
+
+        assert_eq!(status, StatusCode::OK, "{html}");
+        assert!(html.contains("Analysis queued"));
+        assert!(html.contains(r#"hx-get="/analysis/"#));
     }
 
     #[tokio::test]

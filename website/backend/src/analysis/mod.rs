@@ -3,11 +3,13 @@
 pub mod chunking;
 pub mod error;
 pub mod gemini;
+pub mod gemma;
 pub mod job;
 pub mod mistral;
 pub mod openai;
 pub mod prompts;
 pub mod provider;
+pub mod qwen;
 pub mod request;
 
 use std::str::FromStr;
@@ -50,10 +52,12 @@ pub async fn analyze_videos_with_telemetry(
 
     match provider {
         AnalysisProvider::Gemini => Ok(gemini::GeminiClient::from_env()?.analyze(request).await?),
+        AnalysisProvider::Gemma => Ok(gemma::GemmaClient::from_env()?.analyze(request).await?),
         AnalysisProvider::Mistral => {
             Ok(mistral::MistralClient::from_env()?.analyze(request).await?)
         }
         AnalysisProvider::OpenAi => Ok(openai::OpenAiClient::from_env()?.analyze(request).await?),
+        AnalysisProvider::Qwen => Ok(qwen::QwenClient::from_env()?.analyze(request).await?),
     }
 }
 
