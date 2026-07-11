@@ -50,7 +50,6 @@ pub(super) fn generate_chat_completion_request(request: MistralChunkRequest<'_>)
 
     json!({
         "model": request.config.model,
-        "reasoning_effort": "none",
         "messages": [
             {
                 "role": "system",
@@ -71,7 +70,6 @@ pub(super) fn summarize_chunks_request(
 ) -> Value {
     json!({
         "model": config.model,
-        "reasoning_effort": "none",
         "messages": [
             {
                 "role": "system",
@@ -132,7 +130,6 @@ mod tests {
             request,
             json!({
                 "model": "mistral-test",
-                "reasoning_effort": "none",
                 "messages": [
                     {
                         "role": "system",
@@ -169,7 +166,6 @@ mod tests {
             request,
             json!({
                 "model": "mistral-test",
-                "reasoning_effort": "none",
                 "messages": [
                     {
                         "role": "system",

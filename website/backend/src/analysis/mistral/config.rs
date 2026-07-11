@@ -4,7 +4,7 @@ use std::{env, time::Duration};
 
 use super::MistralError;
 
-const DEFAULT_MODEL: &str = "mistral-small-2603";
+const DEFAULT_MODEL: &str = "mistral-medium-latest";
 pub(super) const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub(super) struct MistralConfig {
@@ -50,7 +50,7 @@ mod tests {
             .expect("non-empty API key should be accepted");
 
         assert_eq!(config.api_key, "test-key");
-        assert_eq!(config.model, "mistral-small-2603");
+        assert_eq!(config.model, "mistral-medium-latest");
         assert!(matches!(
             MistralConfig::from_values(None, None),
             Err(MistralError::MissingApiKey)
@@ -69,6 +69,6 @@ mod tests {
             .expect("configuration should be valid");
 
         assert_eq!(config.model, "custom-model");
-        assert_eq!(blank_model.model, "mistral-small-2603");
+        assert_eq!(blank_model.model, "mistral-medium-latest");
     }
 }
