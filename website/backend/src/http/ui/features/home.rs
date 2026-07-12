@@ -1,7 +1,7 @@
 //! Home workspace page for upload, video playback, and analysis submission.
 
 use async_trait::async_trait;
-use axum::http::StatusCode;
+use axum::{extract::Query, http::StatusCode};
 use hypertext::prelude::*;
 
 use crate::{
@@ -21,18 +21,19 @@ pub struct HomePage;
 pub struct HomePageView {
     videos: Vec<db::video::Video>,
     recent_analyses: Vec<db::analysis::Analysis>,
+    cost_calculator: super::cost::CostCalculatorView,
 }
 
 #[async_trait]
 impl Route for HomePage {
-    type Input = NoInput;
+    type Input = (Query<super::cost::CostCalculatorInput>, NoInput);
     type Authz = Public;
     type View = HomePageView;
 
     async fn handle(
         context: &RouteContext,
         _granted: (),
-        _input: Self::Input,
+        (Query(cost_input), _): Self::Input,
     ) -> Result<Self::View, RouteError> {
         let videos = db::video::Video::list(context.state().db()).await?;
         let recent_analyses =
@@ -42,6 +43,7 @@ impl Route for HomePage {
         Ok(HomePageView {
             videos,
             recent_analyses,
+            cost_calculator: super::cost::CostCalculatorView::from_input(cost_input),
         })
     }
 }
@@ -52,18 +54,22 @@ impl RouteView for HomePageView {
             state,
             "Video analysis | Home",
             rsx! {
-                <main class="mx-auto max-w-4xl space-y-8 p-6 lg:py-10">
-                    (top_bar())
+                <main class="mx-auto max-w-6xl space-y-8 p-6 lg:py-10">
+                    <div class="mx-auto w-full max-w-4xl space-y-8">
+                        (top_bar())
 
-                    <section class="space-y-6">
-                        (intro())
+                        <section class="space-y-6">
+                            (intro())
 
-                        (video_intake(&self.videos))
+                            (video_intake(&self.videos))
 
-                        (video_workspace(&self.videos))
+                            (video_workspace(&self.videos))
 
-                        (recent_analyses(&self.recent_analyses, &self.videos))
-                    </section>
+                            (recent_analyses(&self.recent_analyses, &self.videos))
+                        </section>
+                    </div>
+
+                    (self.cost_calculator.render())
                 </main>
             },
         )

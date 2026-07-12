@@ -2,6 +2,7 @@
 
 mod analyses;
 mod analyze;
+mod cost;
 mod delete;
 mod home;
 mod upload;
@@ -9,6 +10,7 @@ mod upload;
 // Pages
 pub use analyses::{AnalysesPage, ClearAnalysesRoute, DeleteAnalysisRoute};
 pub use analyze::{AnalysisStatusRoute, AnalyzeRoute};
+pub use cost::CostEstimateRoute;
 pub use delete::DeleteVideoRoute;
 pub use home::{HomePage, healthz};
 pub use upload::{

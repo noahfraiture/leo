@@ -18,6 +18,8 @@ use crate::{
     upload::{MAX_VIDEO_UPLOAD_SIZE_BYTES, VIDEO_UPLOAD_CHUNK_REQUEST_LIMIT_BYTES},
 };
 
+const COST_ESTIMATE_REQUEST_LIMIT_BYTES: usize = 16 * 1_024;
+
 pub async fn run(
     db: db::Database,
     upload_bucket_path: PathBuf,
@@ -55,6 +57,11 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/analyses/{analysis_key}/delete",
             ui::route::<ui::features::DeleteAnalysisRoute>(MethodFilter::POST),
+        )
+        .route(
+            "/cost/estimate",
+            ui::route::<ui::features::CostEstimateRoute>(MethodFilter::POST)
+                .layer(DefaultBodyLimit::max(COST_ESTIMATE_REQUEST_LIMIT_BYTES)),
         )
         .route("/healthz", get(ui::features::healthz))
         .route("/metrics", get(crate::http::metrics::serve_metrics))
@@ -1349,5 +1356,152 @@ mod tests {
             .expect("request should complete");
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    fn opening_tag_with_id<'a>(html: &'a str, id: &str) -> &'a str {
+        let marker = format!(r#"id="{id}""#);
+        let position = html.find(&marker).expect("element id should render");
+        let start = html[..position].rfind('<').expect("opening tag");
+        let end = position + html[position..].find('>').expect("closing bracket") + 1;
+        &html[start..end]
+    }
+
+    #[tokio::test]
+    async fn home_embeds_default_calculator_after_workspace() {
+        let response = test_app()
+            .await
+            .oneshot(HttpRequest::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = response_text(response).await;
+        assert!(
+            html.find("Recent analyses").unwrap() < html.find(r#"id="cost-calculator""#).unwrap()
+        );
+        assert_eq!(html.matches("data-model-result").count(), 5);
+        for model in [
+            "gemini-3-flash-preview",
+            "gpt-5.5",
+            "google/gemma-4-26b-a4b",
+            "qwen/qwen3.6-35b-a3b",
+            "mistral-medium-latest",
+        ] {
+            assert!(html.contains(model), "missing {model}");
+        }
+        assert!(html.contains(r#"method="get" action="/#cost-calculator""#));
+        assert!(html.contains(r#"novalidate="novalidate""#));
+        assert!(html.contains(r#"hx-trigger="submit, input delay:500ms, change delay:200ms""#));
+    }
+
+    #[tokio::test]
+    async fn cost_post_returns_valid_fragment_with_modeled_quantities() {
+        let response = test_app()
+            .await
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/cost/estimate")
+                    .header("HX-Request", "true")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from("_cost=1&video_count=2&duration_minutes=5&source_resolution=720p&audio_present=1&analysis_quality=current&sampling_fps=0.5&response_profile=concise&prompt_tokens=100"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = response_text(response).await;
+        assert!(html.starts_with("<section"));
+        assert!(!html.contains("<html"));
+        assert_eq!(html.matches("data-model-result").count(), 5);
+        assert!(html.contains("300 unique"));
+        assert!(html.contains("$0.101269") || html.contains("Typical"));
+        assert!(html.contains(
+            "No cataloged vendor fee; configured endpoint and operating costs not estimated."
+        ));
+        assert!(html.contains("Known priced subtotal (typical):"));
+    }
+
+    #[tokio::test]
+    async fn invalid_cost_post_preserves_raw_values_without_stale_results() {
+        let response = test_app()
+            .await
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/cost/estimate")
+                    .header("HX-Request", "true")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from("_cost=1&video_count=abc&duration_minutes=-5&source_resolution=huge&analysis_quality=perfect&sampling_fps=fast&response_profile=essay&prompt_tokens=many"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = response_text(response).await;
+        for raw in ["abc", "-5", "huge", "perfect", "fast", "essay", "many"] {
+            assert!(html.contains(&format!(r#"value="{raw}""#)), "missing {raw}");
+        }
+        for error in [
+            "Enter a whole number of videos.",
+            "Enter whole minutes per video.",
+            "Choose a listed source resolution.",
+            "Choose a listed analysis quality.",
+            "Choose a listed frame sampling rate.",
+            "Choose a listed response profile.",
+            "Enter a whole number of prompt tokens.",
+        ] {
+            assert!(html.contains(error), "missing {error}");
+        }
+        assert!(html.contains(r#"data-advanced-assumptions="advanced""#));
+        assert!(html.contains(r#"open="open""#));
+        assert!(!html.contains("data-model-result"));
+    }
+
+    #[tokio::test]
+    async fn native_query_preserves_values_and_checkbox_absence_means_no_audio() {
+        let default_response = test_app()
+            .await
+            .oneshot(HttpRequest::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let default_html = response_text(default_response).await;
+        assert!(opening_tag_with_id(&default_html, "cost-audio").contains("checked"));
+
+        let response = test_app()
+            .await
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/?_cost=1&video_count=2&duration_minutes=5&source_resolution=720p&analysis_quality=current&sampling_fps=0.5&response_profile=concise&prompt_tokens=100")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = response_text(response).await;
+        assert!(opening_tag_with_id(&html, "cost-video-count").contains(r#"value="2""#));
+        assert!(!opening_tag_with_id(&html, "cost-audio").contains("checked"));
+        assert_eq!(html.matches("data-model-result").count(), 5);
+    }
+
+    #[tokio::test]
+    async fn cost_route_rejects_oversized_forms() {
+        let response = test_app()
+            .await
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/cost/estimate")
+                    .header("HX-Request", "true")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!(
+                        "_cost=1&video_count={}",
+                        "1".repeat(17 * 1_024)
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 }

@@ -1,6 +1,7 @@
 //! Provider-agnostic video analysis API and provider dispatch.
 
 pub mod chunking;
+pub mod cost;
 pub mod error;
 pub mod gemini;
 pub mod gemma;
