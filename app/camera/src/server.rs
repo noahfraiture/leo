@@ -1,32 +1,15 @@
 use std::{
-    fmt::Display,
     net::SocketAddr,
     sync::{Arc, Mutex},
 };
 
-use axum::{
-    Router,
-    extract::{Query, State, rejection::QueryRejection},
-    http::{StatusCode, header},
-    response::{IntoResponse, Response},
-    routing::get,
-};
-use serde::Deserialize;
+use axum::{Router, http::StatusCode, routing::get};
 use tokio::net::TcpListener;
 
-use crate::camera::{Camera, Status};
-
-type SharedCamera = Arc<Mutex<Camera>>;
-
-const AVAILABLE_COMMANDS: &str = "Available commands:{camera=[n]}rpan=[offset]";
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PtzParams {
-    camera: Option<u8>,
-    info: Option<u8>,
-    rpan: Option<f64>,
-}
+use crate::{
+    camera::{Camera, Status},
+    vapix,
+};
 
 pub async fn start(mut camera: Camera, address: SocketAddr) -> std::io::Result<()> {
     if camera.status != Status::Ready {
@@ -39,54 +22,8 @@ pub async fn start(mut camera: Camera, address: SocketAddr) -> std::io::Result<(
 }
 
 pub fn app(camera: Camera) -> Router {
-    let axis = Router::new().route("/ptz.cgi", get(ptz));
     Router::new()
         .route("/health", get(|| async { StatusCode::OK }))
-        .nest("/axis-cgi/com", axis)
+        .nest("/axis-cgi", vapix::router())
         .with_state(Arc::new(Mutex::new(camera)))
-}
-
-async fn ptz(
-    State(camera): State<SharedCamera>,
-    query: Result<Query<PtzParams>, QueryRejection>,
-) -> Response {
-    let Query(params) = match query {
-        Ok(params) => params,
-        Err(error) => return vapix_error(error.body_text()),
-    };
-
-    if let Err(error) = Camera::validate_channel(params.camera.unwrap_or(1)) {
-        return vapix_error(error);
-    }
-
-    if let Some(info) = params.info {
-        if info != 1 {
-            return vapix_error("info must be 1");
-        }
-        if params.rpan.is_some() {
-            return vapix_error("info cannot be combined with PTZ commands");
-        }
-        return text_response(StatusCode::OK, AVAILABLE_COMMANDS);
-    }
-
-    let Some(rpan) = params.rpan else {
-        return vapix_error("Unsupported PTZ command");
-    };
-    let mut camera = match camera.lock() {
-        Ok(camera) => camera,
-        Err(_) => return vapix_error("Camera state unavailable"),
-    };
-    if let Err(error) = camera.pan(params.camera.unwrap_or(1), rpan) {
-        return vapix_error(error);
-    }
-
-    text_response(StatusCode::NO_CONTENT, "")
-}
-
-fn vapix_error(message: impl Display) -> Response {
-    text_response(StatusCode::OK, format!("Error:{message}"))
-}
-
-fn text_response(status: StatusCode, body: impl Into<String>) -> Response {
-    (status, [(header::CONTENT_TYPE, "text/plain")], body.into()).into_response()
 }
