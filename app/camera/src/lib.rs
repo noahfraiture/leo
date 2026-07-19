@@ -78,6 +78,10 @@ mod tests {
         for (uri, expected_body) in [
             ("/axis-cgi/com/ptz.cgi", "Error:Unsupported PTZ command"),
             (
+                "/axis-cgi/com/ptz.cgi?camera=2",
+                "Error:Only camera 1 is supported",
+            ),
+            (
                 "/axis-cgi/com/ptz.cgi?camera=2&rpan=10",
                 "Error:Only camera 1 is supported",
             ),

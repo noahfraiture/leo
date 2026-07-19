@@ -72,8 +72,9 @@ fn information(params: &PtzParams) -> Result<Option<Response>, PtzError> {
 }
 
 fn movement(camera: CameraState, params: PtzParams) -> Result<Response, PtzError> {
-    let offset = params.rpan.ok_or(PtzError::UnsupportedCommand)?;
     let channel = params.camera.unwrap_or(1);
+    Camera::validate_channel(channel)?;
+    let offset = params.rpan.ok_or(PtzError::UnsupportedCommand)?;
     let mut camera = camera.lock().map_err(|_| PtzError::CameraUnavailable)?;
     camera.pan(channel, offset)?;
 
