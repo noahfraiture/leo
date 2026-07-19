@@ -62,6 +62,8 @@ mod tests {
         for uri in [
             "/axis-cgi/com/ptz.cgi?rpan=10",
             "/axis-cgi/com/ptz.cgi?rpan=-10.5&camera=1",
+            "/axis-cgi/com/ptz.cgi?rpan=-360",
+            "/axis-cgi/com/ptz.cgi?rpan=360",
         ] {
             let response = get(app(camera()), uri).await;
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
@@ -77,6 +79,7 @@ mod tests {
             "/axis-cgi/com/ptz.cgi?camera=2&rpan=10",
             "/axis-cgi/com/ptz.cgi?info=2",
             "/axis-cgi/com/ptz.cgi?info=1&rpan=10",
+            "/axis-cgi/com/ptz.cgi?rpan=-361",
             "/axis-cgi/com/ptz.cgi?rpan=361",
             "/axis-cgi/com/ptz.cgi?rpan=invalid",
             "/axis-cgi/com/ptz.cgi?zoom=100",
