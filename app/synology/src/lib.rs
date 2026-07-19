@@ -1,3 +1,3 @@
-mod camera;
-mod cli;
-mod server;
+mod api;
+pub mod camera;
+pub mod server;
