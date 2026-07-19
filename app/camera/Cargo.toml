@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 axum = { workspace = true }
+serde.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
 
 [dev-dependencies]

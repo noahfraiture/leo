@@ -3,4 +3,5 @@ resolver = "3"
 members = ["camera", "synology"]
 [workspace.dependencies]
 axum = "0.8.9"
+serde = { version = "1", features = ["derive"] }
 tokio = { version = "1.53.0" }
