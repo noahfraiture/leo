@@ -10,4 +10,4 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
 
 [dev-dependencies]
-tower = { version = "0.5.3", features = ["util"] }
+tower = { workspace = true }

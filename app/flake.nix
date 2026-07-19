@@ -31,7 +31,8 @@
 
         packages = with pkgs; [
           just
-          cargo-watch
+          dioxus-cli
+          bacon
           rustToolchain
         ];
 

@@ -1,8 +1,19 @@
 [workspace]
+members = [
+    "app",
+    "camera",
+    "synology", "app",
+]
 resolver = "3"
-members = ["camera", "synology"]
+
 [workspace.dependencies]
 axum = "0.8.9"
 thiserror = "2"
-serde = { version = "1", features = ["derive"] }
-tokio = { version = "1.53.0" }
+tower = { version = "0.5.3", features = ["util"] }
+
+[workspace.dependencies.serde]
+version = "1"
+features = ["derive"]
+
+[workspace.dependencies.tokio]
+version = "1.53.0"
