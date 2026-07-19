@@ -1,12 +1,4 @@
-use thiserror::Error;
-
-#[derive(Debug, Error, PartialEq)]
-pub enum CameraError {
-    #[error("Only camera 1 is supported")]
-    UnsupportedChannel,
-    #[error("rpan must be between -360 and 360")]
-    PanOutOfRange,
-}
+use crate::camera::CameraError;
 
 #[derive(Default)]
 pub struct Camera {
@@ -43,7 +35,7 @@ impl Camera {
 }
 
 #[derive(Clone, Default, PartialEq)]
-pub(crate) enum Status {
+pub enum Status {
     Running,
     #[default]
     Ready,

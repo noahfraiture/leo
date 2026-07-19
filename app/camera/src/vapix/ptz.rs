@@ -1,14 +1,13 @@
 use axum::{
     extract::{Query, State, rejection::QueryRejection},
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use serde::Deserialize;
-use thiserror::Error;
 
-use crate::camera::{Camera, CameraError};
+use crate::{camera::Camera, vapix::error::PtzError};
 
-use super::{CameraState, error_response, text_response};
+use super::{CameraState, text_response};
 
 const AVAILABLE_COMMANDS: &str = "Available commands:{camera=[n]}rpan=[offset]";
 
@@ -18,28 +17,6 @@ pub(super) struct PtzParams {
     camera: Option<u8>,
     info: Option<u8>,
     rpan: Option<f64>,
-}
-
-#[derive(Debug, Error)]
-pub(super) enum PtzError {
-    #[error("Invalid PTZ query")]
-    MalformedQuery,
-    #[error("info must be 1")]
-    InvalidInfo,
-    #[error("info cannot be combined with PTZ commands")]
-    MixedInfoAndMovement,
-    #[error("Unsupported PTZ command")]
-    UnsupportedCommand,
-    #[error("Camera state unavailable")]
-    CameraUnavailable,
-    #[error(transparent)]
-    Camera(#[from] CameraError),
-}
-
-impl IntoResponse for PtzError {
-    fn into_response(self) -> Response {
-        error_response(self)
-    }
 }
 
 pub(super) async fn handle(
