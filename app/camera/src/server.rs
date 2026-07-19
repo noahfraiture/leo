@@ -55,8 +55,8 @@ async fn ptz(
         Err(error) => return vapix_error(error.body_text()),
     };
 
-    if params.camera.is_some_and(|camera| camera != 1) {
-        return vapix_error("Only camera 1 is supported");
+    if let Err(error) = Camera::validate_channel(params.camera.unwrap_or(1)) {
+        return vapix_error(error);
     }
 
     if let Some(info) = params.info {
@@ -72,15 +72,13 @@ async fn ptz(
     let Some(rpan) = params.rpan else {
         return vapix_error("Unsupported PTZ command");
     };
-    if !(-360.0..=360.0).contains(&rpan) {
-        return vapix_error("rpan must be between -360 and 360");
-    }
-
     let mut camera = match camera.lock() {
         Ok(camera) => camera,
         Err(_) => return vapix_error("Camera state unavailable"),
     };
-    camera.pan();
+    if let Err(error) = camera.pan(params.camera.unwrap_or(1), rpan) {
+        return vapix_error(error);
+    }
 
     text_response(StatusCode::NO_CONTENT, "")
 }
