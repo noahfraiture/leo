@@ -21,7 +21,7 @@ impl Camera {
         }
     }
 
-    pub(crate) async fn reachable(&self) -> bool {
+    pub async fn reachable(&self) -> bool {
         matches!(
             timeout(Duration::from_millis(250), TcpStream::connect(self.address)).await,
             Ok(Ok(_))

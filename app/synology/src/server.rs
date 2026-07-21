@@ -13,7 +13,7 @@ pub async fn start(cameras: Vec<Camera>, address: SocketAddr) -> std::io::Result
     axum::serve(listener, app(cameras)).await
 }
 
-pub fn app(cameras: Vec<Camera>) -> Router {
+fn app(cameras: Vec<Camera>) -> Router {
     Router::new()
         .nest("/webapi", api::router())
         .with_state(Arc::new(Mutex::new(cameras)))

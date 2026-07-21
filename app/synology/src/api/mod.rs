@@ -13,9 +13,9 @@ mod info;
 
 use error::ApiError;
 
-pub(crate) type CameraState = Arc<Mutex<Vec<Camera>>>;
+pub type CameraState = Arc<Mutex<Vec<Camera>>>;
 
-pub(crate) fn router() -> Router<CameraState> {
+pub fn router() -> Router<CameraState> {
     Router::new()
         .route("/query.cgi", get(info::handle))
         .route("/entry.cgi", get(entry::handle))
@@ -37,6 +37,8 @@ pub(super) fn success<T: Serialize>(data: T) -> axum::response::Response {
 
 #[cfg(test)]
 pub(super) mod tests {
+    use std::sync::{Arc, Mutex};
+
     use axum::{
         Router,
         body::{Body, to_bytes},
@@ -45,6 +47,14 @@ pub(super) mod tests {
     };
     use serde_json::Value;
     use tower::ServiceExt;
+
+    use crate::camera::Camera;
+
+    pub fn app(cameras: Vec<Camera>) -> Router {
+        Router::new()
+            .nest("/webapi", super::router())
+            .with_state(Arc::new(Mutex::new(cameras)))
+    }
 
     pub async fn get(app: Router, uri: &str) -> Response {
         app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())

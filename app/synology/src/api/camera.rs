@@ -62,8 +62,8 @@ pub(super) async fn handle(
 mod tests {
     use tokio::net::TcpListener;
 
-    use super::super::tests::{get, json_body};
-    use crate::{camera::Camera, server::app};
+    use super::super::tests::{app, get, json_body};
+    use crate::camera::Camera;
 
     #[tokio::test]
     async fn list_reports_network_reachability() {

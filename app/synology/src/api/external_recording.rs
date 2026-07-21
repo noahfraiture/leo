@@ -61,9 +61,9 @@ mod tests {
 
     use super::super::{
         CameraState, router,
-        tests::{get, json_body},
+        tests::{app, get, json_body},
     };
-    use crate::{camera::Camera, server::app};
+    use crate::camera::Camera;
 
     #[tokio::test]
     async fn starts_and_stops_one_camera() {

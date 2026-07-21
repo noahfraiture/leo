@@ -77,8 +77,7 @@ mod tests {
     use axum::http::StatusCode;
     use serde_json::json;
 
-    use super::super::tests::{get, json_body};
-    use crate::server::app;
+    use super::super::tests::{app, get, json_body};
 
     #[tokio::test]
     async fn filters_api_descriptions() {
