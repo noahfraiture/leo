@@ -21,7 +21,7 @@ pub async fn start(mut camera: Camera, address: SocketAddr) -> std::io::Result<(
     axum::serve(listener, app(camera)).await
 }
 
-pub fn app(camera: Camera) -> Router {
+fn app(camera: Camera) -> Router {
     Router::new()
         .route("/health", get(|| async { StatusCode::OK }))
         .nest("/axis-cgi", vapix::router())

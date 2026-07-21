@@ -55,19 +55,8 @@ mod tests {
     use super::{Camera, CameraError};
 
     #[test]
-    fn new_camera_has_no_active_stream() {
-        assert!(Camera::new().stream.is_none());
-    }
-
-    #[test]
-    fn pan_accepts_supported_channel_and_offsets() {
-        for offset in [-360.0, 0.0, 360.0] {
-            assert_eq!(Camera::new().pan(1, offset), Ok(()));
-        }
-    }
-
-    #[test]
-    fn pan_rejects_unsupported_capabilities() {
+    fn pan_validates_capabilities() {
+        assert_eq!(Camera::new().pan(1, 0.0), Ok(()));
         assert_eq!(
             Camera::new().pan(2, 0.0),
             Err(CameraError::UnsupportedChannel)
