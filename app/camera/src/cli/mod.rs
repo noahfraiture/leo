@@ -1,4 +1,4 @@
 mod cli;
 mod error;
 
-pub use cli::parse_args;
+pub(crate) use cli::parse_args;

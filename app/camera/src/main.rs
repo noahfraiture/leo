@@ -5,8 +5,9 @@ mod vapix;
 
 use camera::Camera;
 
-fn main() {
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
     let args = cli::parse_args();
     let camera = Camera::new();
-    server::start(camera, args.address);
+    server::start(camera, args.address).await
 }

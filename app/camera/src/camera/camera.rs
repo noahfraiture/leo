@@ -1,8 +1,9 @@
 use crate::camera::CameraError;
 
 #[derive(Default)]
-pub struct Camera {
+pub(crate) struct Camera {
     pub(crate) status: Status,
+    pub(crate) pan: f64,
 
     // A camera can have multiple logical channels with multiple streams.
     // This simulator models one channel with one stream.
@@ -11,10 +12,11 @@ pub struct Camera {
 }
 
 impl Camera {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             status: Status::Ready,
             stream: None,
+            pan: 0.,
         }
     }
 
@@ -25,7 +27,7 @@ impl Camera {
         Ok(())
     }
 
-    pub fn pan(&mut self, channel: u8, offset: f64) -> Result<(), CameraError> {
+    pub(crate) fn pan(&mut self, channel: u8, offset: f64) -> Result<(), CameraError> {
         Self::validate_channel(channel)?;
         if !(-360.0..=360.0).contains(&offset) {
             return Err(CameraError::PanOutOfRange);
@@ -35,7 +37,7 @@ impl Camera {
 }
 
 #[derive(Clone, Default, PartialEq)]
-pub enum Status {
+pub(crate) enum Status {
     Running,
     #[default]
     Ready,

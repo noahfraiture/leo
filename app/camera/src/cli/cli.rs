@@ -3,12 +3,11 @@ use std::net::SocketAddr;
 
 #[derive(Clone, Parser)]
 #[command(version, about)]
-pub struct Args {
+pub(crate) struct Args {
     #[arg(short, long)]
-    pub address: SocketAddr,
+    pub(crate) address: SocketAddr,
 }
 
-pub fn parse_args() -> Args {
-    let args = Args::parse();
-    args
+pub(crate) fn parse_args() -> Args {
+    Args::parse()
 }

@@ -1,5 +1,5 @@
 mod camera;
 mod error;
 
-pub use camera::{Camera, Status};
-pub use error::CameraError;
+pub(crate) use camera::{Camera, Status};
+pub(crate) use error::CameraError;
