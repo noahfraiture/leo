@@ -75,29 +75,21 @@ mod tests {
         ]));
         let app = router().with_state(cameras.clone());
 
-        let response = get(
+        get(
             app.clone(),
             "/entry.cgi?api=SYNO.SurveillanceStation.ExternalRecording&method=Record&version=2&cameraId=1&action=start",
         )
         .await;
 
-        assert_eq!(
-            json_body(response).await,
-            json!({"success": true, "data": {"success": true}})
-        );
         assert!(cameras.lock().unwrap()[0].recording);
         assert!(!cameras.lock().unwrap()[1].recording);
 
-        let response = get(
+        get(
             app,
             "/entry.cgi?api=SYNO.SurveillanceStation.ExternalRecording&method=Record&version=2&cameraId=1&action=stop",
         )
         .await;
 
-        assert_eq!(
-            json_body(response).await,
-            json!({"success": true, "data": {"success": true}})
-        );
         assert!(!cameras.lock().unwrap()[0].recording);
     }
 

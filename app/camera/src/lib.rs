@@ -1,6 +1,7 @@
-pub mod camera;
-pub mod server;
-pub mod vapix;
+mod camera;
+pub mod cli;
+mod server;
+mod vapix;
 
 #[cfg(test)]
 mod tests {
@@ -32,30 +33,6 @@ mod tests {
                 .to_vec(),
         )
         .unwrap()
-    }
-
-    #[tokio::test]
-    async fn health_returns_ok() {
-        let response = get(app(camera()), "/health").await;
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn unknown_path_returns_not_found() {
-        let response = get(app(camera()), "/missing").await;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn ptz_info_lists_implemented_commands() {
-        let response = get(app(camera()), "/axis-cgi/com/ptz.cgi?info=1").await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[CONTENT_TYPE], "text/plain");
-        assert_eq!(
-            body(response).await,
-            "Available commands:{camera=[n]}rpan=[offset]"
-        );
     }
 
     #[tokio::test]

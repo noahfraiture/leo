@@ -81,39 +81,31 @@ mod tests {
     use crate::server::app;
 
     #[tokio::test]
-    async fn discovers_implemented_apis() {
-        let response = get(
-            app(vec![]),
-            "/webapi/query.cgi?api=SYNO.API.Info&method=Query&version=1&query=ALL",
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            json_body(response).await,
-            json!({
-                "success": true,
-                "data": {
-                    "SYNO.SurveillanceStation.Camera": {
-                        "path": "entry.cgi",
-                        "minVersion": 9,
-                        "maxVersion": 9
-                    },
-                    "SYNO.SurveillanceStation.ExternalRecording": {
-                        "path": "entry.cgi",
-                        "minVersion": 2,
-                        "maxVersion": 2
-                    }
-                }
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn filters_exact_names_and_prefixes() {
-        for query in [
-            "SYNO.SurveillanceStation.Camera",
-            "SYNO.SurveillanceStation.",
+    async fn filters_api_descriptions() {
+        for (query, expected) in [
+            (
+                "ALL",
+                &[
+                    "SYNO.SurveillanceStation.Camera",
+                    "SYNO.SurveillanceStation.ExternalRecording",
+                ][..],
+            ),
+            (
+                "SYNO.SurveillanceStation.Camera",
+                &["SYNO.SurveillanceStation.Camera"][..],
+            ),
+            (
+                "SYNO.SurveillanceStation.",
+                &[
+                    "SYNO.SurveillanceStation.Camera",
+                    "SYNO.SurveillanceStation.ExternalRecording",
+                ][..],
+            ),
+            (
+                "Missing,SYNO.SurveillanceStation.Camera",
+                &["SYNO.SurveillanceStation.Camera"][..],
+            ),
+            ("Missing", &[][..]),
         ] {
             let response = get(
                 app(vec![]),
@@ -123,12 +115,13 @@ mod tests {
             )
             .await;
             let body = json_body(response).await;
+            let data = body["data"].as_object().unwrap();
 
             assert!(body["success"].as_bool().unwrap(), "{query}");
-            assert!(
-                body["data"]["SYNO.SurveillanceStation.Camera"].is_object(),
-                "{query}"
-            );
+            assert_eq!(data.len(), expected.len(), "{query}");
+            for name in expected {
+                assert!(data.contains_key(*name), "{query}: {name}");
+            }
         }
     }
 
