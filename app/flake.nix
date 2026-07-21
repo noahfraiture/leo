@@ -31,6 +31,7 @@
 
         packages = with pkgs; [
           just
+          tailwindcss_4
           dioxus-cli
           bacon
           rustToolchain

@@ -15,6 +15,7 @@ pub fn Navbar() -> Element {
 
         div {
             id: "navbar",
+            class: "bg-secondary",
             Link {
                 to: Route::Home {},
                 "Home"

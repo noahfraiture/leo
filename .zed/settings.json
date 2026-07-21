@@ -1,0 +1,49 @@
+{
+  "lsp": {
+    "tailwindcss-language-server": {
+      "settings": {
+        "tailwindCSS": {
+          "files": {
+            "exclude": [
+              "**/.direnv/**",
+              "**/.data/**",
+              "**/target/**"
+            ]
+          }
+        },
+
+        "colorDecorators": true,
+        "hovers": true,
+        "suggestions": true,
+        "codeActions": true,
+        "validate": true,
+
+        "includeLanguages": {
+          "Rust": "html",
+          "rust": "html"
+        },
+
+        "experimental": {
+          "configFile": {
+            "/Users/noah/Projects/leo/app/app/tailwind.css": [
+              "/Users/noah/Projects/leo/app/app/**"
+            ]
+          },
+          "classRegex": [
+            "class\\s*:\\s*\"([^\"]*)\"",
+            "class\\s*:\\s*'([^']*)'"
+          ]
+        }
+      }
+    }
+  },
+
+  "languages": {
+    "Rust": {
+      "language_servers": [
+        "tailwindcss-language-server",
+        "rust-analyzer"
+      ]
+    }
+  }
+}
