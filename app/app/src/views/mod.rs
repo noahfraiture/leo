@@ -9,7 +9,7 @@
 //! a common wrapper around all child routes.
 
 mod navbar;
-pub use navbar::NavBar;
+pub use navbar::Layout;
 
 mod analyze;
 pub use analyze::Analyze;
