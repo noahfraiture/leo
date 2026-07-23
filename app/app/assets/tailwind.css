@@ -326,20 +326,6 @@
       --font-size: 0.875rem;
     }
   }
-  @layer daisyui.l1.l2.l3 {
-    .navbar {
-      display: flex;
-      width: 100%;
-      align-items: center;
-      padding: 0.5rem;
-      min-height: 4rem;
-    }
-  }
-  @layer daisyui.l1.l2 {
-    :where(.navbar) {
-      position: relative;
-    }
-  }
   .relative {
     position: relative;
   }
@@ -377,9 +363,6 @@
   .block {
     display: block;
   }
-  .contents {
-    display: contents;
-  }
   .transform {
     transform: var(--tw-rotate-x,) var(--tw-rotate-y,) var(--tw-rotate-z,) var(--tw-skew-x,) var(--tw-skew-y,);
   }
@@ -400,25 +383,6 @@
       outline: 2px solid currentColor;
       outline-offset: 2px;
     }
-  }
-  .rounded-xl {
-    border-radius: var(--radius-xl);
-  }
-  .bg-primary {
-    background-color: var(--color-primary);
-  }
-  .bg-red-500 {
-    background-color: var(--color-red-500);
-  }
-  .bg-secondary {
-    background-color: var(--color-secondary);
-  }
-  .p-8 {
-    padding: calc(var(--spacing) * 8);
-  }
-  .text-2xl {
-    font-size: var(--text-2xl);
-    line-height: var(--tw-leading, var(--text-2xl--line-height));
   }
 }
 @layer base {
