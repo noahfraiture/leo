@@ -6,10 +6,11 @@ use axum::{
 };
 use thiserror::Error;
 
-use crate::{camera::CameraError, vapix::text_response};
+use super::ptz::text_response;
+use crate::camera;
 
 #[derive(Debug, Error)]
-pub(super) enum PtzError {
+pub(super) enum Error {
     #[error("Invalid PTZ query")]
     MalformedQuery,
     #[error("info must be 1")]
@@ -21,10 +22,10 @@ pub(super) enum PtzError {
     #[error("Camera state unavailable")]
     CameraUnavailable,
     #[error(transparent)]
-    Camera(#[from] CameraError),
+    Camera(#[from] camera::Error),
 }
 
-impl IntoResponse for PtzError {
+impl IntoResponse for Error {
     fn into_response(self) -> Response {
         error_response(self)
     }

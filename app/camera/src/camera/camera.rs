@@ -1,84 +1,48 @@
-use crate::camera::CameraError;
+use crate::camera::Error;
 
 #[derive(Default)]
-pub(crate) struct Camera {
-    pub(crate) status: Status,
-    pub(crate) pan: f64,
-    pub(crate) tilt: f64,
-
-    // A camera can have multiple logical channels with multiple streams.
-    // This simulator models one channel with one stream.
-    #[allow(dead_code)]
-    stream: Option<Stream>,
-}
+pub(crate) struct Camera;
 
 impl Camera {
     pub(crate) fn new() -> Self {
-        Self {
-            status: Status::Ready,
-            stream: None,
-            pan: 0.,
-            tilt: 0.,
-        }
+        Self
     }
 
-    pub(crate) fn validate_channel(channel: u8) -> Result<(), CameraError> {
+    pub(crate) fn validate_channel(channel: u8) -> Result<(), Error> {
         if channel != 1 {
-            return Err(CameraError::UnsupportedChannel);
+            return Err(Error::UnsupportedChannel);
         }
         Ok(())
     }
 
-    pub(crate) fn pan(&mut self, channel: u8, offset: f64) -> Result<(), CameraError> {
+    pub(crate) fn pan(&mut self, channel: u8, offset: f64) -> Result<(), Error> {
         Self::validate_channel(channel)?;
         if !(-360.0..=360.0).contains(&offset) {
-            return Err(CameraError::PanOutOfRange);
+            return Err(Error::PanOutOfRange);
         }
         Ok(())
     }
 
-    pub(crate) fn tilt(&mut self, channel: u8, offset: f64) -> Result<(), CameraError> {
+    pub(crate) fn tilt(&mut self, channel: u8, offset: f64) -> Result<(), Error> {
         Self::validate_channel(channel)?;
         if !(-360.0..=360.0).contains(&offset) {
-            return Err(CameraError::PanOutOfRange);
+            return Err(Error::PanOutOfRange);
         }
         Ok(())
     }
 }
-
-#[derive(Clone, Default, PartialEq)]
-pub(crate) enum Status {
-    Running,
-    #[default]
-    Ready,
-}
-
-#[allow(dead_code)]
-struct Stream {
-    video_quality: VideoQuality,
-    codec: Codec,
-}
-
-enum VideoQuality {}
-enum Codec {}
 
 #[cfg(test)]
 mod tests {
-    use super::{Camera, CameraError};
+    use super::{Camera, Error};
 
     #[test]
     fn pan_validates_capabilities() {
         assert_eq!(Camera::new().pan(1, 0.0), Ok(()));
-        assert_eq!(
-            Camera::new().pan(2, 0.0),
-            Err(CameraError::UnsupportedChannel)
-        );
+        assert_eq!(Camera::new().pan(2, 0.0), Err(Error::UnsupportedChannel));
 
         for offset in [-361.0, 361.0, f64::NAN, f64::NEG_INFINITY, f64::INFINITY] {
-            assert_eq!(
-                Camera::new().pan(1, offset),
-                Err(CameraError::PanOutOfRange)
-            );
+            assert_eq!(Camera::new().pan(1, offset), Err(Error::PanOutOfRange));
         }
     }
 }

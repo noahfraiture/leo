@@ -1,6 +1,6 @@
 mod camera;
 mod cli;
-mod server;
+mod http;
 mod vapix;
 
 use camera::Camera;
@@ -9,5 +9,5 @@ use camera::Camera;
 async fn main() -> std::io::Result<()> {
     let args = cli::parse_args();
     let camera = Camera::new();
-    server::start(camera, args.address).await
+    http::serve(camera, args.address).await
 }

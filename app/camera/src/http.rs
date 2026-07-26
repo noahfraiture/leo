@@ -6,18 +6,10 @@ use std::{
 use axum::{Router, http::StatusCode, routing::get};
 use tokio::net::TcpListener;
 
-use crate::{
-    camera::{Camera, Status},
-    vapix,
-};
+use crate::{camera::Camera, vapix};
 
-pub(crate) async fn start(mut camera: Camera, address: SocketAddr) -> std::io::Result<()> {
-    if camera.status != Status::Ready {
-        return Ok(());
-    }
-
+pub(crate) async fn serve(camera: Camera, address: SocketAddr) -> std::io::Result<()> {
     let listener = TcpListener::bind(address).await?;
-    camera.status = Status::Running;
     axum::serve(listener, app(camera)).await
 }
 
@@ -77,8 +69,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ptz_errors_use_vapix_response_format() {
+    async fn ptz_responses_use_vapix_format() {
         for (uri, expected_body) in [
+            (
+                "/axis-cgi/com/ptz.cgi?info=1",
+                "Available commands:{camera=[n]}rpan=[offset]",
+            ),
             ("/axis-cgi/com/ptz.cgi", "Error:Unsupported PTZ command"),
             (
                 "/axis-cgi/com/ptz.cgi?camera=2",
