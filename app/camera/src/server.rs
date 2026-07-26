@@ -98,6 +98,10 @@ mod tests {
                 "Error:info cannot be combined with PTZ commands",
             ),
             (
+                "/axis-cgi/com/ptz.cgi?info=1&rtilt=10",
+                "Error:info cannot be combined with PTZ commands",
+            ),
+            (
                 "/axis-cgi/com/ptz.cgi?rpan=-361",
                 "Error:rpan must be between -360 and 360",
             ),

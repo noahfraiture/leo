@@ -16,7 +16,7 @@ const AVAILABLE_COMMANDS: &str = "Available commands:{camera=[n]}rpan=[offset]";
 pub(super) struct PtzParams {
     #[serde(rename = "camera")]
     /// Channel used for the camera, the value is ignored.
-    camera_channel: u8,
+    camera_channel: Option<u8>,
 
     info: Option<u8>,
     rpan: Option<f64>,
@@ -28,10 +28,14 @@ pub(super) async fn handle(
     query: Result<Query<PtzParams>, QueryRejection>,
 ) -> Result<Response, PtzError> {
     let Query(params) = query.map_err(|_| PtzError::MalformedQuery)?;
-    Camera::validate_channel(params.camera_channel)?;
+    Camera::validate_channel(params.camera_channel.unwrap_or(1))?;
 
     if params.info.is_some() {
         return information(&params);
+    }
+
+    if params.rpan.is_none() && params.rtilt.is_none() {
+        return Err(PtzError::UnsupportedCommand);
     }
 
     if params.rpan.is_some() {
@@ -45,9 +49,12 @@ pub(super) async fn handle(
 }
 
 fn information(params: &PtzParams) -> Result<Response, PtzError> {
-    Camera::validate_channel(params.camera_channel)?;
+    Camera::validate_channel(params.camera_channel.unwrap_or(1))?;
     if params.info.unwrap() != 1 {
         return Err(PtzError::InvalidInfo);
+    }
+    if params.rpan.is_some() || params.rtilt.is_some() {
+        return Err(PtzError::MixedInfoAndMovement);
     }
 
     Ok(text_response(StatusCode::OK, AVAILABLE_COMMANDS))
@@ -56,7 +63,7 @@ fn information(params: &PtzParams) -> Result<Response, PtzError> {
 fn rpan(camera: CameraState, params: &PtzParams) -> Result<Response, PtzError> {
     let offset = params.rpan.ok_or(PtzError::UnsupportedCommand)?;
     let mut camera = camera.lock().map_err(|_| PtzError::CameraUnavailable)?;
-    camera.pan(params.camera_channel, offset)?;
+    camera.pan(params.camera_channel.unwrap_or(1), offset)?;
 
     Ok(text_response(StatusCode::NO_CONTENT, ""))
 }
@@ -64,7 +71,7 @@ fn rpan(camera: CameraState, params: &PtzParams) -> Result<Response, PtzError> {
 fn rtilt(camera: CameraState, params: &PtzParams) -> Result<Response, PtzError> {
     let offset = params.rtilt.ok_or(PtzError::UnsupportedCommand)?;
     let mut camera = camera.lock().map_err(|_| PtzError::CameraUnavailable)?;
-    camera.tilt(params.camera_channel, offset)?;
+    camera.tilt(params.camera_channel.unwrap_or(1), offset)?;
 
     Ok(text_response(StatusCode::NO_CONTENT, ""))
 }
