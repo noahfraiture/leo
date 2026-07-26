@@ -31,6 +31,8 @@
 
         packages = with pkgs; [
           just
+          mediamtx
+          ffmpeg
           tailwindcss_4
           dioxus-cli
           bacon

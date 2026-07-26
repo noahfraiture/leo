@@ -1,0 +1,6 @@
+prepare-camera-video INPUT OUTPUT:
+    ffmpeg -i {{quote(INPUT)}} -map 0:v:0 -an \
+      -vf "fps=15,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2" \
+      -c:v libx264 -preset slow -crf 28 -profile:v baseline -level:v 3.1 \
+      -pix_fmt yuv420p -bf 0 -g 15 -keyint_min 15 -sc_threshold 0 -flags +cgop \
+      -movflags +faststart {{quote(OUTPUT)}}
