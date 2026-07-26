@@ -11,6 +11,7 @@ axum = "0.8.9"
 thiserror = "2"
 tower = { version = "0.5.3", features = ["util"] }
 clap = { version = "=4.6.1", features = ["derive"] }
+serde_json = "1"
 
 
 [workspace.dependencies.serde]
