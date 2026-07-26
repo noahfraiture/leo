@@ -4,3 +4,6 @@ prepare-camera-video INPUT OUTPUT:
       -c:v libx264 -preset slow -crf 28 -profile:v baseline -level:v 3.1 \
       -pix_fmt yuv420p -bf 0 -g 15 -keyint_min 15 -sc_threshold 0 -flags +cgop \
       -movflags +faststart {{quote(OUTPUT)}}
+
+test-camera-stream:
+    nix develop --command cargo test -p camera --test rtsp_stream fixture_streams_h264_to_two_readers_and_stops_cleanly -- --ignored --exact
