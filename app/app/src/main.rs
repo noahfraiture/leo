@@ -1,10 +1,14 @@
 // The dioxus prelude contains a ton of common items used in dioxus apps. It's a good idea to import wherever you
 // need dioxus
+use dioxus::desktop::{Config, tao::event::Event};
 use dioxus::prelude::*;
 
 use views::{Analyze, Monitor};
 
-use crate::views::Layout;
+use crate::{
+    preview::{Bridge, CameraSource, PreviewState, start},
+    views::Layout,
+};
 
 /// Define a components module that contains all shared components for our app.
 mod components;
@@ -40,9 +44,32 @@ const FAVICON: Asset = asset!("/assets/favicon.ico");
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
 fn main() {
-    // The `launch` function is the main entry point for a dioxus app. It takes a component and renders it with the platform feature
-    // you have enabled
-    dioxus::launch(App);
+    let source = CameraSource {
+        name: "Workshop".into(),
+        rtsp_url: "rtsp://127.0.0.1:8554/axis-media/media.amp".into(),
+    };
+    let (preview_state, mut bridge): (PreviewState, Option<Bridge>) = match start(vec![source]) {
+        Ok((state, bridge)) => (state, Some(bridge)),
+        Err(error) => (
+            PreviewState::Unavailable {
+                message: error.to_string(),
+            },
+            None,
+        ),
+    };
+    let config = Config::new().with_custom_event_handler(move |event, _| {
+        if matches!(event, Event::LoopDestroyed)
+            && let Some(bridge) = bridge.take()
+            && let Err(error) = bridge.stop()
+        {
+            eprintln!("failed to stop MediaMTX preview process: {error}");
+        }
+    });
+
+    dioxus::LaunchBuilder::desktop()
+        .with_context(preview_state)
+        .with_cfg(config)
+        .launch(App);
 }
 
 /// App is the main component of our app. Components are the building blocks of dioxus apps. Each component is a function
