@@ -98,6 +98,11 @@ dependencies = [
  "dioxus",
  "dioxus-icons",
  "dioxus-primitives",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
