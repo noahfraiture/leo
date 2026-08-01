@@ -15,11 +15,11 @@ pub fn Monitor() -> Element {
                 }
             }
         },
-        PreviewState::Ready { feeds, reader } => rsx! {
+        PreviewState::Ready { feeds, script_url } => rsx! {
             div {
                 class: "grid grid-cols-1 gap-4 p-2 lg:grid-cols-2",
                 for feed in feeds {
-                    CameraFeed { feed, reader: reader.clone() }
+                    CameraFeed { feed, script_url: script_url.clone() }
                 }
             }
         },

@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 
-use crate::preview::{PreviewFeed, ReaderConfig};
+use crate::preview::PreviewFeed;
 
 const READER_PROGRAM: &str = r#"
 const config = await dioxus.recv();
@@ -15,8 +15,6 @@ if (!window.MediaMTXWebRTCReader) {
 const video = document.getElementById(config.video_id);
 const reader = new MediaMTXWebRTCReader({
   url: config.whep_url,
-  user: config.user,
-  pass: config.password,
   onError: (error) => dioxus.send(error),
   onTrack: (event) => {
     video.srcObject = event.streams[0];
@@ -29,15 +27,12 @@ video.srcObject = null;
 "#;
 
 #[component]
-pub fn CameraFeed(feed: PreviewFeed, reader: ReaderConfig) -> Element {
+pub fn CameraFeed(feed: PreviewFeed, script_url: String) -> Element {
     let mut error = use_signal(|| None::<String>);
     let mut player_channel = use_signal(|| None::<document::Eval>);
-    let script_url = reader.script_url.clone();
     let config = serde_json::json!({
         "video_id": feed.video_id.clone(),
         "whep_url": feed.whep_url.clone(),
-        "user": reader.user,
-        "password": reader.password,
     });
 
     use_effect(move || {
@@ -132,5 +127,16 @@ pub fn CameraFeed(feed: PreviewFeed, reader: ReaderConfig) -> Element {
                 p { "CAM 04 - Selected camera" }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::READER_PROGRAM;
+
+    #[test]
+    fn reader_program_does_not_send_credentials() {
+        assert!(!READER_PROGRAM.contains("user:"));
+        assert!(!READER_PROGRAM.contains("pass:"));
     }
 }

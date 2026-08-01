@@ -7,8 +7,8 @@ use super::{CameraSource, Error};
 pub(crate) struct ConfigFile(NamedTempFile);
 
 impl ConfigFile {
-    pub(crate) fn create(sources: &[CameraSource], password: &str) -> Result<Self, Error> {
-        let contents = render(sources, password)?;
+    pub(crate) fn create(sources: &[CameraSource]) -> Result<Self, Error> {
+        let contents = render(sources)?;
         let mut file = NamedTempFile::new().map_err(Error::CreateConfig)?;
         file.write_all(contents.as_bytes())
             .and_then(|()| file.flush())
@@ -21,34 +21,31 @@ impl ConfigFile {
     }
 }
 
-fn render(sources: &[CameraSource], password: &str) -> Result<String, Error> {
-    let password = serde_json::to_string(password)?;
-    let mut contents = format!(
-        concat!(
-            "logDestinations: [stdout]\n",
-            "api: false\n",
-            "metrics: false\n",
-            "pprof: false\n",
-            "playback: false\n",
-            "rtsp: false\n",
-            "rtmp: false\n",
-            "hls: false\n",
-            "webrtc: true\n",
-            "webrtcAddress: 127.0.0.1:8889\n",
-            "webrtcAllowOrigins: ['*']\n",
-            "webrtcLocalUDPAddress: 127.0.0.1:8189\n",
-            "webrtcLocalTCPAddress: ''\n",
-            "webrtcIPsFromInterfaces: false\n",
-            "webrtcAdditionalHosts: [127.0.0.1]\n",
-            "srt: false\n",
-            "authInternalUsers:\n",
-            "  - user: app-preview\n",
-            "    pass: {password}\n",
-            "    ips: [127.0.0.1, '::1']\n",
-            "    permissions:\n",
-        ),
-        password = password,
-    );
+fn render(sources: &[CameraSource]) -> Result<String, Error> {
+    let mut contents = concat!(
+        "logDestinations: [stdout]\n",
+        "api: false\n",
+        "metrics: false\n",
+        "pprof: false\n",
+        "playback: false\n",
+        "rtsp: false\n",
+        "rtmp: false\n",
+        "hls: false\n",
+        "webrtc: true\n",
+        "webrtcAddress: 127.0.0.1:8889\n",
+        "webrtcAllowOrigins: ['*']\n",
+        "webrtcLocalUDPAddress: 127.0.0.1:8189\n",
+        "webrtcLocalTCPAddress: ''\n",
+        "webrtcIPsFromInterfaces: false\n",
+        "webrtcAdditionalHosts: [127.0.0.1]\n",
+        "srt: false\n",
+        "authInternalUsers:\n",
+        "  - user: any\n",
+        "    pass:\n",
+        "    ips: [127.0.0.1, '::1']\n",
+        "    permissions:\n",
+    )
+    .to_owned();
 
     for index in 0..sources.len() {
         write!(
@@ -103,7 +100,7 @@ mod tests {
     #[test]
     fn renders_web_rtc_preview_configuration() {
         let sources = sources();
-        let config = ConfigFile::create(&sources, "local-password").unwrap();
+        let config = ConfigFile::create(&sources).unwrap();
         let contents = fs::read_to_string(config.path()).unwrap();
 
         assert_eq!(
@@ -127,8 +124,8 @@ mod tests {
                     "webrtcAdditionalHosts: [127.0.0.1]\n",
                     "srt: false\n",
                     "authInternalUsers:\n",
-                    "  - user: app-preview\n",
-                    "    pass: \"local-password\"\n",
+                    "  - user: any\n",
+                    "    pass:\n",
                     "    ips: [127.0.0.1, '::1']\n",
                     "    permissions:\n",
                     "      - action: read\n",
@@ -159,7 +156,7 @@ mod tests {
 
     #[test]
     fn owns_temporary_file_until_drop() {
-        let config = ConfigFile::create(&sources(), "local-password").unwrap();
+        let config = ConfigFile::create(&sources()).unwrap();
         let path = PathBuf::from(config.path());
         assert!(path.exists());
 
@@ -172,7 +169,7 @@ mod tests {
     fn temporary_file_mode_is_0600() {
         use std::os::unix::fs::PermissionsExt;
 
-        let config = ConfigFile::create(&sources(), "local-password").unwrap();
+        let config = ConfigFile::create(&sources()).unwrap();
         let mode = fs::metadata(config.path()).unwrap().permissions().mode();
 
         assert_eq!(mode & 0o777, 0o600);

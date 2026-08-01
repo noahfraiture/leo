@@ -98,7 +98,6 @@ dependencies = [
  "dioxus",
  "dioxus-icons",
  "dioxus-primitives",
- "rand 0.9.5",
  "rig-core",
  "serde",
  "serde_json",

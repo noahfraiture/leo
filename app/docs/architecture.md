@@ -139,8 +139,8 @@ Before launching Dioxus, the app starts the preview bridge:
 
 1. Reserve TCP port `8889` and UDP port `8189` so occupied ports fail early.
 2. Verify that `mediamtx` is on `PATH` and reports exactly `v1.18.2`.
-3. Generate a random preview password and a temporary MediaMTX configuration.
-4. Start MediaMTX and wait up to five seconds for an authenticated WHEP readiness response.
+3. Generate a temporary MediaMTX configuration with anonymous, read-only access limited to loopback and the generated camera paths.
+4. Start MediaMTX and wait up to five seconds for a WHEP readiness response.
 5. Convert camera sources into browser-safe `PreviewState` metadata.
 
 Bridge startup failure does not terminate the UI. The app provides `PreviewState::Unavailable` to Dioxus and the Monitor route displays the error with recovery guidance. A camera may still be unavailable after the bridge starts because RTSP sources are pulled on demand; that failure is reported by the individual feed.
@@ -157,7 +157,7 @@ The app-owned MediaMTX process is a loopback-only protocol adapter:
 camera RTSP URL
     -> on-demand RTSP/TCP pull
     -> app-owned MediaMTX path (`camera-<index>`)
-    -> authenticated WHEP endpoint
+    -> anonymous loopback WHEP endpoint
     -> MediaMTX `reader.js`
     -> WebRTC MediaStream
     -> Dioxus `<video>` element
@@ -165,18 +165,17 @@ camera RTSP URL
 
 For each feed, `CameraFeed` loads `reader.js` and starts a JavaScript `MediaMTXWebRTCReader` through Dioxus `document::Eval`. Rust sends feed configuration into the evaluator. JavaScript sends connection errors or a successful-track signal back to Rust, then waits for a shutdown message. Component teardown closes the reader and clears the video's `srcObject`.
 
-RTSP URLs remain in the MediaMTX configuration and are not sent to the webview. The webview receives only loopback WHEP URLs and a per-run credential.
+RTSP URLs remain in the MediaMTX configuration and are not sent to the webview. The webview receives only loopback WHEP and reader script URLs.
 
 The generated MediaMTX configuration:
 
 - binds WHEP HTTP and WebRTC media to loopback
-- uses a random 32-character password for the `app-preview` user
-- grants read access only to generated camera paths
+- grants anonymous read access only from loopback and only to generated camera paths
 - stores configuration in a temporary file with mode `0600` on Unix
 - pulls RTSP over TCP only when a viewer requests the path
 - disables recording, RTSP serving, RTMP, HLS, SRT, metrics, pprof, playback and the MediaMTX API
 
-This protects the local bridge boundary. It is not a substitute for camera authentication or production network controls.
+This limits the local bridge boundary to the operator laptop. Between releasing the reserved ports and MediaMTX binding them, another compatible MediaMTX process could rarely win the handoff and cause a recoverable failed preview; stop the conflicting process and restart the app.
 
 ### Operator interface and session workflow
 
@@ -336,8 +335,9 @@ Archival recording must continue when the operator laptop fails or sleeps. The N
 
 Production deployment requires:
 
-- unique credentials for each camera and service
-- authenticated control APIs and streams
+- an isolated camera network where anonymous viewing and PTZ are enabled under `System > Accounts > Anonymous access`
+- administrator camera accounts retained for device setup but not received or stored by the app
+- authenticated administrative and storage services
 - encrypted storage on the NAS and operator laptop
 - no externally reachable simulator or preview ports
 - explicit recovery before camera-local backup media is erased

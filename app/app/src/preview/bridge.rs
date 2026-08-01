@@ -6,7 +6,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rand::distr::{Alphanumeric, SampleString};
 use serde::{Deserialize, Serialize};
 
 use super::{ConfigFile, Error};
@@ -78,17 +77,10 @@ pub(crate) struct PreviewFeed {
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct ReaderConfig {
-    pub script_url: String,
-    pub user: String,
-    pub password: String,
-}
-
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) enum PreviewState {
     Ready {
         feeds: Vec<PreviewFeed>,
-        reader: ReaderConfig,
+        script_url: String,
     },
     Unavailable {
         message: String,
@@ -115,10 +107,6 @@ fn verify_version(executable: &str) -> Result<(), Error> {
     validate_version(&output.stdout)
 }
 
-fn random_password() -> String {
-    Alphanumeric.sample_string(&mut rand::rng(), 32)
-}
-
 fn reserve_ports(
     tcp_address: SocketAddr,
     udp_address: SocketAddr,
@@ -137,7 +125,6 @@ fn reserve_ports(
 fn wait_until_ready(
     child: &mut Child,
     address: SocketAddr,
-    password: &str,
     timeout: Duration,
 ) -> Result<(), Error> {
     let deadline = Instant::now() + timeout;
@@ -145,7 +132,7 @@ fn wait_until_ready(
         if let Some(status) = child.try_wait().map_err(Error::Wait)? {
             return Err(Error::ExitedBeforeReady(status));
         }
-        let ready = probe(address, password, deadline);
+        let ready = probe(address, deadline);
         if let Some(status) = child.try_wait().map_err(Error::Wait)? {
             return Err(Error::ExitedBeforeReady(status));
         }
@@ -160,7 +147,7 @@ fn wait_until_ready(
     }
 }
 
-fn probe(address: SocketAddr, password: &str, deadline: Instant) -> bool {
+fn probe(address: SocketAddr, deadline: Instant) -> bool {
     let mut io_timeout = PROBE_INTERVAL.min(deadline.saturating_duration_since(Instant::now()));
     if io_timeout.is_zero() {
         return false;
@@ -172,9 +159,8 @@ fn probe(address: SocketAddr, password: &str, deadline: Instant) -> bool {
     if io_timeout.is_zero() || stream.set_write_timeout(Some(io_timeout)).is_err() {
         return false;
     }
-    let request = format!(
-        "OPTIONS /camera-0/whep HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer app-preview:{password}\r\nConnection: close\r\n\r\n"
-    );
+    let request =
+        format!("OPTIONS /camera-0/whep HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n");
     if stream.write_all(request.as_bytes()).is_err() {
         return false;
     }
@@ -219,8 +205,7 @@ fn probe(address: SocketAddr, password: &str, deadline: Instant) -> bool {
 pub(crate) fn start(sources: Vec<CameraSource>) -> Result<(PreviewState, Bridge), Error> {
     let ports = reserve_ports(WEBRTC_HTTP_ADDRESS, WEBRTC_UDP_ADDRESS)?;
     verify_version("mediamtx")?;
-    let password = random_password();
-    let config = ConfigFile::create(&sources, &password)?;
+    let config = ConfigFile::create(&sources)?;
     drop(ports);
     let mut child = Command::new("mediamtx")
         .arg(config.path())
@@ -230,22 +215,17 @@ pub(crate) fn start(sources: Vec<CameraSource>) -> Result<(PreviewState, Bridge)
         .spawn()
         .map_err(Error::spawn)?;
 
-    if let Err(error) = wait_until_ready(
-        &mut child,
-        WEBRTC_HTTP_ADDRESS,
-        &password,
-        READINESS_TIMEOUT,
-    ) {
+    if let Err(error) = wait_until_ready(&mut child, WEBRTC_HTTP_ADDRESS, READINESS_TIMEOUT) {
         if let Err(cleanup_error) = Bridge::new(child, config).stop() {
             eprintln!("failed to clean up MediaMTX after startup failure: {cleanup_error}");
         }
         return Err(error);
     }
-    let state = preview_metadata(&sources, password);
+    let state = preview_metadata(&sources);
     Ok((state, Bridge::new(child, config)))
 }
 
-pub(crate) fn preview_metadata(sources: &[CameraSource], password: String) -> PreviewState {
+pub(crate) fn preview_metadata(sources: &[CameraSource]) -> PreviewState {
     let feeds = sources
         .iter()
         .enumerate()
@@ -255,13 +235,10 @@ pub(crate) fn preview_metadata(sources: &[CameraSource], password: String) -> Pr
             whep_url: format!("http://127.0.0.1:8889/camera-{index}/whep"),
         })
         .collect();
-    let reader = ReaderConfig {
+    PreviewState::Ready {
+        feeds,
         script_url: "http://127.0.0.1:8889/reader.js".into(),
-        user: "app-preview".into(),
-        password,
-    };
-
-    PreviewState::Ready { feeds, reader }
+    }
 }
 
 #[cfg(test)]
@@ -305,7 +282,7 @@ mod tests {
     }
 
     fn config() -> ConfigFile {
-        ConfigFile::create(&[], "local-password").unwrap()
+        ConfigFile::create(&[]).unwrap()
     }
 
     #[cfg(unix)]
@@ -422,7 +399,7 @@ mod tests {
         });
         let mut child = live_child();
 
-        let result = wait_until_ready(&mut child, address, "local-password", timeout);
+        let result = wait_until_ready(&mut child, address, timeout);
 
         server.join().unwrap();
         child.kill().unwrap();
@@ -431,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn readiness_succeeds_for_authenticated_mediamtx_response() {
+    fn readiness_succeeds_without_authorization_header() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
@@ -443,11 +420,10 @@ mod tests {
             let size = stream.read(&mut request).unwrap();
             let request = std::str::from_utf8(&request[..size]).unwrap();
             assert!(request.starts_with("OPTIONS /camera-0/whep HTTP/1.1\r\n"));
-            assert!(
-                request
-                    .lines()
-                    .any(|line| line == "Authorization: Bearer app-preview:local-password")
-            );
+            assert!(!request.lines().any(|line| {
+                line.split_once(':')
+                    .is_some_and(|(name, _)| name.eq_ignore_ascii_case("Authorization"))
+            }));
             stream
                 .write_all(
                     b"HTTP/1.1 204 No Content\r\nAccept-Post: application/sdp\r\nContent-Length: 0\r\n\r\n",
@@ -456,12 +432,7 @@ mod tests {
         });
         let mut child = live_child();
 
-        let result = wait_until_ready(
-            &mut child,
-            address,
-            "local-password",
-            Duration::from_secs(1),
-        );
+        let result = wait_until_ready(&mut child, address, Duration::from_secs(1));
 
         let server_result = server.join();
         child.kill().unwrap();
@@ -477,13 +448,7 @@ mod tests {
         drop(listener);
         let mut child = child(&["--list"]);
 
-        let error = wait_until_ready(
-            &mut child,
-            address,
-            "local-password",
-            Duration::from_secs(1),
-        )
-        .unwrap_err();
+        let error = wait_until_ready(&mut child, address, Duration::from_secs(1)).unwrap_err();
 
         assert!(matches!(
             error,
@@ -509,12 +474,7 @@ mod tests {
             );
         });
 
-        let result = wait_until_ready(
-            &mut child,
-            address,
-            "local-password",
-            Duration::from_secs(1),
-        );
+        let result = wait_until_ready(&mut child, address, Duration::from_secs(1));
 
         terminator.join().unwrap();
         child.wait().unwrap();
@@ -538,7 +498,7 @@ mod tests {
         let timeout = Duration::from_millis(100);
         let started = Instant::now();
 
-        let error = wait_until_ready(&mut child, address, "local-password", timeout).unwrap_err();
+        let error = wait_until_ready(&mut child, address, timeout).unwrap_err();
         let elapsed = started.elapsed();
 
         server.join().unwrap();
@@ -606,11 +566,16 @@ mod tests {
             name: "Workshop".into(),
             rtsp_url: "rtsp://camera-user:camera-pass@127.0.0.1/live".into(),
         };
-        let preview = preview_metadata(&[source], "local-password".into());
+        let preview = preview_metadata(&[source]);
         let serialized = serde_json::to_string(&preview).unwrap();
 
         assert!(serialized.contains("camera-0-video"));
         assert!(serialized.contains("http://127.0.0.1:8889/camera-0/whep"));
+        assert!(serialized.contains("http://127.0.0.1:8889/reader.js"));
+        assert!(!serialized.contains("\"user\""));
+        assert!(!serialized.contains("\"password\""));
+        assert!(!serialized.contains("app-preview"));
+        assert!(!serialized.contains("local-password"));
         assert!(!serialized.contains("camera-user"));
         assert!(!serialized.contains("camera-pass"));
         assert!(!serialized.contains("rtsp://"));
