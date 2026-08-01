@@ -29,7 +29,7 @@ async fn run(args: cli::Args) -> Result<(), error::Error> {
     let result = tokio::select! {
         biased;
         result = &mut shutdown => result.map_err(error::Error::ShutdownSignal),
-        result = http::serve(camera, address) => result.map_err(error::Error::Http),
+        result = http::serve(camera, address) => result.map_err(|source| error::Error::Http { address, source }),
         result = rtsp.wait() => result.map_err(error::Error::Rtsp),
     };
 
