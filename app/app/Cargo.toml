@@ -10,6 +10,7 @@ dioxus = { version = "0.7.1", features = ["router"] }
 dioxus-icons = { version = "0.1.0", default-features = false }
 dioxus-primitives = { git = "https://github.com/DioxusLabs/components", version = "0.0.1", default-features = false }
 rand = "0.9"
+rig-core = "0.41.0"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

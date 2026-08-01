@@ -6,7 +6,7 @@ use dioxus::prelude::*;
 use views::{Analyze, Monitor};
 
 use crate::{
-    preview::{Bridge, CameraSource, PreviewState, start},
+    preview::{Bridge, CameraSource, PreviewState, bridge},
     views::Layout,
 };
 
@@ -15,6 +15,8 @@ mod components;
 mod preview;
 /// Define a views module that contains the UI for all Layouts and Routes for our app.
 mod views;
+
+mod analysis;
 
 /// The Route enum is used to define the structure of internal routes in our app. All route enums need to derive
 /// the [`Routable`] trait, which provides the necessary methods for the router to work.
@@ -48,15 +50,16 @@ fn main() {
         name: "Workshop".into(),
         rtsp_url: "rtsp://127.0.0.1:8554/axis-media/media.amp".into(),
     };
-    let (preview_state, mut bridge): (PreviewState, Option<Bridge>) = match start(vec![source]) {
-        Ok((state, bridge)) => (state, Some(bridge)),
-        Err(error) => (
-            PreviewState::Unavailable {
-                message: error.to_string(),
-            },
-            None,
-        ),
-    };
+    let (preview_state, mut bridge): (PreviewState, Option<Bridge>) =
+        match bridge::start(vec![source]) {
+            Ok((state, bridge)) => (state, Some(bridge)),
+            Err(error) => (
+                PreviewState::Unavailable {
+                    message: error.to_string(),
+                },
+                None,
+            ),
+        };
     let config = Config::new().with_custom_event_handler(move |event, _| {
         if matches!(event, Event::LoopDestroyed)
             && let Some(bridge) = bridge.take()

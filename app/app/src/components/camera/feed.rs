@@ -31,7 +31,7 @@ video.srcObject = null;
 #[component]
 pub fn CameraFeed(feed: PreviewFeed, reader: ReaderConfig) -> Element {
     let mut error = use_signal(|| None::<String>);
-    let mut eval = use_signal(|| None::<document::Eval>);
+    let mut player_channel = use_signal(|| None::<document::Eval>);
     let script_url = reader.script_url.clone();
     let config = serde_json::json!({
         "video_id": feed.video_id.clone(),
@@ -46,7 +46,7 @@ pub fn CameraFeed(feed: PreviewFeed, reader: ReaderConfig) -> Element {
             error.set(Some(format!("Failed to start live preview: {send_error}")));
             return;
         }
-        eval.set(Some(reader));
+        player_channel.set(Some(reader));
         spawn(async move {
             while let Ok(status) = reader.recv::<Option<String>>().await {
                 error.set(status);
@@ -55,7 +55,7 @@ pub fn CameraFeed(feed: PreviewFeed, reader: ReaderConfig) -> Element {
     });
 
     use_drop(move || {
-        if let Some(eval) = eval.peek().as_ref() {
+        if let Some(eval) = player_channel.peek().as_ref() {
             let _ = eval.send(());
         }
     });
