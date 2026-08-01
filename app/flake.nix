@@ -30,6 +30,7 @@
       devShells.${system}.default = pkgs.mkShell {
 
         packages = with pkgs; [
+          vlc-bin
           just
           mediamtx
           ffmpeg

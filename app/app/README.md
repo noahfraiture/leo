@@ -1,57 +1,48 @@
-# Development
+# Desktop app
 
-Your new jumpstart project includes basic organization with an organized `assets` folder and a `components` folder.
-If you chose to develop with the router feature, you will also have a `views` folder.
+The `app` crate is the Dioxus Desktop operator application. Its implemented workflow is live camera monitoring: it supervises a local MediaMTX process, pulls camera RTSP streams, and exposes authenticated loopback WHEP/WebRTC streams to native `<video>` elements in the desktop webview.
 
-```
-project/
-├─ assets/ # Any assets that are used by the app should be placed here
-├─ src/
-│  ├─ main.rs # The entrypoint for the app. It also defines the routes for the app.
-│  ├─ components/
-│  │  ├─ mod.rs # Defines the components module
-│  │  ├─ hero.rs # The Hero component for use in the home page
-│  ├─ views/ # The views each route will render in the app.
-│  │  ├─ mod.rs # Defines the module for the views route and re-exports the components for each route
-│  │  ├─ blog.rs # The component that will render at the /blog/:id route
-│  │  ├─ home.rs # The component that will render at the / route
-├─ Cargo.toml # The Cargo.toml file defines the dependencies and feature flags for your project
-```
+See the [architecture document](../docs/architecture.md#desktop-app) for the full startup, data-flow, security and ownership model.
 
-### Automatic Tailwind (Dioxus 0.7+)
+## Run locally
 
-As of Dioxus 0.7, there no longer is a need to manually install tailwind. Simply `dx serve` and you're good to go!
-
-Automatic tailwind is supported by checking for a file called `tailwind.css` in your app's manifest directory (next to Cargo.toml). To customize the file, use the dioxus.toml:
-
-```toml
-[application]
-tailwind_input = "my.css"
-tailwind_output = "assets/out.css"
-```
-
-### Tailwind Manual Install
-
-To use tailwind plugins or manually customize tailwind, you can can install the Tailwind CLI and use it directly.
-
-1. Install npm: https://docs.npmjs.com/downloading-and-installing-node-js-and-npm
-2. Install the Tailwind CSS CLI: https://tailwindcss.com/docs/installation/tailwind-cli
-3. Run the following command in the root of the project to start the Tailwind CSS compiler:
+From the workspace root, start the virtual camera:
 
 ```bash
-npx @tailwindcss/cli -i ./input.css -o ./assets/tailwind.css --watch
+just camera
 ```
 
-### Serving Your App
-
-Run the following command in the root of your project to start developing with the default platform:
+Start the app in another terminal:
 
 ```bash
-dx serve
+just app
 ```
 
-To run for a different platform, use the `--platform platform` flag. E.g.
+The app currently expects the development camera at:
+
+```text
+rtsp://127.0.0.1:8554/axis-media/media.amp
+```
+
+The Nix shell provides the required MediaMTX `v1.18.2`. Preview startup also requires TCP port `8889` and UDP port `8189` to be free.
+
+If the bridge cannot start, the app still opens and the Monitor route displays the startup error. Check the MediaMTX version and `PATH` and the preview ports before restarting the app. A stopped camera is reported later by its feed because RTSP is pulled on demand.
+
+## Styling
+
+[`tailwind.css`](tailwind.css) is the Tailwind CSS and DaisyUI source. Dioxus compiles it while serving the app; [`assets/tailwind.css`](assets/tailwind.css) is generated output and should not be edited directly.
+
+## Checks
+
+Run the app tests from the workspace root:
+
 ```bash
-dx serve --platform desktop
+nix develop --command cargo test -p app
 ```
 
+Before merging app changes, also run:
+
+```bash
+nix develop --command cargo fmt --all --check
+nix develop --command cargo clippy -p app --all-targets --all-features -- -D warnings
+```
