@@ -1,0 +1,18 @@
+{
+  "name": "video-clap-sync",
+  "version": "0.1.0",
+  "description": "Video Clap Sync plugin",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Video Clap Sync",
+    "shortDescription": "Use Video Clap Sync in Codex.",
+    "longDescription": "Video Clap Sync adds a local Codex plugin scaffold.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Help me use Video Clap Sync."
+  }
+}
