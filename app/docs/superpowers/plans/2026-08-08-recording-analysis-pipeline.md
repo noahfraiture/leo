@@ -4,7 +4,7 @@
 
 **Goal:** Convert continuously recorded Synology video and append-only operator events into deterministic, resumable multimodal exercise analysis without storing extracted images permanently.
 
-**Architecture:** Synology records every camera continuously. A session JSONL records software-only camera participation and sampling changes. Replaying that file produces one `SamplingSchedule` per camera; matching Synology catalogue entries become `Video` values, schedules produce `SampleSequence`s, and those sequences merge into canonical `FrameSet`s. `Analyzer` downloads only the next batch's required recording windows, extracts temporary JPEGs through `ffmpeg-sidecar`, builds a Rig message, delegates the model call to a transport-only `Agent`, and checkpoints the structured response.
+**Architecture:** Synology records every camera continuously. All operator and internal actions enter through a concrete `SessionController`, which validates and records current software-only participation and sampling actions in session JSONL. Replaying that file produces one normalized `SamplingSchedule` per camera; matching Synology catalogue entries become `Video` values, schedules produce `SampleSequence`s, and those sequences merge into canonical `FrameSet`s. `Analyzer` downloads only the next batch's required recording windows, extracts temporary JPEGs through `ffmpeg-sidecar`, builds a Rig message directly from canonical frames, delegates the model call to a transport-only `Agent`, and atomically checkpoints the structured response.
 
 **Tech Stack:** Rust 2024, Tokio, Reqwest, Serde/JSONL, UUID, `thiserror`, `tempfile`, `ffmpeg-sidecar` 2.5.2, FFmpeg 8, Rig 0.41, Synology Surveillance Station Recording API v6.
 
@@ -13,7 +13,7 @@
 ```text
 Synology continuously records every camera
                     +
-Operator actions -> session events.jsonl
+Operator actions -> SessionController -> events.jsonl
                     |
                     v
        SamplingSchedule per camera
@@ -36,7 +36,7 @@ Operator actions -> session events.jsonl
             Durable checkpoint
 ```
 
-The future operator UI will create the session log, append actions, finish the session, and launch analysis. This plan implements the backend pipeline only; it does not wire Dioxus controls.
+The future operator UI will use `SessionController` to create a session, apply actions, finish the session, and launch analysis. The UI will never write JSONL or call hardware directly. This plan implements the backend pipeline only; it does not wire Dioxus controls or hardware commands.
 
 ## Global Constraints
 
@@ -45,30 +45,27 @@ The future operator UI will create the session log, append actions, finish the s
 - The JSONL event log is the durable source of session metadata.
 - Store UTC milliseconds and session-relative milliseconds in every event.
 - Generate sampling positions from integer millisecond intervals; do not persist floating-point FPS.
-- Preserve `Video`, `SamplingRateChange`, `SamplingSchedule`, `SampleSequence`, `Frame`, and `FrameSet` as explicit domain stages.
-- Use session-relative `Duration` for runtime scheduling and grouping; do not persist or rebuild `Instant` values.
+- Preserve `Video`, `SamplingSchedule`, `SamplingPeriod`, `SampleSequence`, `Frame`, and `FrameSet` as explicit domain stages.
+- Use session-relative `Duration` for replayed scheduling and grouping; never persist `Instant`. The active `SessionController` may use one process-local `Instant` only to measure event offsets while it is running.
 - Keep analysis independent from `preview::CameraSource` and RTSP URLs; join domains with stable Synology camera IDs.
 - A scheduled sample without exactly one matching recording is an error for now.
 - Use `Recording.List` and `Recording.Download`; do not scan undocumented Surveillance Station directories.
 - Use the primary documented Recording API v6 response. Add compatibility only after observing a different target-NAS response.
-- Authentication is optional client plumbing: unauthenticated requests omit `_sid`; `login` stores one SID when the NAS requires it. Do not add refresh, logout, role, credential-storage, or gateway machinery.
-> Everything will run on a controlled and closed environment, security is not important and we should stay as simple as possible.
+- Everything runs on a controlled, isolated network. Treat Synology login only as protocol plumbing: unauthenticated requests omit `_sid`, and one explicit `login` stores a SID because supported Recording APIs require it. Do not add refresh, logout, role, credential-storage, gateway, or other security machinery.
 - Download only recording windows required by the current analysis batch.
-- Use `ffmpeg-sidecar` with default features disabled so it uses FFmpeg from the Nix environment.
-> Eventually I will have to compile the app and install it on other laptop, it would be nice to have ffmpeg with it so I don't have to install it in the path of the other app. If it's possible, we can build the app with nix to easily install everything we need in the path, if not we might want to have another solution ? 
+- Use `ffmpeg-sidecar` with default features disabled. Resolve FFmpeg from `PATH` or beside the executable without hardcoding a Nix-store path, so a later macOS or Windows package can supply the binary without changing analysis code.
+- Defer packaged-app delivery. Development and verification use FFmpeg from the current Apple Silicon Nix shell.
 - Write JPEGs to a temporary directory; do not parse MJPEG pipes or add a JPEG encoder.
 - Keep model-provider details inside `Agent`; keep domain orchestration inside `Analyzer`.
-- Do not introduce `PromptFrame`, `PromptFrameSet`, `AnalysisBatch`, `AnalysisRequest`, or an extraction trait.
-> What does that mean ?
-- Preserve existing atomic checkpoint replacement and rollback after a failed save.
+- Construct each Rig message directly while iterating canonical `FrameSet`/`Frame` metadata. Extract a JPEG into a local value, append it to the message, and drop it; do not copy frames into `PromptFrame`, `PromptFrameSet`, `AnalysisBatch`, or `AnalysisRequest` adapter structs.
+- Call the concrete FFmpeg extraction function directly; do not add a trait with only one implementation.
+- Include the checkpoint and resume system in this plan. Preserve atomic checkpoint replacement and rollback after a failed save.
 - Checkpoint plan/checklist fingerprinting remains deferred.
 - Keep all new APIs `pub(crate)` or narrower and keep `mod.rs` files declaration/export-only.
 - Put non-trivial module errors in that module's `error.rs` and derive them with `thiserror`.
-- Do not implement operator UI, active-session restart recovery, NAS-side extraction, direct NAS filesystem access, media caching, bookmarks, digital zoom, or face blurring.
+- Do not implement operator UI, active-session restart recovery, hardware commands/PTZ, NAS-side extraction, direct NAS filesystem access, media caching, bookmarks, digital zoom, or face blurring.
 - Do not modify the unrelated worktree changes in `AGENTS.md`, `app/assets/tailwind.css`, or `ratio.md`.
 - Do not commit this implementation plan.
-
-> I would like to include the checkpoint and resume system in this plan
 
 ## Locked File Structure
 
@@ -83,6 +80,7 @@ app/
         |-- main.rs
         |-- session/
         |   |-- mod.rs
+        |   |-- controller.rs
         |   |-- session.rs
         |   \-- error.rs
         |-- recording/
@@ -114,7 +112,8 @@ Delete `app/src/analysis/runner/` only after its files have moved to `analysis/a
 ### Persisted Session Event
 
 ```rust
-struct SessionEvent {
+/// One durably ordered fact on a session's monotonic and UTC timelines.
+pub(crate) struct SessionEvent {
     schema_version: u8,
     sequence: u64,
     session_id: Uuid,
@@ -123,10 +122,11 @@ struct SessionEvent {
     action: SessionAction,
 }
 
+/// The persisted effect of one accepted controller action.
 #[serde(tag = "type", rename_all = "snake_case")]
-enum SessionAction {
+pub(crate) enum SessionAction {
     SessionStarted {
-        cameras: Vec<CameraSnapshot>,
+        cameras: Vec<SessionCamera>,
     },
     CameraParticipationChanged {
         camera_id: u32,
@@ -139,13 +139,27 @@ enum SessionAction {
     SessionEnded,
 }
 
-pub(crate) struct CameraSnapshot {
-    pub camera_id: u32,
+/// One camera's stable identity and initial software state for this session.
+pub(crate) struct SessionCamera {
+    #[serde(rename = "camera_id")]
+    pub id: u32,
     pub name: String,
     pub enabled: bool,
-    pub sample_every_ms: u64,
+    #[serde(rename = "sample_every_ms", with = "duration_millis")]
+    pub sample_every: Duration,
+}
+
+/// A validated completed session reconstructed from its JSONL events.
+pub(crate) struct Session {
+    pub id: Uuid,
+    pub start_utc_ms: i64,
+    pub end_offset: Duration,
+    pub cameras: Vec<SessionCamera>,
+    pub events: Vec<SessionEvent>,
 }
 ```
+
+`SessionCamera` is the controller-facing domain value, not a persistence DTO or image snapshot. Its private `duration_millis` Serde helper writes the existing `sample_every_ms` JSON number and reconstructs `Duration` on load; no second camera representation is introduced.
 
 Representative file:
 
@@ -159,6 +173,7 @@ Representative file:
 ### Runtime Video Domain
 
 ```rust
+/// One retained Synology recording segment on the shared UTC timeline.
 pub(crate) struct Video {
     pub recording_id: u64,
     pub camera_id: u32,
@@ -166,30 +181,20 @@ pub(crate) struct Video {
     pub end_utc_ms: i64,
 }
 
-pub(crate) struct SamplingRateChange {
-    pub offset: Duration,
+/// One enabled interval with a stable sampling cadence.
+pub(crate) struct SamplingPeriod {
+    pub start: Duration,
+    pub end: Duration,
     pub sample_every: Duration,
 }
 
-enum SamplingChange {
-    Participation {
-        offset: Duration,
-        enabled: bool,
-    },
-    Rate(SamplingRateChange),
-}
-
-> why do we have this in addition to SamplingRateChange ? Is it work to have an enum here ?
-> We can change the existing interface it allows for a clean domain here
-> When implementing, add one or two line per element of the domain of small doc explaining what it represents
-
+/// The normalized enabled periods for one camera over a completed session.
 pub(crate) struct SamplingSchedule {
     pub camera_id: u32,
-    initial_enabled: bool,
-    initial_sample_every: Duration,
-    changes: Vec<SamplingChange>,
+    pub periods: Vec<SamplingPeriod>,
 }
 
+/// Metadata locating one scheduled sample in one retained recording.
 pub(crate) struct Frame {
     pub camera_id: u32,
     pub recording_id: u64,
@@ -198,25 +203,72 @@ pub(crate) struct Frame {
     pub recording_offset: Duration,
 }
 
+/// The chronologically ordered samples selected for one camera.
 pub(crate) struct SampleSequence {
     pub camera_id: u32,
     pub frames: Vec<Frame>,
 }
 
+/// Samples from all participating cameras at one scheduled session offset.
 pub(crate) struct FrameSet {
     pub session_offset: Duration,
     pub frames: Vec<Frame>,
 }
 ```
 
-JPEG bytes never enter these structs. They exist only while constructing the current Rig message.
+JSONL retains the original participation and interval changes. Replay resolves them into enabled `SamplingPeriod`s, so the runtime sampling domain does not duplicate the event log with another change enum. Disabled time is represented by a gap between periods, and a participation or interval change begins a new period when the camera is enabled.
+
+JPEG bytes never enter these structs. `Analyzer` extracts one JPEG into a local value while iterating a `Frame`, appends it to the current Rig message, and then drops it.
+
+### Analysis Checkpoint
+
+```rust
+/// Durable model responses for the completed prefix of one session's batch plan.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct AnalysisCheckpoint {
+    pub schema_version: u8,
+    pub session_id: Uuid,
+    pub total_batches: usize,
+    pub completed_batches: Vec<CompletedBatch>,
+}
+
+/// One successfully analyzed batch and the response carried into the next batch.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct CompletedBatch {
+    pub index: usize,
+    pub response: AnalysisResponse,
+}
+```
+
+Representative `analysis.json` beside `events.jsonl`:
+
+```json
+{
+  "schema_version": 1,
+  "session_id": "5a660250-36fc-4c2b-93fa-b04247bdad20",
+  "total_batches": 3,
+  "completed_batches": [
+    {
+      "index": 0,
+      "response": {
+        "observations": [],
+        "sequence_summary": "The exercise has started.",
+        "checklist_progress": []
+      }
+    }
+  ]
+}
+```
+
+After each successful model response, `Analyzer` serializes the complete checkpoint to a temporary file in the same directory, appends a newline, flushes and syncs it, then atomically replaces `analysis.json`. Resume rebuilds the media plan from JSONL and Synology metadata, validates checkpoint schema/session/batch count/contiguous indices, skips the completed prefix, and carries the last saved response into the next prompt. Videos and JPEGs are regenerated and never stored in the checkpoint.
 
 ---
 
-### Task 1: Session JSONL Storage and Replay
+### Task 1: Session Controller, JSONL Storage, and Replay
 
 **Files:**
 - Create: `app/src/session/mod.rs`
+- Create: `app/src/session/controller.rs`
 - Create: `app/src/session/session.rs`
 - Create: `app/src/session/error.rs`
 - Modify: `app/src/main.rs`
@@ -225,84 +277,44 @@ JPEG bytes never enter these structs. They exist only while constructing the cur
 **Interfaces:**
 
 ```rust
-impl SessionLog {
-    pub(crate) fn create(
-        path: PathBuf,
-        cameras: Vec<CameraSnapshot>,
-    ) -> Result<Self>;
-
-    pub(crate) fn append(
-        &mut self,
-        action: OperatorAction,
-    ) -> Result<()>;
-
-    pub(crate) fn finish(&mut self) -> Result<()>;
-}
-
-impl Session {
-    pub(crate) fn load(path: &Path) -> Result<Self>;
-}
-```
-
-> Let's make this a bit stronger : eventually events will be able to send to the session logs but also send to the camera for some of them (change the pan/zoom of the camera for example). I think we should have a single interface for this that can be used from the UI and the internal, some kind of controller, will decide to either send it to logs, camera, synology of mutliple and handle the actual logic. So this is this elements that will expose the interface to communicate with the hardware part of the system. If you disagree or think we can do better, say it to me. This can require a bit of renaming of change of interface
-
-> Another agents running on that question made this output, it's not exactly up to date or correct but this can source of inspiration
-```
-Action Boundary
-Use a backend SessionController, not a load balancer or generic event engine.
-Frontend
-  -> OperatorAction
-  -> SessionController::apply()
-       -> EventLog
-       -> AxisClient
-       -> SynologyClient
-The frontend never writes JSONL or calls a camera directly.
-enum OperatorAction {
+/// Actions accepted from future UI and internal callers.
+pub(crate) enum OperatorAction {
     SetCameraParticipation {
         camera_id: u32,
         enabled: bool,
     },
     SetSamplingInterval {
         camera_id: u32,
-        sample_every_ms: u64,
+        sample_every: Duration,
     },
-    MoveCameraRelative {
-        camera_id: u32,
-        pan_degrees: Option<f64>,
-        tilt_degrees: Option<f64>,
-        zoom_steps: Option<i32>,
-    },
+    EndSession,
 }
-SessionController::apply(&mut self, action) uses one explicit match. The mutable controller serializes actions and JSONL sequence numbers without an event bus.
-Routing Rules
-Action	Destination	Persisted events
-Camera participation	JSONL only	CameraParticipationChanged
-Sampling interval	JSONL only	SamplingIntervalChanged
-Relative PTZ/zoom	Axis camera and JSONL	Requested, then accepted or failed
-Hardware flow:
-1. Validate the action.
-2. Append CameraCommandRequested.
-3. Send the VAPIX command.
-4. Append CameraCommandAccepted or CameraCommandFailed.
-5. Correlate the outcome with the request event’s sequence number.
-If the application stops after step 2, replay reports an unresolved command but does not assume it was applied.
-“Accepted” is more accurate than “Succeeded”: Axis returning success means the command was accepted, not that physical movement finished.
-Official PTZ Contract
-Use relative commands because they match both Axis VAPIX and the existing simulator:
-- rpan: -360.0..=360.0 degrees
-- rtilt: -360.0..=360.0 degrees
-- rzoom: -9999..=9999 zoom steps
-Do not support absolute PTZ yet.
-The client must recognize:
-- 204 No Content as accepted.
-- 200 OK with a body beginning Error: as failure.
-- Transport ambiguity as failure without automatic retry, because relative movements are not idempotent.
-The virtual camera needs only two small changes:
-- Accept and validate rzoom.
-- Advertise rpan, rtilt, and rzoom from info=1.
-No position tracking, automatic retries, movement-completion polling, generic VAPIX passthrough, or frontend routing logic is needed now.
-This becomes a new phase between JSONL storage and schedule replay. The later UI will receive a handle to SessionController; how Dioxus delivers commands to that handle is UI wiring, not domain routing.
+
+/// The single backend entry point that validates, routes, and serializes session actions.
+pub(crate) struct SessionController {
+    log: SessionLog,
+}
+
+impl SessionController {
+    pub(crate) fn create(
+        events_path: PathBuf,
+        cameras: Vec<SessionCamera>,
+    ) -> Result<Self>;
+
+    pub(crate) fn apply(
+        &mut self,
+        action: OperatorAction,
+    ) -> Result<()>;
+}
+
+impl Session {
+    pub(crate) fn load(events_path: &Path) -> Result<Self>;
+}
 ```
+
+`events_path` names the session's `events.jsonl`; later analysis stores `analysis.json` in the same directory. `SessionController::apply` uses one explicit match and owns the private `SessionLog`, which serializes action handling and JSONL sequence assignment without an event bus. Current participation and interval actions validate their payload and append the matching event. `EndSession` appends `SessionEnded` and rejects later actions.
+
+Future PTZ or Synology-control actions will be added as explicit `OperatorAction` variants and routed from this same match, with request/outcome events where hardware ambiguity matters. This plan does not add unused hardware clients or generic routing abstractions before those actions are implemented.
 
 - [ ] **Step 1: Add the UUID dependency and module skeleton**
 
@@ -312,13 +324,13 @@ Add to `app/app/Cargo.toml`:
 uuid = { version = "1.24.0", features = ["serde", "v4"] }
 ```
 
-Declare `mod session;` in `app/src/main.rs`. Keep `session/mod.rs` limited to submodule declarations and narrow reexports.
+Declare `mod session;` in `app/src/main.rs`. Keep `session/mod.rs` limited to submodule declarations and narrow reexports. Reexport `SessionController`, `OperatorAction`, `SessionCamera`, and the completed `Session`; keep `SessionLog` private to the module.
 
 - [ ] **Step 2: Write failing serialization and replay tests**
 
-Add tests for the representative event schema, contiguous appends, file reopen, malformed JSON, unsupported schema versions, mismatched session IDs, non-contiguous sequences, duplicate initial cameras, zero intervals, unknown-camera actions, actions after session end, missing session end, and duplicate session end.
+Add tests for the representative event schema, `SessionCamera` duration-to-milliseconds serialization, controller action routing, contiguous appends, file reopen, malformed JSON, unsupported schema versions, mismatched session IDs, non-contiguous sequences, duplicate initial cameras, zero intervals, unknown-camera actions, actions after session end, missing session end, and duplicate session end.
 
-`SessionLog::create` must write sequence zero immediately. Each append must serialize one line, append `\n`, flush, and call `sync_data`.
+`SessionController::create` must create its private log and write sequence zero immediately. Each applied action must serialize one line, append `\n`, flush, and call `sync_data`.
 
 - [ ] **Step 3: Run the focused tests and verify red**
 
@@ -332,7 +344,7 @@ Expected: compilation or assertions fail because the types and validation are no
 
 - [ ] **Step 4: Implement the minimum writer and loader**
 
-Generate UTC milliseconds from `SystemTime`. Keep an internal `Instant` in `SessionLog` and derive every runtime session offset from its elapsed duration. Generate one UUID at session creation and reuse it in every event.
+Implement `SessionController::apply` with one explicit match and no generic dispatcher. Validate `Duration` values at the controller boundary and convert them to persisted milliseconds only during serialization. Generate UTC milliseconds from `SystemTime`. Keep an internal `Instant` in the private `SessionLog` and derive every runtime session offset from its elapsed duration. Generate one UUID at session creation and reuse it in every event.
 
 `Session::load` treats the first event's UTC time as the session UTC anchor and the `SessionEnded` offset as the exclusive session end. Later analysis uses `start_utc_ms + session_offset_ms` for deterministic recording alignment; per-event UTC remains audit metadata.
 
@@ -368,16 +380,12 @@ impl SamplingSchedule {
         camera_id: u32,
     ) -> Result<Self>;
 
-    pub(crate) fn sample_offsets(
-        &self,
-        session_end: Duration,
-    ) -> Result<Vec<Duration>>;
+    pub(crate) fn sample_offsets(&self) -> Result<Vec<Duration>>;
 }
 
 impl SampleSequence {
     pub(crate) fn from_videos(
         session_start_utc_ms: i64,
-        session_end: Duration,
         schedule: &SamplingSchedule,
         videos: &[Video],
     ) -> Result<Self>;
@@ -402,13 +410,18 @@ Cover these exact rules:
 - Same-offset events are all applied before deciding whether to sample that offset.
 - Repeating the current enabled state or interval is a no-op and does not reset cadence.
 - Session end is exclusive.
+- Every normalized period has `start < end` and a non-zero interval.
+- Periods are ordered and do not overlap.
+- Disabled time appears as a gap between periods.
 - Generated offsets are ordered and unique.
 
 - [ ] **Step 2: Replace invalid fields without deleting the domain stages**
 
-Replace process-local `Instant` timestamps with session-relative `Duration`. Replace `CameraSource` with `camera_id`. Replace integer FPS with `sample_every: Duration`. Replace the unfinished `Video::sample` ownership model with `SampleSequence::from_videos`, because one camera schedule may span multiple Synology recording files.
+Replace process-local `Instant` timestamps with session-relative `Duration`. Replace `CameraSource` with `camera_id`. Replace integer FPS with `sample_every: Duration`. Replay participation and interval events into normalized `SamplingPeriod`s instead of retaining another runtime change list. Replace the unfinished `Video::sample` ownership model with `SampleSequence::from_videos`, because one camera schedule may span multiple Synology recording files.
 
-Keep the existing struct names and their pipeline responsibilities.
+Keep `Video`, `SamplingSchedule`, `SampleSequence`, `Frame`, and `FrameSet` as the explicit pipeline stages; replace the old rate-change representation with the cleaner normalized `SamplingPeriod` domain.
+
+Add concise one- or two-sentence documentation for `Video`, `SamplingPeriod`, `SamplingSchedule`, `Frame`, `SampleSequence`, and `FrameSet`, including ambiguous timestamp and offset fields.
 
 - [ ] **Step 3: Write failing sequence and recording-coverage tests**
 
@@ -458,9 +471,7 @@ pub(crate) struct SynologyClient {
 impl SynologyClient {
     pub(crate) fn new(base_url: reqwest::Url) -> Self;
 
-    > Is the login required in our system ? I told that we should ignore most of the login system when possible to simplify the system
-
-    pub(crate) async fn login( 
+    pub(crate) async fn login(
         &mut self,
         account: &str,
         password: &str,
@@ -505,11 +516,11 @@ Hardcode the documented `/webapi/entry.cgi` path and version 6. Do not add API d
 
 - [ ] **Step 4: Write failing optional-login tests**
 
-Verify requests omit `_sid` before login and include the SID returned by `SYNO.API.Auth` afterward. The password must not remain in `SynologyClient`.
+Verify requests omit `_sid` before login and include the SID returned by `SYNO.API.Auth` afterward. The password must not remain in `SynologyClient`. Supported physical Surveillance Station Recording APIs require this login; the optional unauthenticated path exists for the trusted simulator or an appliance proven to accept it.
 
 - [ ] **Step 5: Implement one optional SID login**
 
-Do not add automatic login, retries, refresh, logout, cookies, role checks, or credential persistence. The caller decides whether the target NAS requires `login`.
+Do not add automatic login, retries, refresh, logout, cookies, role checks, or credential persistence. The caller explicitly invokes the one login when required by the target NAS.
 
 - [ ] **Step 6: Write failing streaming-download tests**
 
@@ -554,6 +565,8 @@ Add to `app/app/Cargo.toml`:
 ```toml
 ffmpeg-sidecar = { version = "=2.5.2", default-features = false }
 ```
+
+Keep executable resolution portable: use `ffmpeg-sidecar`'s normal adjacent-executable/`PATH` lookup and do not embed a Nix-store path. The current Nix shell supplies FFmpeg for development. Building an installable app bundle with FFmpeg is a separate packaging task.
 
 - [ ] **Step 2: Write the ignored fixture test first**
 
@@ -662,8 +675,6 @@ impl<M: CompletionModel> Agent<M> {
 
 **Analyzer interface:**
 
-> I don't see the model of the checkpoint file, what's the idea to actually make checkpoints ?
-
 ```rust
 impl<M: CompletionModel> Analyzer<M> {
     pub(crate) async fn resume(
@@ -695,7 +706,7 @@ Keep model configuration, stable instructions, output schema, completion, and re
 
 `Analyzer::resume` must select cameras with samples, list videos for the complete session UTC interval, build schedules and sequences, merge FrameSets, divide them with `chunks(frame_sets_per_batch)`, and validate the existing checkpoint against the resulting batch count.
 
-Reject an empty generated plan. Continue to validate only batch count and contiguous completed indices; do not add plan fingerprints in this task.
+Reject an empty generated plan. Rename the moved `AnalysisProgress` model to the documented `AnalysisCheckpoint`, add schema version, session ID, and total batch count, and validate them together with contiguous completed indices. Do not add event/checklist/plan fingerprints in this task.
 
 - [ ] **Step 4: Implement deterministic planning in `resume`**
 
@@ -733,17 +744,19 @@ Prompt content order is:
 4. Stable camera ID/name and the same session timestamp.
 5. Corresponding JPEG.
 
-Repeat FrameSets chronologically and Frames by camera ID. Do not expose recording IDs to the model unless required for diagnostics.
+Repeat canonical FrameSets chronologically and Frames by camera ID. For each `Frame`, resolve its downloaded clip, call the concrete `extract_jpeg` function, append frame metadata and the returned JPEG directly to the Rig message, then drop the local bytes. Do not copy metadata/images into prompt-specific frame structs, add a one-implementation extractor trait, or expose recording IDs to the model unless required for diagnostics.
 
 - [ ] **Step 8: Preserve failure and checkpoint semantics**
 
 Download or extraction failure must occur before the model call. Model failure must not modify progress. After a successful model response, append the completed batch, atomically save, and pop it again if saving fails.
 
-Keep the current pretty JSON checkpoint format and its atomic `NamedTempFile` replacement. Plan/checklist fingerprinting remains explicitly deferred.
+Store one `analysis.json` beside the session's `events.jsonl`. Serialize the complete `AnalysisCheckpoint` as pretty JSON through a `NamedTempFile` in the same directory, append a newline, flush and sync it, then atomically replace the checkpoint. On resume, rebuild videos, schedules, sequences, FrameSets, and batch boundaries; reject the wrong schema/session/batch count or non-contiguous indices; skip the completed prefix; and use the last saved response as context for the next model request. Temporary media is regenerated.
+
+Plan/checklist fingerprinting remains explicitly deferred. The known residual risk is accepting changed event/checklist input that belongs to the same session and happens to produce the same number of batches.
 
 - [ ] **Step 9: Add focused Analyzer tests**
 
-Cover prompt ordering, previous response, batch ranges, download failure before model invocation, model failure without progress, failed checkpoint rollback, complete analysis, and resume from the first incomplete batch.
+Cover prompt ordering, previous response, batch ranges, download failure before model invocation, model failure without progress, failed checkpoint rollback, wrong checkpoint schema, wrong session ID, changed batch count, non-contiguous indices, complete analysis, and resume from the first incomplete batch.
 
 Use local HTTP responses and Rig's `MockCompletionModel`. Do not add an extractor trait. Keep the complete HTTP + FFmpeg + model pipeline as an ignored integration test using the existing MP4 fixture.
 
@@ -782,7 +795,7 @@ Remove statements that the master session action starts or stops camera recordin
 
 - [ ] **Step 2: Tighten exports and documentation**
 
-Keep module declarations and narrow reexports in each `mod.rs`. Use `pub(crate)` only for cross-module contracts and `pub(super)` for implementation details. Add one- or two-sentence documentation to the primary structs and entry-point methods.
+Keep module declarations and narrow reexports in each `mod.rs`. Use `pub(crate)` only for cross-module contracts and `pub(super)` for implementation details. Add one- or two-sentence documentation to every main domain element and ambiguous field, including session cameras/events/actions/controller, videos, sampling periods/schedules, frames/sequences/sets, extraction, Analyzer, Agent, checkpoint, completed batches, and their entry-point methods.
 
 - [ ] **Step 3: Confirm obsolete prompt types are gone**
 
@@ -828,7 +841,9 @@ Report changed behavior, tests run, target-NAS checks not run, known deferred li
 
 - Dioxus operator controls and status UI.
 - Reopening and continuing an active session after application restart.
-- Bookmark, note, digital zoom, and face-blurring event semantics.
+- Relative PTZ/zoom actions, Axis client routing, hardware request/outcome events, and simulator changes; these will extend `SessionController` in a focused follow-up.
+- Bookmark, note, analysis-time digital cropping, and face-blurring event semantics.
+- Packaged application delivery, Nix runtime wrappers, bundled FFmpeg/MediaMTX binaries, and Windows support. Extraction remains portable by avoiding hardcoded executable paths.
 - Direct access to Surveillance Station's internal files.
 - Server-side Synology range exports.
 - NAS-side FFmpeg or a frame-extraction service.
