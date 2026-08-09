@@ -45,12 +45,10 @@ App-specific development notes are in [`app/README.md`](app/README.md).
 The Synology simulator is independent of the app. With the virtual camera running, start it with:
 
 ```bash
-nix develop --command cargo run -p synology -- \
-  --address 127.0.0.1:5000 \
-  --camera 127.0.0.1:8080
+just synology
 ```
 
-Repeat `--camera` for additional camera socket addresses. Reachability is a TCP connection check; the simulator does not record video.
+This binds HTTP to `127.0.0.1:5000`, configures the camera at `127.0.0.1:8080`, and loads `synology/fixtures/recordings.json`. The catalogue exposes the existing five-second H.264 camera fixture through the Recording List and Download APIs; the simulator does not record video. For a custom launch, pass repeated `--camera` values and an optional `--recording-catalogue` path directly to the `synology` binary.
 
 ### Tests
 
@@ -59,3 +57,5 @@ nix develop --command cargo test --workspace --all-targets --all-features
 ```
 
 The real RTSP acceptance test is ignored by the normal suite because it requires external media processes. Run it with `just test-camera-stream`.
+
+The partial Recording Download acceptance test also requires Nix-provided FFmpeg and FFprobe. Run it with `just test-synology-recording`.

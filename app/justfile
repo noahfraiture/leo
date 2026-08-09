@@ -8,8 +8,14 @@ prepare-camera-video INPUT OUTPUT:
 test-camera-stream:
     nix develop --command cargo test -p camera --test rtsp_stream fixture_streams_h264_to_two_readers_and_stops_cleanly -- --ignored --exact
 
+test-synology-recording:
+    nix develop --command cargo test -p synology downloads_partial_recording -- --ignored
+
 camera:
     nix develop --command cargo run -p camera -- --address 127.0.0.1:8080 --rtsp-address 127.0.0.1:8554 --video camera/fixtures/default.mp4
+
+synology:
+    nix develop --command cargo run -p synology -- --address 127.0.0.1:5000 --camera 127.0.0.1:8080 --recording-catalogue synology/fixtures/recordings.json
 
 vlc:
     nix develop --command vlc rtsp://127.0.0.1:8554/axis-media/media.amp

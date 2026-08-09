@@ -60,7 +60,7 @@ Camera source
 (Axis camera or virtual camera)
 |
 |-- high-quality stream --> Synology Surveillance Station --> archival recordings
-|                            (`synology` currently simulates control state only)
+|                            (`synology` serves fixture catalogue and control APIs)
 |
 |-- preview RTSP ---------> app-owned MediaMTX --> WHEP/WebRTC --> operator UI
 |                            (implemented)
@@ -78,7 +78,7 @@ The Cargo workspace contains three independent Rust binaries:
 | --- | --- |
 | `app` | Dioxus desktop UI, preview bridge, session workflow and analysis orchestration. Preview is implemented; the other workflows remain incomplete. |
 | `camera` | Development replacement for one Axis camera, with a VAPIX-shaped HTTP API and fixture-backed RTSP stream. |
-| `synology` | Development replacement for a small Surveillance Station API surface, with in-memory camera and recording-control state. |
+| `synology` | Development replacement for a small Surveillance Station API surface, with in-memory camera/control state and a fixture-backed recording catalogue. |
 
 Each binary runs as a separate process and communicates over sockets. They do not share memory or a database. The app currently consumes only camera RTSP; it does not yet call VAPIX or Synology.
 
@@ -96,7 +96,7 @@ The boundaries prevent two systems from trying to own the same recording concern
 - recording recovery
 - storage rotation and retention enforcement
 
-The `synology` crate does not implement those storage concerns. It only simulates API discovery, camera listing and recording-control state.
+The `synology` crate does not implement those storage concerns. It simulates API discovery, camera listing, recording-control state, and fixture-backed recording catalogue and download responses.
 
 ### Operator app owns
 
@@ -250,6 +250,8 @@ The app will use the Synology API to:
 - request recording start and stop
 - access the recording catalogue and exports where supported
 
+The future Synology client must call Recording `List` v5 for UTC `startTime` and `stopTime` boundaries, may call `List` v6 for additional catalogue metadata, and must use `Download` v6 for media. Until physical NAS responses validate the identity contract, it should correlate v5 events and v6 recordings by `(dsId, cameraId, id)`.
+
 It will use Axis VAPIX to:
 
 - consume RTSP H.264 or H.265 streams for previews and live analysis
@@ -303,17 +305,53 @@ The `synology` crate simulates the Surveillance Station API surface needed for a
 
 Camera definitions come from repeated `--camera <socket-address>` arguments. Argument order assigns IDs starting at `1` and names such as `camera-1`. State is an in-memory `Arc<Mutex<Vec<Camera>>>` and resets when the process stops.
 
-The simulator exposes these GET operations under `/webapi`:
+An optional `--recording-catalogue <path>` is loaded once at startup and attached to those configured cameras. `just synology` loads `synology/fixtures/recordings.json`, whose single five-second H.264, 1280x720, silent recording reads `camera/fixtures/default.mp4`. Each strict JSON row contains `id`, `cameraId`, `dsId`, `mountId`, `startTime`, `stopTime`, logical `filePath`, private fixture-relative `video`, `videoCodec`, `audioCodec`, `width`, `height`, and `locked`; `sizeByte` comes from the media file. IDs must be non-zero and unique, camera references and dimensions must be valid, times must increase, and the resolved media must be a regular MP4 file.
+
+The simulator exposes these operations under `/webapi`:
 
 | Endpoint | `api` | `method` | Version | Behavior |
 | --- | --- | --- | --- | --- |
 | `query.cgi` | `SYNO.API.Info` | `Query` | `1` | Describes the supported APIs. |
 | `entry.cgi` | `SYNO.SurveillanceStation.Camera` | `List` | `9` | Lists configured cameras and their reachability. |
 | `entry.cgi` | `SYNO.SurveillanceStation.ExternalRecording` | `Record` | `2` | Sets an in-memory recording flag for one reachable camera. |
+| `entry.cgi` | `SYNO.SurveillanceStation.Recording` | `List` | `5` | Returns timestamp-bearing `data.events`. |
+| `entry.cgi` | `SYNO.SurveillanceStation.Recording` | `List` | `6` | Returns catalogue metadata in `data.recordings`. |
+| `entry.cgi` or `entry.cgi/{filename}` | `SYNO.SurveillanceStation.Recording` | `Download` | `6` | Returns full or partial raw MP4 bytes. |
 
-Reachability is a TCP connection attempt with a 250 ms timeout. It does not call `/health`, identify the camera, or inspect RTSP. Recording requests do not contact the camera or create a recording; they only mutate simulator state. API failures use Synology-style JSON envelopes and generally return HTTP `200 OK`.
+`ExternalRecording.Record` is an independent legacy mock endpoint. It only mutates an in-memory flag, does not affect the immutable fixture catalogue, and is not used by Leo's continuous-recording workflow. Continuous archival recording remains a responsibility of physical Surveillance Station.
 
-The simulator has no authentication, persistence, recording catalogue, export, storage accounting, dynamic camera management or graceful shutdown. It should be bound only to a trusted development interface.
+### Recording API contract
+
+The implementation follows Surveillance Station Web API v3.11 while preserving a conflict between its primary Recording section and compatibility appendix:
+
+- Recording [`List` v6](https://global.download.synology.com/download/Document/Software/DeveloperGuide/Package/SurveillanceStation/All/enu/Surveillance_Station_Web_API.pdf#page=115), PDF viewer pages 115-117.
+- Recording [`Download` v6](https://global.download.synology.com/download/Document/Software/DeveloperGuide/Package/SurveillanceStation/All/enu/Surveillance_Station_Web_API.pdf#page=127), PDF viewer pages 127-128.
+- [Recording errors](https://global.download.synology.com/download/Document/Software/DeveloperGuide/Package/SurveillanceStation/All/enu/Surveillance_Station_Web_API.pdf#page=132), PDF viewer pages 132-133.
+- Conflicting [`List` v5 events appendix](https://global.download.synology.com/download/Document/Software/DeveloperGuide/Package/SurveillanceStation/All/enu/Surveillance_Station_Web_API.pdf#page=559), PDF viewer pages 559-561.
+
+The two List versions remain separate rather than merging fields from the conflicting schemas:
+
+| Method and version | Successful response | Intended client use |
+| --- | --- | --- |
+| `List` v5 | `data` contains `offset`, filtered `total`, current Unix `timestamp`, and `events`. Each event contains `archId`, string `audioCodec`, empty `bookmark`, `bookmarkCount`, `cameraId`, `dsId`, `folder`, `id`, `imgHeight`, `imgWidth`, `startTime`, `stopTime`, and string `videoCodec`. | Required for UTC recording boundaries. |
+| `List` v6 | `data` contains the requested `dsId`, filtered `total`, and `recordings`. Each recording contains `id`, numeric `videoCodec`, numeric `audioCodec`, `height`, `width`, `cameraId`, `cameraName`, `sizeByte`, logical `filePath`, and `locked`; it deliberately has no timestamps. | Optional richer catalogue metadata. |
+| `Download` v6 | Success is the MP4 body itself, without a JSON success envelope. `id` and `mountId` select the fixture; `offsetTimeMs` and `playTimeMs` optionally select a clip. | Required for full or bounded media retrieval. |
+
+`Download` accepts both `/webapi/entry.cgi` and `/webapi/entry.cgi/<filename>`; the filename suffix is optional and does not participate in lookup. Missing `id`, `mountId`, and `offsetTimeMs` default to `0`, while omitted `playTimeMs` means the configured duration remaining after the offset. A complete request returns the original fixture bytes. A partial request uses FFmpeg stream copy to produce an ephemeral MP4 response. Errors retain Synology's HTTP-200 JSON envelope: Recording code `400` means execution failed, `401` means invalid Recording parameters, and `414` means no recording matched `(mountId, id)`.
+
+The following behavior is intentionally simulator policy rather than a claim about physical NAS behavior:
+
+- **Simulator choice: anonymous authentication.** No login or privilege checks run, and `_sid` is accepted and ignored.
+- **Simulator choice: GET-only handling.** Only the documented GET-shaped routes are registered; POST is unsupported.
+- **Simulator choice: zero-bound interpretation.** `fromTime=0` and `toTime=0` mean unbounded lower and upper limits.
+- **Simulator choice: half-open overlap.** A recording matches when `(fromTime == 0 || stopTime > fromTime) && (toTime == 0 || startTime < toTime)`.
+- **Simulator choice: deterministic sorting.** Results sort by `(startTime, cameraId, id)` before pagination; `total` is the filtered count and an offset past it returns an empty page.
+- **Simulator choice: strict range rejection.** Download rejects a zero `playTimeMs`, an offset at or beyond the configured duration, overflow, or an end beyond that duration with code `401`; it does not clamp the range.
+- **Simulator choice: `Content-Type`.** Successful Download responses use `video/mp4` as a convenience. Clients must not depend on that undocumented header.
+
+Reachability is a TCP connection attempt with a 250 ms timeout. It does not call `/health`, identify the camera, or inspect RTSP. API failures use Synology-style JSON envelopes and generally return HTTP `200 OK`.
+
+The simulator does not ingest RTSP, persist recordings, perform retention, or create media. It only reads pre-existing fixture files; a partial Download's temporary clip is ephemeral response generation, not a recording. It also omits storage accounting, recording mutation, bookmarks, CMS behavior, dynamic camera management, HTTP range streaming, and graceful shutdown. It should be bound only to a trusted development interface.
 
 ## Network and time
 
