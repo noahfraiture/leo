@@ -10,22 +10,22 @@ These distinctions are part of the domain model and should be reflected in code 
 
 | Term | Definition |
 | --- | --- |
-| **Session** | Full recording period across all cameras. |
-| **Recording** | Raw video file produced by one camera. |
-| **Video** | Recording exported to a standard usable format. |
+| **Session** | Software-defined exercise interval aligned with continuously recorded camera media. |
+| **Recording** | Raw camera media continuously archived and catalogued by Surveillance Station. |
+| **Video** | One catalogued recording segment with camera and UTC bounds used for sampling. |
 | **Video stream** | Continuous encoded video data. |
 | **Frame** | One decoded image. |
 | **Frame rate** | Number of frames produced per second. |
 | **Sampling rate** | Number of frames selected per second. |
 | **Sampling schedule** | Sampling rate changes over time. |
 | **Sample** | A selected frame. |
-| **Sample sequence** | Ordered samples selected from one recording. |
+| **Sample sequence** | Ordered samples for one camera across its catalogued recording segments. |
 | **Frame index** | Position of a frame in a recording. |
 | **Sample index** | Position of a sample in a sample sequence. |
 | **Frame timestamp** | Frame position on the session timeline. |
-| **Frame group** | Frames from different recordings associated with the same timestamp. |
-| **Frame batch** | Ordered frame groups covering a bounded time range. |
-| **Session sequence** | Ordered frame groups covering the full session. |
+| **Frame set** | Available camera samples associated with the same session timestamp. |
+| **Frame batch** | Ordered frame sets covering a bounded time range. |
+| **Session sequence** | Ordered frame sets covering the full session. |
 | **Preview** | Live stream shown to the operator; it is not the archival recording. |
 | **Virtual camera** | The `camera` process used in development instead of a physical Axis camera. |
 | **Synology simulator** | The `synology` process that implements a narrow subset of the Surveillance Station API. |
@@ -60,13 +60,13 @@ Camera source
 (Axis camera or virtual camera)
 |
 |-- high-quality stream --> Synology Surveillance Station --> archival recordings
-|                            (`synology` serves fixture catalogue and control APIs)
+|                            | (continuous on physical hardware;
+|                            |  fixture-backed in the simulator)
+|                            `-- catalogue/download --> app analysis pipeline
+|                                                         (backend implemented; UI not wired)
 |
 |-- preview RTSP ---------> app-owned MediaMTX --> WHEP/WebRTC --> operator UI
 |                            (implemented)
-|
-|-- frames --------------> analysis pipeline
-|                            (scaffolding only)
 |
 `-- VAPIX API <----------> operator app
                              (virtual API exists; app client is not implemented)
@@ -76,11 +76,11 @@ The Cargo workspace contains three independent Rust binaries:
 
 | Component | Responsibility |
 | --- | --- |
-| `app` | Dioxus desktop UI, preview bridge, session workflow and analysis orchestration. Preview is implemented; the other workflows remain incomplete. |
+| `app` | Dioxus desktop UI, preview bridge, JSONL session metadata, Synology recording access and offline analysis orchestration. Only preview is wired to the UI. |
 | `camera` | Development replacement for one Axis camera, with a VAPIX-shaped HTTP API and fixture-backed RTSP stream. |
 | `synology` | Development replacement for a small Surveillance Station API surface, with in-memory camera/control state and a fixture-backed recording catalogue. |
 
-Each binary runs as a separate process and communicates over sockets. They do not share memory or a database. The app currently consumes only camera RTSP; it does not yet call VAPIX or Synology.
+Each binary runs as a separate process and communicates over sockets. They do not share memory or a database. The running UI currently consumes only camera RTSP; the session, Synology and analysis backends are implemented but are not wired to the Analyze route, and the app does not yet call VAPIX.
 
 ## Ownership boundaries
 
@@ -89,10 +89,10 @@ The boundaries prevent two systems from trying to own the same recording concern
 ### Surveillance Station owns
 
 - archival recording
-- reliable execution of recording start and stop requests
+- continuous recording execution independent of session actions
 - archival stream configuration
 - reconnection after camera or network interruptions
-- recording catalogue and health monitoring
+- recording catalogue, media download and health monitoring
 - recording recovery
 - storage rotation and retention enforcement
 
@@ -102,17 +102,19 @@ The `synology` crate does not implement those storage concerns. It simulates API
 
 - session workflow and naming
 - operator interface
-- recording requests sent through the Synology API
+- durable JSONL session events
+- software-only camera participation and sampling schedules
 - low-resolution previews
-- analysis stream consumption
+- analysis planning, orchestration and checkpoints
+- temporary batch-local processing media
 - timestamped custom metadata
 - supported PTZ or digital-view controls
 - operator presets
-- session retention, export and deletion decisions
+- operator retention, export and deletion decisions
 - downstream processing status
 - alarms presented to the operator
 
-Only live preview and its failure presentation are currently connected to the UI.
+Only live preview and its failure presentation are currently connected to the UI. The session and analysis backends are not yet connected to operator controls.
 
 ### Axis VAPIX provides
 
@@ -125,7 +127,7 @@ Only live preview and its failure presentation are currently connected to the UI
 - camera-side events
 - advanced settings that Surveillance Station does not expose
 
-The app must request archival recording through Surveillance Station rather than becoming a second archival recorder through VAPIX. It may decide what session data to retain, export or delete, while Surveillance Station enforces storage operations and maintains the recording catalogue. The app and Surveillance Station must not both modify the same recording profile.
+The app must not become a second archival recorder through VAPIX. It accesses media through supported Surveillance Station catalogue and download APIs rather than internal NAS files. Surveillance Station maintains continuous recording, storage, catalogue and retention execution; the app records operator decisions and orchestrates downstream analysis.
 
 ## Desktop app
 
@@ -188,69 +190,60 @@ The app has two routes under a shared layout:
 
 The intended operator workflow includes:
 
-- a master session control that starts the session clock and requests recording for enabled cameras
+- a master session control that starts and ends the software session clock and event log
 - live views for all cameras
 - per-camera recording and health status
 - warnings with suggested operator actions
-- per-camera enable or disable, sampling rate and digital zoom controls
+- per-camera software participation, sampling rate and digital zoom controls
 - timestamped notes and bookmarks
 - playback of saved videos where needed
 - an action to discard a session recording
 
-Only the live preview grid is functional today. Camera status badges, timestamps, selection labels, settings and route sidebars are static presentation.
+Physical cameras and Surveillance Station continue recording regardless of the master session action or participation events. Only the live preview grid is functional in the UI today; camera status badges, timestamps, selection labels, settings and route sidebars are static presentation.
 
 ### Session metadata
 
-Videos and metadata are grouped by session. The metadata model is an ordered list of timestamped events containing:
+The app persists session metadata as one newline-terminated `events.jsonl` file. Each ordered event contains a schema version, sequence number, session ID, UTC audit timestamp, deterministic session-relative offset and one action. The implemented actions are session start with the initial camera configuration, camera participation changes, sampling-interval changes and session end.
 
-- session ID
-- timestamp
-- action
-  - sampling rate: camera and rate
-  - digital zoom: camera, position and zoom
-  - bookmark: note
-  - recording: camera and enabled or disabled state
-
-Camera parameters belong to a session and camera, not to one recording file. Sampling-rate events form the sampling schedule used by later processing. Session persistence and event storage are not implemented yet.
+Participation and interval events affect only software sampling. They never start or stop physical recording. The backend implements durable event writes and completed-session replay; UI controls and reopening an active session after application restart remain deferred. Analysis stores its separate `analysis.json` checkpoint beside the event log.
 
 ### Retention and export
 
 The session workflow must:
 
-- group recordings, exported videos and metadata by session
+- align catalogued recording segments and metadata by session time
 - keep metadata aligned with the session timeline
 - warn when storage is insufficient and propose an operator action
-- export recordings to a standard format for manual or offline analysis
+- request supported media downloads for manual or offline processing
 - allow the operator to discard a session recording deliberately
 
-Surveillance Station performs the storage operations; the app records the operator's decision and tracks its result. This workflow is not implemented yet.
+Surveillance Station owns the recordings, storage, catalogue, download service and retention execution. The app records the operator's decision and tracks its result. The retention UI workflow is not implemented yet.
 
 ### Analysis pipeline
 
-The analysis model preserves the distinction between recordings, frames and selected samples:
+The backend analysis pipeline preserves the distinction between catalogue segments, planned samples and extracted frames:
 
-1. Decode each recording into frames with frame indices and frame timestamps on the shared session timeline.
-2. Apply that camera's sampling schedule to produce a sample sequence with its own sample indices.
-3. Optionally blur faces during offline processing.
-4. Associate samples from different recordings into frame groups by frame timestamp.
-5. Order the frame groups into the session sequence.
-6. Divide the sequence into bounded frame batches.
-7. Analyze each batch with the previous batch context and the exercise checklist.
-8. Aggregate the extracted actions and compare them with the expected sequence.
+1. Load the completed session event log and replay each camera's software sampling schedule.
+2. List Surveillance Station catalogue segments intersecting the complete session interval.
+3. Match every planned sample to exactly one segment, build per-camera sequences and merge them into chronological frame sets.
+4. Divide the frame sets into fixed-size batches and resume after the completed checkpoint prefix.
+5. For only the current batch, merge required windows per segment and download them into a temporary directory.
+6. Extract temporary JPEGs at the planned offsets with FFmpeg and append them directly to the Agent prompt in canonical order.
+7. Call the Agent with the checklist and previous complete response, then atomically replace `analysis.json` after success.
 
-The `app/src/analysis/` module is early scaffolding and is not connected to the Analyze route or a complete pipeline.
+Downloaded clips are batch-scoped, and each extracted JPEG file is removed after its bytes are read, so temporary media disappears on every success or failure path. Cross-batch video caching is intentionally absent. If transfer becomes a measured bottleneck, extraction may move to a NAS-side FFmpeg or frame-extraction service. The backend pipeline is implemented but is not wired to the Dioxus Analyze route.
 
 Live analysis may consume a dedicated low-resolution camera stream. Offline analysis should use retained recordings so temporary processing failures can be retried without losing frames. Polling VAPIX JPEG snapshots is simpler, but delays produce irregular sampling and missed frames cannot be recovered; it is not equivalent to decoding a recording according to a sampling schedule.
 
 ### External integrations
 
-The app will use the Synology API to:
+The implemented Synology client uses the supported API to:
 
-- query camera and recording status
-- request recording start and stop
-- access the recording catalogue and exports where supported
+- open one explicit optional SID login session
+- list Recording API version 5 catalogue entries from `data.events[]` with `id`, `cameraId`, `startTime` and `stopTime`
+- download bounded recording-relative media ranges with Recording API version 6 into atomically replaced local files
 
-The future Synology client must call Recording `List` v5 for UTC `startTime` and `stopTime` boundaries, may call `List` v6 for additional catalogue metadata, and must use `Download` v6 for media. Until physical NAS responses validate the identity contract, it should correlate v5 events and v6 recordings by `(dsId, cameraId, id)`.
+The client currently relies on `List` v5 timestamps and `Download` v6. Optional `List` v6 metadata and composite `(dsId, cameraId, id)` correlation remain deferred until physical NAS responses require them.
 
 It will use Axis VAPIX to:
 
@@ -260,7 +253,7 @@ It will use Axis VAPIX to:
 - request snapshots
 - select preview or analysis stream profiles
 
-Neither client is implemented in the app yet. The corresponding development simulators define only the narrow behavior described below.
+The Synology recording client is implemented for backend use but is not invoked by the current UI. The Axis client is not implemented. The development Synology simulator provides fixture-backed `List` v5/v6 and `Download` v6 responses but does not create or persist recordings.
 
 ### Code boundaries
 
@@ -274,7 +267,11 @@ Neither client is implemented in the app yet. The corresponding development simu
 | `app/src/views/monitor/` | Preview grid and unavailable-state guidance. |
 | `app/src/views/analyze/` | Analysis route placeholder. |
 | `app/src/views/navbar.rs` | Shared navigation, sidebar and route body layout. |
-| `app/src/analysis/` | Incomplete video and analysis-agent domain scaffolding. |
+| `app/src/session/` | Durable JSONL session events, completed-session replay and software sampling actions. |
+| `app/src/recording/` | Supported Surveillance Station catalogue, login and media download client. |
+| `app/src/analysis/video/` | Sampling schedules, catalogue-backed sequences, frame sets and FFmpeg extraction. |
+| `app/src/analysis/agent/` | Stateless structured model request transport. |
+| `app/src/analysis/analyzer/` | Batch-local media materialization, prompt construction and atomic resumable checkpoints. |
 
 ## Virtual camera
 
@@ -301,7 +298,7 @@ The camera-owned MediaMTX serves the supplied fixture at `rtsp://<rtsp-address>/
 
 ## Synology simulator
 
-The `synology` crate simulates the Surveillance Station API surface needed for application development. It does not record or proxy video.
+The `synology` crate simulates the Surveillance Station API surface used for development. It serves fixture-backed catalogue and download responses but does not record or proxy video or model the physical deployment's continuous archive.
 
 Camera definitions come from repeated `--camera <socket-address>` arguments. Argument order assigns IDs starting at `1` and names such as `camera-1`. State is an in-memory `Arc<Mutex<Vec<Camera>>>` and resets when the process stops.
 
@@ -369,7 +366,7 @@ A physical deployment connects the cameras and NAS to the PoE switch and assigns
 
 ## Reliability and security constraints
 
-Archival recording must continue when the operator laptop fails or sleeps. The NAS or VMS therefore owns recording execution and storage, while the laptop remains a replaceable control and preview client. The NAS and PoE switch should have protected power so storage and cameras fail predictably together.
+Archival recording must continue when the operator laptop fails or sleeps. Physical cameras and Surveillance Station are therefore configured to record continuously; session and sampling actions do not control recording execution. The laptop remains a replaceable metadata, analysis, control and preview client. The NAS and PoE switch should have protected power so storage and cameras fail predictably together.
 
 Production deployment requires:
 
