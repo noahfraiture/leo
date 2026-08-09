@@ -2,7 +2,7 @@ use rig_core::client::ProviderClientError;
 use rig_core::completion::CompletionError;
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum Error {
+pub(in crate::analysis) enum Error {
     #[error("client configuration failed")]
     ProviderError(#[from] ProviderClientError),
 
@@ -16,4 +16,4 @@ pub(crate) enum Error {
     MissingTextResponse,
 }
 
-pub(crate) type Result<T> = std::result::Result<T, Error>;
+pub(super) type Result<T> = std::result::Result<T, Error>;

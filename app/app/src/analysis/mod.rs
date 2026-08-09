@@ -1,11 +1,7 @@
-//! Offline video-analysis orchestration from materialized frame batches to resumable model results.
+//! Offline session-video planning, materialization, model analysis, and resumable results.
 
 mod agent;
-mod runner;
+mod analyzer;
 mod video;
 
-pub(crate) use agent::{
-    Agent, AnalysisBatch, AnalysisRequest, AnalysisResponse, ChecklistProgress,
-    Error as AgentError, Observation, OpenAiAgent, PromptFrame, PromptFrameSet,
-};
-pub(crate) use runner::{AnalysisRunner, Error as RunnerError};
+pub(crate) use video::Video;
