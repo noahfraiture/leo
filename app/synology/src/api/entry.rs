@@ -4,8 +4,9 @@ use axum::{
 };
 use serde::{Deserialize, Deserializer};
 
-use super::{ApiError, CameraState, camera, external_recording};
+use super::{ApiError, CameraState, camera, external_recording, recording};
 
+/// Shared `entry.cgi` query fields, kept raw until method-specific validation.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct EntryRequest {
@@ -14,8 +15,19 @@ pub(super) struct EntryRequest {
     pub version: String,
     pub camera_id: Option<CameraId>,
     pub action: Option<RecordingAction>,
+    pub offset: Option<String>,
+    pub limit: Option<String>,
+    pub camera_ids: Option<String>,
+    pub from_time: Option<String>,
+    pub to_time: Option<String>,
+    pub ds_id: Option<String>,
+    pub mount_id: Option<String>,
+    pub id: Option<String>,
+    pub offset_time_ms: Option<String>,
+    pub play_time_ms: Option<String>,
 }
 
+/// Camera ID parsed without losing Synology's method-level error precedence.
 pub(super) enum CameraId {
     Valid(u32),
     Invalid,
@@ -28,6 +40,7 @@ impl<'de> Deserialize<'de> for CameraId {
     }
 }
 
+/// Supported ExternalRecording actions plus an explicitly invalid value.
 pub(super) enum RecordingAction {
     Start,
     Stop,
@@ -44,6 +57,7 @@ impl<'de> Deserialize<'de> for RecordingAction {
     }
 }
 
+/// Dispatches `entry.cgi` requests to the selected Surveillance Station API.
 pub(super) async fn handle(
     State(cameras): State<CameraState>,
     request: Result<Query<EntryRequest>, QueryRejection>,
@@ -52,6 +66,7 @@ pub(super) async fn handle(
     match request.api.as_str() {
         camera::API => camera::handle(cameras, request).await,
         external_recording::API => external_recording::handle(cameras, request).await,
+        recording::API => recording::handle(cameras, request).await,
         _ => Err(ApiError::UnknownApi),
     }
 }

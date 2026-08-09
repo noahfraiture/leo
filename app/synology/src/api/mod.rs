@@ -10,23 +10,29 @@ mod entry;
 mod error;
 mod external_recording;
 mod info;
+mod recording;
 
 use error::ApiError;
 
+/// Shared camera and fixture-catalogue state used by API handlers.
 pub type CameraState = Arc<Mutex<Vec<Camera>>>;
 
+/// Builds the simulator routes under the caller-provided `/webapi` prefix.
 pub fn router() -> Router<CameraState> {
     Router::new()
         .route("/query.cgi", get(info::handle))
         .route("/entry.cgi", get(entry::handle))
+        .route("/entry.cgi/{filename}", get(entry::handle))
 }
 
+/// Standard successful Synology JSON envelope.
 #[derive(Serialize)]
 struct Success<T> {
     success: bool,
     data: T,
 }
 
+/// Wraps result data in the standard successful JSON envelope.
 pub(super) fn success<T: Serialize>(data: T) -> axum::response::Response {
     Json(Success {
         success: true,

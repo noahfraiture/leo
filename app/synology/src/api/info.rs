@@ -10,6 +10,7 @@ use super::{ApiError, success};
 
 const API: &str = "SYNO.API.Info";
 
+/// Query fields accepted by the unauthenticated API discovery endpoint.
 #[derive(Deserialize)]
 pub(super) struct InfoRequest {
     pub api: String,
@@ -18,6 +19,7 @@ pub(super) struct InfoRequest {
     pub query: String,
 }
 
+/// Discoverable path and version range for one simulated API.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ApiDescription {
@@ -26,6 +28,7 @@ struct ApiDescription {
     max_version: u8,
 }
 
+/// Validates and serves `SYNO.API.Info.Query` requests.
 pub(super) async fn handle(
     request: Result<Query<InfoRequest>, QueryRejection>,
 ) -> Result<Response, ApiError> {
@@ -61,6 +64,14 @@ fn descriptions(query: &str) -> BTreeMap<&'static str, ApiDescription> {
                 max_version: 2,
             },
         ),
+        (
+            super::recording::API,
+            ApiDescription {
+                path: "entry.cgi",
+                min_version: 5,
+                max_version: 6,
+            },
+        ),
     ]
     .into_iter()
     .filter(|(name, _)| {
@@ -87,6 +98,7 @@ mod tests {
                 &[
                     "SYNO.SurveillanceStation.Camera",
                     "SYNO.SurveillanceStation.ExternalRecording",
+                    "SYNO.SurveillanceStation.Recording",
                 ][..],
             ),
             (
@@ -98,6 +110,7 @@ mod tests {
                 &[
                     "SYNO.SurveillanceStation.Camera",
                     "SYNO.SurveillanceStation.ExternalRecording",
+                    "SYNO.SurveillanceStation.Recording",
                 ][..],
             ),
             (

@@ -5,6 +5,7 @@ use axum::{
 };
 use serde::Serialize;
 
+/// Synology error codes returned in HTTP-200 JSON envelopes.
 pub(super) enum ApiError {
     Unknown = 100,
     InvalidParameters = 101,
@@ -13,8 +14,10 @@ pub(super) enum ApiError {
     UnsupportedVersion = 104,
     ExecutionFailed = 400,
     InvalidRecordingParameters = 401,
+    UnknownRecording = 414,
 }
 
+/// Standard failed Synology JSON envelope.
 #[derive(Serialize)]
 struct Failure {
     success: bool,
