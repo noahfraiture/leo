@@ -7,8 +7,10 @@ edition = "2024"
 axum = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "time"] }
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "macros", "net", "process", "rt-multi-thread", "time"] }
 
 [dev-dependencies]
-serde_json.workspace = true
 tower = { workspace = true }

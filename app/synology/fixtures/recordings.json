@@ -1,0 +1,17 @@
+[
+  {
+    "id": 1,
+    "cameraId": 1,
+    "dsId": 0,
+    "mountId": 0,
+    "startTime": 1786147200,
+    "stopTime": 1786147205,
+    "filePath": "20260808AM/camera-1-1786147200.mp4",
+    "video": "../../camera/fixtures/default.mp4",
+    "videoCodec": 3,
+    "audioCodec": 0,
+    "width": 1280,
+    "height": 720,
+    "locked": false
+  }
+]
