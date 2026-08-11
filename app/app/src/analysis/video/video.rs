@@ -53,16 +53,14 @@ impl SamplingSchedule {
         let mut sample_every = camera.sample_every;
         let mut period_start = enabled.then_some(Duration::ZERO);
         let mut periods = Vec::new();
-        let mut action_index = 0;
 
-        while action_index < session.actions.len() {
-            let offset = session.actions[action_index].0;
+        for actions in session.actions.chunk_by(|left, right| left.0 == right.0) {
+            let offset = actions[0].0;
             let previous_enabled = enabled;
             let previous_sample_every = sample_every;
 
-            while action_index < session.actions.len() && session.actions[action_index].0 == offset
-            {
-                match &session.actions[action_index].1 {
+            for (_, action) in actions {
+                match action {
                     OperatorAction::SetCameraParticipation {
                         camera_id: action_camera_id,
                         enabled: next_enabled,
@@ -96,7 +94,6 @@ impl SamplingSchedule {
                     }
                     _ => {}
                 }
-                action_index += 1;
             }
 
             if enabled == previous_enabled && sample_every == previous_sample_every {
