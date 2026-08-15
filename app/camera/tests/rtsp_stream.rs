@@ -5,12 +5,19 @@ use std::{
     io::{self, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     os::unix::{fs::PermissionsExt, process::CommandExt},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
 };
 
+use backend::{
+    analysis::extract_jpeg_for_test,
+    recording::{
+        RecorderEvent, RecorderSettings, RecorderStatus, RecordingCamera, RecordingSegment,
+        spawn_for_test,
+    },
+};
 use tempfile::NamedTempFile;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -19,6 +26,7 @@ const READER_DURATION: Duration = Duration::from_secs(12);
 const MIN_READER_DURATION: Duration = Duration::from_secs(11);
 const READER_TIMEOUT: Duration = Duration::from_secs(30);
 const CAMERA_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+const RECORDER_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const LISTENER_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const ESRCH: i32 = 3;
@@ -122,6 +130,350 @@ fn fixture_streams_h264_to_two_readers_and_stops_cleanly() {
     assert_listener_closes("RTSP", rtsp_address);
 }
 
+#[tokio::test]
+#[ignore = "requires MediaMTX, FFmpeg, and FFprobe from the Nix development shell"]
+async fn host_recorder_records_playable_mkv() {
+    let (http_address, rtsp_address) = reserve_addresses();
+    let fixture = camera_fixture("salon-1.mp4");
+    let mut camera = start_camera(http_address, rtsp_address, &fixture);
+    let recordings = tempfile::tempdir().expect("create recorder output directory");
+    let recordings_root = create_recordings_root(recordings.path());
+    let camera_directory = recordings_root.join("camera-1");
+    let processes = tempfile::tempdir().expect("create recorder process directory");
+    let (ffmpeg, ffmpeg_pids) = instrumented_executable(processes.path(), "ffmpeg");
+    let (ffprobe, ffprobe_pids) = instrumented_executable(processes.path(), "ffprobe");
+    let (runtime, recorder, mut events) =
+        spawn_for_test(recorder_settings(), ffmpeg, ffprobe).expect("start recorder runtime");
+
+    tokio::time::timeout(
+        RECORDER_OPERATION_TIMEOUT,
+        recorder.start(
+            vec![RecordingCamera {
+                id: 1,
+                rtsp_url: format!("rtsp://{rtsp_address}/axis-media/media.amp"),
+            }],
+            recordings_root,
+        ),
+    )
+    .await
+    .expect("host recorder Start timed out")
+    .expect("start host recorder");
+    wait_for_recorder_status(&mut events, RecorderStatus::Recording);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let segments = tokio::time::timeout(RECORDER_OPERATION_TIMEOUT, recorder.stop())
+        .await
+        .expect("host recorder Stop timed out")
+        .expect("stop host recorder");
+    wait_for_recorder_status(&mut events, RecorderStatus::Stopped);
+    runtime.shutdown().expect("shut down recorder runtime");
+
+    assert_eq!(segments.len(), 1, "expected one finalized segment");
+    let segment = &segments[0];
+    assert_eq!(segment.camera_id, 1);
+    assert!(segment.start_utc_ms < segment.end_utc_ms);
+    assert_finalized_files_match_segments(&camera_directory, &segments);
+    assert_finalized_matroska_h264(&segment.path);
+
+    let camera_pid = camera.child.id() as i32;
+    let status = camera.stop(CAMERA_SHUTDOWN_TIMEOUT);
+    assert!(status.success(), "camera exited unsuccessfully: {status}");
+    wait_for_process_group_empty(camera.process_group, camera_pid, CLEANUP_TIMEOUT);
+    assert_listener_closes("HTTP", http_address);
+    assert_listener_closes("RTSP", rtsp_address);
+    assert_recorded_processes_stopped(&ffmpeg_pids);
+    assert_recorded_processes_stopped(&ffprobe_pids);
+}
+
+#[tokio::test]
+#[ignore = "requires MediaMTX, FFmpeg, and FFprobe from the Nix development shell"]
+async fn host_recorder_reconnects_into_a_second_segment() {
+    let (http_address, rtsp_address) = reserve_addresses();
+    let fixture = camera_fixture("salon-2.mp4");
+    let mut camera = start_camera(http_address, rtsp_address, &fixture);
+    let recordings = tempfile::tempdir().expect("create recorder output directory");
+    let recordings_root = create_recordings_root(recordings.path());
+    let camera_directory = recordings_root.join("camera-1");
+    let processes = tempfile::tempdir().expect("create recorder process directory");
+    let (ffmpeg, ffmpeg_pids) = instrumented_executable(processes.path(), "ffmpeg");
+    let (ffprobe, ffprobe_pids) = instrumented_executable(processes.path(), "ffprobe");
+    let (runtime, recorder, mut events) =
+        spawn_for_test(recorder_settings(), ffmpeg, ffprobe).expect("start recorder runtime");
+
+    tokio::time::timeout(
+        RECORDER_OPERATION_TIMEOUT,
+        recorder.start(
+            vec![RecordingCamera {
+                id: 1,
+                rtsp_url: format!("rtsp://{rtsp_address}/axis-media/media.amp"),
+            }],
+            recordings_root,
+        ),
+    )
+    .await
+    .expect("host recorder Start timed out")
+    .expect("start host recorder");
+    wait_for_recorder_status(&mut events, RecorderStatus::Recording);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let first_camera_pid = camera.child.id() as i32;
+    let status = camera.stop(CAMERA_SHUTDOWN_TIMEOUT);
+    assert!(status.success(), "camera exited unsuccessfully: {status}");
+    wait_for_process_group_empty(camera.process_group, first_camera_pid, CLEANUP_TIMEOUT);
+    assert_listener_closes("HTTP", http_address);
+    assert_listener_closes("RTSP", rtsp_address);
+    wait_for_recorder_status(&mut events, RecorderStatus::Reconnecting);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let mut camera = start_camera(http_address, rtsp_address, &fixture);
+    wait_for_recorder_status(&mut events, RecorderStatus::Recording);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let segments = tokio::time::timeout(RECORDER_OPERATION_TIMEOUT, recorder.stop())
+        .await
+        .expect("host recorder Stop timed out")
+        .expect("stop host recorder");
+    wait_for_recorder_status(&mut events, RecorderStatus::Stopped);
+    runtime.shutdown().expect("shut down recorder runtime");
+
+    assert_eq!(segments.len(), 2, "expected pre- and post-gap segments");
+    assert_finalized_files_match_segments(&camera_directory, &segments);
+    assert_eq!(segments[0].camera_id, 1);
+    assert_eq!(segments[1].camera_id, 1);
+    assert!(segments[0].start_utc_ms < segments[1].start_utc_ms);
+    let gap_ms = segments[1].start_utc_ms - segments[0].end_utc_ms;
+    assert!(
+        gap_ms > 0,
+        "expected a positive reconnect gap, got {gap_ms}ms"
+    );
+    for segment in &segments {
+        assert!(segment.start_utc_ms < segment.end_utc_ms);
+        assert_finalized_matroska_h264(&segment.path);
+        let jpeg = extract_jpeg_for_test(&segment.path, Duration::from_millis(500))
+            .expect("extract JPEG from finalized segment");
+        assert!(jpeg.starts_with(&[0xff, 0xd8, 0xff]));
+        assert!(jpeg.ends_with(&[0xff, 0xd9]));
+    }
+
+    let camera_pid = camera.child.id() as i32;
+    let status = camera.stop(CAMERA_SHUTDOWN_TIMEOUT);
+    assert!(status.success(), "camera exited unsuccessfully: {status}");
+    wait_for_process_group_empty(camera.process_group, camera_pid, CLEANUP_TIMEOUT);
+    assert_listener_closes("HTTP", http_address);
+    assert_listener_closes("RTSP", rtsp_address);
+    assert_recorded_processes_stopped(&ffmpeg_pids);
+    assert_recorded_processes_stopped(&ffprobe_pids);
+}
+
+fn camera_fixture(name: &str) -> PathBuf {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join(name);
+    assert!(
+        fs::metadata(&path).is_ok_and(|metadata| metadata.is_file()),
+        "missing camera fixture: {}",
+        path.display()
+    );
+    path
+}
+
+fn start_camera(
+    http_address: SocketAddr,
+    rtsp_address: SocketAddr,
+    fixture: &Path,
+) -> ProcessGuard {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_camera"));
+    command
+        .args(["--address", &http_address.to_string()])
+        .args(["--rtsp-address", &rtsp_address.to_string()])
+        .args([
+            "--video",
+            fixture.to_str().expect("fixture path should be UTF-8"),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut camera = ProcessGuard::spawn("camera", &mut command);
+    wait_for_health(&mut camera, http_address);
+    camera
+}
+
+fn create_recordings_root(directory: &Path) -> PathBuf {
+    let root = directory.join("recordings");
+    fs::create_dir_all(root.join("camera-1")).expect("create camera recording directory");
+    root
+}
+
+fn recorder_settings() -> RecorderSettings {
+    RecorderSettings {
+        io_timeout: Duration::from_secs(10),
+        retry_delay: Duration::from_secs(1),
+        stop_timeout: Duration::from_secs(5),
+    }
+}
+
+fn instrumented_executable(directory: &Path, name: &str) -> (PathBuf, PathBuf) {
+    let wrapper = directory.join(format!("{name}-wrapper"));
+    let pids = wrapper.with_extension("pids");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nif [ \"$#\" -ne 1 ] || [ \"$1\" != \"-version\" ]; then\n  printf '%s\\n' \"$$\" >> \"$0.pids\"\nfi\nexec {name} \"$@\"\n"
+        ),
+    )
+    .expect("write instrumented executable wrapper");
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))
+        .expect("make instrumented wrapper executable");
+    (wrapper, pids)
+}
+
+fn wait_for_recorder_status(
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<RecorderEvent>,
+    expected: RecorderStatus,
+) {
+    let timeout = Duration::from_secs(30);
+    let deadline = Instant::now() + timeout;
+    loop {
+        match events.try_recv() {
+            Ok(RecorderEvent::Status {
+                camera_id: 1,
+                status,
+                ..
+            }) if status == expected => return,
+            Ok(RecorderEvent::Faulted { message, .. }) => {
+                panic!("unexpected recorder fault: {message}")
+            }
+            Ok(_) | Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                panic!("recorder event channel disconnected")
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "recorder did not report {expected:?} within {timeout:?}"
+        );
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn assert_finalized_files_match_segments(camera_directory: &Path, segments: &[RecordingSegment]) {
+    for segment in segments {
+        let metadata =
+            fs::symlink_metadata(&segment.path).expect("read finalized segment metadata");
+        assert!(
+            metadata.file_type().is_file(),
+            "returned segment is not a direct regular file: {}",
+            segment.path.display()
+        );
+        assert_eq!(
+            segment
+                .path
+                .extension()
+                .and_then(|extension| extension.to_str()),
+            Some("mkv"),
+            "returned segment does not use the .mkv extension: {}",
+            segment.path.display()
+        );
+        let file_name = segment
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("finalized segment filename should be UTF-8");
+        assert!(
+            !file_name.ends_with(".partial.mkv"),
+            "returned segment is a diagnostic partial: {}",
+            segment.path.display()
+        );
+    }
+
+    let mut finalized = fs::read_dir(camera_directory)
+        .expect("read camera output directory")
+        .filter_map(|entry| {
+            let path = entry.expect("read camera output entry").path();
+            let metadata = fs::symlink_metadata(&path).expect("read camera output metadata");
+            (metadata.file_type().is_file()
+                && path.extension().and_then(|extension| extension.to_str()) == Some("mkv")
+                && !path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().ends_with(".partial.mkv")))
+            .then_some(path)
+        })
+        .collect::<Vec<_>>();
+    finalized.sort_by_key(|path| {
+        path.file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| stem.parse::<i64>().ok())
+            .expect("finalized segment should have a UTC millisecond filename")
+    });
+    assert_eq!(
+        finalized,
+        segments
+            .iter()
+            .map(|segment| segment.path.clone())
+            .collect::<Vec<_>>(),
+        "camera directory finalized files differ from returned segments"
+    );
+}
+
+fn assert_finalized_matroska_h264(path: &Path) {
+    let output = Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "v:0", "-count_packets"])
+        .args([
+            "-show_entries",
+            "stream=codec_name,nb_read_packets:format=format_name",
+        ])
+        .args(["-of", "default=noprint_wrappers=1"])
+        .arg(path)
+        .output()
+        .expect("start FFprobe for finalized segment");
+    let stdout = String::from_utf8(output.stdout).expect("FFprobe stdout should be UTF-8");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "FFprobe failed for {}: {}\n{stderr}",
+        path.display(),
+        output.status
+    );
+    assert_eq!(entry(&stdout, "codec_name"), Some("h264"));
+    assert!(
+        entry(&stdout, "format_name")
+            .is_some_and(|formats| formats.split(',').any(|format| format == "matroska")),
+        "FFprobe did not report Matroska for {}: {stdout}",
+        path.display()
+    );
+    let packets = entry(&stdout, "nb_read_packets")
+        .and_then(|packets| packets.parse::<u64>().ok())
+        .unwrap_or_default();
+    assert!(packets > 0, "no H.264 packets in {}", path.display());
+}
+
+fn assert_recorded_processes_stopped(pids: &Path) {
+    let pids = fs::read_to_string(pids).expect("read recorded child process IDs");
+    let pids = pids
+        .lines()
+        .map(|pid| pid.parse::<i32>().expect("parse recorded child process ID"))
+        .collect::<Vec<_>>();
+    assert!(
+        !pids.is_empty(),
+        "no instrumented child process was observed"
+    );
+
+    for pid in pids {
+        let deadline = Instant::now() + CLEANUP_TIMEOUT;
+        loop {
+            match signal(pid, SIGNAL_EXISTS) {
+                Err(error) if error.raw_os_error() == Some(ESRCH) => break,
+                Err(error) => panic!("inspect recorder process {pid}: {error}"),
+                Ok(()) => {}
+            }
+            assert!(
+                Instant::now() < deadline,
+                "recorder process {pid} remained alive after {CLEANUP_TIMEOUT:?}"
+            );
+            thread::sleep(POLL_INTERVAL);
+        }
+    }
+}
+
 fn reserve_addresses() -> (SocketAddr, SocketAddr) {
     let http = TcpListener::bind(("127.0.0.1", 0)).expect("reserve HTTP port");
     let rtsp = TcpListener::bind(("127.0.0.1", 0)).expect("reserve RTSP port");
@@ -148,7 +500,7 @@ fn wait_for_file(camera: &mut ProcessGuard, path: &Path, timeout: Duration) {
     }
 }
 
-fn wait_for_process_group_empty(process_group: i32, fake_mediamtx_pid: i32, timeout: Duration) {
+fn wait_for_process_group_empty(process_group: i32, related_pid: i32, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     loop {
         match signal(-process_group, SIGNAL_EXISTS) {
@@ -158,7 +510,7 @@ fn wait_for_process_group_empty(process_group: i32, fake_mediamtx_pid: i32, time
         }
         assert!(
             Instant::now() < deadline,
-            "camera process group remained alive after {timeout:?}; fake MediaMTX PID {fake_mediamtx_pid}"
+            "camera process group remained alive after {timeout:?}; related PID {related_pid}"
         );
         thread::sleep(POLL_INTERVAL);
     }

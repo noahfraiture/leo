@@ -13,4 +13,5 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "process", "signal", "time"] }
 
 [dev-dependencies]
+backend = { path = "../backend", features = ["test-support"] }
 tower = { workspace = true }

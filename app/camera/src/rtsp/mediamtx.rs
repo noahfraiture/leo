@@ -175,8 +175,7 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_reports_child_exit() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let address = unused_address();
         let mut child = child(&["--list"]);
 
         let error = wait_until_ready(&mut child, address, Duration::from_secs(1))
