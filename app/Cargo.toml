@@ -3,7 +3,6 @@ members = [
     "app",
     "backend",
     "camera",
-    "synology",
 ]
 resolver = "3"
 
