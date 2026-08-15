@@ -19,3 +19,6 @@ pub use monitor::Monitor;
 
 mod sidebar;
 pub use sidebar::Sidebar;
+
+#[cfg(test)]
+mod render_tests;

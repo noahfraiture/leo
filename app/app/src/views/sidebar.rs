@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 #[component]
 pub fn Sidebar(route: Route) -> Element {
     match route {
-        Route::Monitor {} => monitor::Sidebar(),
-        Route::Analyze {} => analyze::Sidebar(),
+        Route::Monitor {} => rsx! { monitor::Sidebar {} },
+        Route::Analyze {} => rsx! { analyze::Sidebar {} },
     }
 }

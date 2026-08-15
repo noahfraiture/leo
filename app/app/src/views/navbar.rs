@@ -1,26 +1,24 @@
 use crate::{
     Route,
     views::{Analyze, Monitor, Sidebar},
+    workflow::Workflow,
 };
 use dioxus::prelude::*;
 
-/// Layout is the main layout component that wraps the sidebar and the content.
-// The idea is to have a layout like
-// | nav button      | page content
-// |                 | page content
-// | sidebar content | page content
-// | sidebar content | page content
-// | sidebar content | page content
+/// Wraps route navigation, route-specific controls, shared messages, and content.
 #[component]
 pub fn Layout() -> Element {
     let route = use_route::<Route>();
+    let workflow = use_context::<Signal<Workflow>>();
+    let message = workflow.read().message.clone();
+
     rsx! {
         div {
-            class: "flex h-screen p-2",
-            div { // fixed size in width
+            class: "flex min-h-screen flex-col gap-2 p-2 lg:h-screen lg:flex-row",
+            aside {
                 id: "sidebar",
-                class: "flex w-64 shrink-0 flex-col p-2 bg-base-300 card",
-                div { // fixed size in heigh
+                class: "flex shrink-0 flex-col bg-base-200 p-3 lg:w-80 lg:overflow-y-auto",
+                div {
                     class: "shrink-0",
                     NavButton { route: route.clone() }
                 }
@@ -29,23 +27,22 @@ pub fn Layout() -> Element {
                     class: "border-t shrink-0 my-4",
                 }
 
-                div { // rest of the heigh of the sidebar
-                    class: "min-h-0 flex-1",
+                div {
+                    class: "min-h-0 flex-1 overflow-y-auto",
                     Sidebar { route: route.clone() }
                 }
-
-                hr {
-                    class: "border-t shrink-0 my-4",
-                }
-
-                div {
-                    class: "shrink-0",
-                    Settings { }
-                }
             }
-            div { // rest of the width of the screen
+            main {
                 id: "body",
-                class: "min-w-0 flex-1",
+                class: "min-w-0 flex-1 overflow-y-auto",
+                if let Some(message) = message {
+                    div {
+                        class: "alert alert-error m-2",
+                        role: "alert",
+                        aria_live: "assertive",
+                        span { "{message}" }
+                    }
+                }
                 Home { route: route.clone() }
             }
         }
@@ -55,11 +52,13 @@ pub fn Layout() -> Element {
 #[component]
 fn NavButton(route: Route) -> Element {
     rsx! {
-        div {
+        nav {
             id: "navbutton",
             class: "flex gap-2 justify-center",
+            aria_label: "Primary navigation",
             Link {
                 to: Route::Monitor {},
+                aria_current: if matches!(&route, Route::Monitor {}) { Some("page") } else { None },
                 class: if matches!(&route, Route::Monitor {}) {
                     "btn btn-success"
                 } else {
@@ -70,6 +69,7 @@ fn NavButton(route: Route) -> Element {
 
             Link {
                 to: Route::Analyze {},
+                aria_current: if matches!(&route, Route::Analyze {}) { Some("page") } else { None },
                 class: if matches!(&route, Route::Analyze {}) {
                     "btn btn-success"
                 } else {
@@ -90,15 +90,5 @@ fn Home(route: Route) -> Element {
         Route::Analyze {} => rsx! {
             Analyze { }
         },
-    }
-}
-
-#[component]
-fn Settings() -> Element {
-    rsx! {
-        div {
-            class: "btn btn-primary",
-            "Settings"
-        }
     }
 }

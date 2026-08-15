@@ -1,3 +1,4 @@
+use backend::recording::RecorderStatus;
 use dioxus::prelude::*;
 
 use crate::preview::PreviewFeed;
@@ -26,8 +27,15 @@ reader.close();
 video.srcObject = null;
 "#;
 
+/// Renders one stable live preview with independent analysis and recorder status.
 #[component]
-pub fn CameraFeed(feed: PreviewFeed, script_url: String) -> Element {
+pub fn CameraFeed(
+    feed: PreviewFeed,
+    selected: bool,
+    participating: bool,
+    recorder_status: RecorderStatus,
+    on_select: EventHandler<u32>,
+) -> Element {
     let mut error = use_signal(|| None::<String>);
     let mut player_channel = use_signal(|| None::<document::Eval>);
     let config = serde_json::json!({
@@ -55,11 +63,26 @@ pub fn CameraFeed(feed: PreviewFeed, script_url: String) -> Element {
         }
     });
 
-    rsx! {
-        document::Script { src: script_url }
+    let participation = if participating {
+        "Included"
+    } else {
+        "Excluded"
+    };
+    let recorder_status = recorder_status_label(recorder_status);
+    let selection_label = format!(
+        "{} {}",
+        if selected { "Selected" } else { "Select" },
+        feed.name
+    );
+    let camera_id = feed.camera_id;
 
-        div {
-            class: "card card-border bg-base-100 w-full",
+    rsx! {
+        article {
+            class: if selected {
+                "card w-full border border-primary bg-base-100"
+            } else {
+                "card w-full border border-base-300 bg-base-100"
+            },
 
             figure {
                 class: "relative aspect-video bg-base-200",
@@ -72,61 +95,63 @@ pub fn CameraFeed(feed: PreviewFeed, script_url: String) -> Element {
                     playsinline: true,
                 }
 
-                div {
-                    class: "absolute inset-4 flex flex-col justify-between",
-
-                    div {
-                        class: "flex justify-between",
-
-                        div {
-                            class: "badge badge-outline",
-                            span { class: "status status-success" }
-                            "LIVE"
-                        }
-
-                        span { "14:42:18" }
-                    }
-
-                    div {
-                        class: "badge badge-primary badge-outline",
-                        "Selected"
-                    }
-                }
-
                 if let Some(message) = error() {
                     p {
                         class: "absolute inset-0 flex items-center justify-center bg-base-300/90 p-4 text-center",
-                        role: "status",
+                        role: "alert",
+                        aria_live: "assertive",
                         "{message}"
                     }
                 }
             }
 
             div {
-                class: "card-body",
+                class: "card-body gap-3 p-4",
 
                 div {
-                    class: "flex items-center justify-between",
+                    class: "flex flex-wrap items-center justify-between gap-2",
 
                     h2 {
                         class: "card-title",
-                        span { class: "status status-success" }
                         "{feed.name}"
                     }
 
-                    div {
-                        class: "card-actions",
-                        button {
-                            class: "btn btn-ghost btn-circle btn-sm",
-                            aria_label: "Camera options",
-                            "..."
-                        }
+                    button {
+                        class: "btn btn-sm",
+                        r#type: "button",
+                        aria_label: selection_label,
+                        aria_pressed: selected,
+                        onclick: move |_| on_select.call(camera_id),
+                        if selected { "Selected" } else { "Select" }
                     }
                 }
 
-                p { "CAM 04 - Selected camera" }
+                div {
+                    class: "flex flex-wrap gap-2",
+                    span {
+                        class: "badge badge-outline",
+                        aria_label: "Analysis participation: {participation}",
+                        "{participation}"
+                    }
+                    span {
+                        class: "badge badge-outline",
+                        aria_label: "Recorder status: {recorder_status}",
+                        role: "status",
+                        aria_live: "polite",
+                        "{recorder_status}"
+                    }
+                }
             }
         }
+    }
+}
+
+fn recorder_status_label(status: RecorderStatus) -> &'static str {
+    match status {
+        RecorderStatus::Starting => "Starting",
+        RecorderStatus::Recording => "Recording",
+        RecorderStatus::Reconnecting => "Reconnecting",
+        RecorderStatus::Stopped => "Idle",
     }
 }
 
