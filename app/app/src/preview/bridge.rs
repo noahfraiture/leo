@@ -58,19 +58,25 @@ impl Bridge {
 impl Drop for Bridge {
     fn drop(&mut self) {
         if let Err(error) = self.cleanup() {
-            eprintln!("failed to clean up MediaMTX preview process: {error}");
+            tracing::error!(error = %error, "preview cleanup failed");
         }
     }
 }
 
 #[derive(Clone, PartialEq)]
-pub(crate) struct CameraSource {
+/// Credential-bearing camera input used only to configure the local preview bridge.
+pub struct CameraSource {
+    /// Stable deployment camera ID, independent of the preview path index.
+    pub id: u32,
     pub name: String,
     pub rtsp_url: String,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct PreviewFeed {
+/// Browser-safe metadata for one live camera preview.
+pub struct PreviewFeed {
+    /// Stable deployment camera ID, independent of the preview path index.
+    pub camera_id: u32,
     pub name: String,
     pub video_id: String,
     pub whep_url: String,
@@ -217,7 +223,7 @@ pub(crate) fn start(sources: Vec<CameraSource>) -> Result<(PreviewState, Bridge)
 
     if let Err(error) = wait_until_ready(&mut child, WEBRTC_HTTP_ADDRESS, READINESS_TIMEOUT) {
         if let Err(cleanup_error) = Bridge::new(child, config).stop() {
-            eprintln!("failed to clean up MediaMTX after startup failure: {cleanup_error}");
+            tracing::error!(error = %cleanup_error, "preview startup cleanup failed");
         }
         return Err(error);
     }
@@ -230,6 +236,7 @@ pub(crate) fn preview_metadata(sources: &[CameraSource]) -> PreviewState {
         .iter()
         .enumerate()
         .map(|(index, source)| PreviewFeed {
+            camera_id: source.id,
             name: source.name.clone(),
             video_id: format!("camera-{index}-video"),
             whep_url: format!("http://127.0.0.1:8889/camera-{index}/whep"),
@@ -255,7 +262,7 @@ mod tests {
         Bridge, PROBE_INTERVAL, READINESS_TIMEOUT, reserve_ports, validate_version, verify_version,
         wait_until_ready,
     };
-    use crate::preview::{CameraSource, ConfigFile, Error, preview_metadata};
+    use crate::preview::{CameraSource, ConfigFile, Error, PreviewState, preview_metadata};
 
     const LIVE_CHILD_ENV: &str = "APP_PREVIEW_LIVE_CHILD";
     const LIVE_CHILD_TEST: &str = "preview::bridge::tests::live_child_process";
@@ -563,6 +570,7 @@ mod tests {
     #[test]
     fn metadata_does_not_expose_camera_credentials() {
         let source = CameraSource {
+            id: 26,
             name: "Workshop".into(),
             rtsp_url: "rtsp://camera-user:camera-pass@127.0.0.1/live".into(),
         };
@@ -579,5 +587,32 @@ mod tests {
         assert!(!serialized.contains("camera-user"));
         assert!(!serialized.contains("camera-pass"));
         assert!(!serialized.contains("rtsp://"));
+    }
+
+    #[test]
+    fn metadata_preserves_stable_ids_with_index_based_paths() {
+        let sources = vec![
+            CameraSource {
+                id: 26,
+                name: "Salon 1".into(),
+                rtsp_url: "rtsp://camera-one.example/live".into(),
+            },
+            CameraSource {
+                id: 41,
+                name: "Salon 2".into(),
+                rtsp_url: "rtsp://camera-two.example/live".into(),
+            },
+        ];
+
+        let PreviewState::Ready { feeds, .. } = preview_metadata(&sources) else {
+            panic!("preview metadata should be ready");
+        };
+
+        assert_eq!(feeds[0].camera_id, 26);
+        assert_eq!(feeds[0].video_id, "camera-0-video");
+        assert_eq!(feeds[0].whep_url, "http://127.0.0.1:8889/camera-0/whep");
+        assert_eq!(feeds[1].camera_id, 41);
+        assert_eq!(feeds[1].video_id, "camera-1-video");
+        assert_eq!(feeds[1].whep_url, "http://127.0.0.1:8889/camera-1/whep");
     }
 }

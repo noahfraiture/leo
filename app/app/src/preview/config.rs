@@ -87,10 +87,12 @@ mod tests {
     fn sources() -> Vec<CameraSource> {
         vec![
             CameraSource {
+                id: 26,
                 name: "Workshop".into(),
                 rtsp_url: "rtsp://camera-0/live".into(),
             },
             CameraSource {
+                id: 41,
                 name: "Assembly".into(),
                 rtsp_url: "rtsp://user:p@ss@camera-1/live?profile=low#preview".into(),
             },
