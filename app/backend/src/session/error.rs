@@ -1,7 +1,7 @@
 use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum Error {
+pub enum Error {
     #[error("session event I/O failed")]
     Io(#[from] std::io::Error),
 

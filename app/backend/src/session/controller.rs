@@ -17,7 +17,7 @@ use super::{
 
 /// Software-session actions accepted from future UI and internal callers.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum OperatorAction {
+pub enum OperatorAction {
     /// Includes or excludes a camera from subsequent software sampling.
     SetCameraParticipation { camera_id: u32, enabled: bool },
     /// Changes a camera's software sampling cadence.
@@ -31,13 +31,13 @@ pub(crate) enum OperatorAction {
 
 /// The single backend entry point that validates, routes, and serializes session actions.
 #[derive(Debug)]
-pub(super) struct SessionController {
+pub struct SessionController {
     log: SessionLog,
 }
 
 impl SessionController {
     /// Creates a new event log and durably writes its session-start event.
-    pub(super) fn create(events_path: PathBuf, cameras: Vec<SessionCamera>) -> Result<Self> {
+    pub fn create(events_path: PathBuf, cameras: Vec<SessionCamera>) -> Result<Self> {
         let camera_ids = camera_ids(&cameras)?;
         let action = SessionAction::SessionStarted { cameras };
 
@@ -47,7 +47,7 @@ impl SessionController {
     }
 
     /// Validates and durably records one operator action.
-    pub(super) fn apply(&mut self, action: OperatorAction) -> Result<()> {
+    pub fn apply(&mut self, action: OperatorAction) -> Result<()> {
         if self.log.ended {
             return Err(Error::SessionEnded);
         }
@@ -75,6 +75,11 @@ impl SessionController {
                 Ok(())
             }
         }
+    }
+
+    /// Returns monotonic elapsed time since the session-start event was written.
+    pub fn elapsed(&self) -> Duration {
+        self.log.started_at.elapsed()
     }
 }
 
@@ -382,5 +387,18 @@ mod tests {
 
         assert!(error.to_string().contains("session has ended"));
         assert_eq!(read_events(&path).len(), 2);
+    }
+
+    #[test]
+    fn elapsed_advances_with_the_session_clock() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        let path = directory.path().join("events.jsonl");
+        let controller = SessionController::create(path, vec![camera(1, Duration::from_secs(1))])
+            .expect("session should be created");
+        let first = controller.elapsed();
+
+        std::thread::sleep(Duration::from_millis(1));
+
+        assert!(controller.elapsed() > first);
     }
 }

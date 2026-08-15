@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "app",
+    "backend",
     "camera",
     "synology",
 ]
@@ -8,16 +9,13 @@ resolver = "3"
 
 [workspace.dependencies]
 axum = "0.8.9"
-thiserror = "2"
-tower = { version = "0.5.3", features = ["util"] }
 clap = { version = "=4.6.1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
-
-
-[workspace.dependencies.serde]
-version = "1"
-features = ["derive"]
-
-[workspace.dependencies.tokio]
-version = "1.53.0"
+thiserror = "2"
+tokio = "1.53.0"
+tower = { version = "0.5.3", features = ["util"] }
+tracing = "0.1"
+url = "2"
+uuid = { version = "1.24.0", features = ["serde", "v4"] }

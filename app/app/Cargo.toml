@@ -6,25 +6,14 @@ edition = "2024"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-base64 = "0.22"
+backend = { path = "../backend" }
 dioxus = { version = "0.7.1", features = ["router"] }
 dioxus-icons = { version = "0.1.0", default-features = false }
 dioxus-primitives = { git = "https://github.com/DioxusLabs/components", version = "0.0.1", default-features = false }
-ffmpeg-sidecar = { version = "=2.5.2", default-features = false }
-rig-core = "0.41.0"
-reqwest = { version = "0.13.4", features = ["json", "stream"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["fs", "io-util", "rt"] }
-uuid = { version = "1.24.0", features = ["serde", "v4"] }
-
-[dev-dependencies]
-axum = { workspace = true }
-futures-util = "0.3"
-rig-core = { version = "0.41.0", features = ["test-utils"] }
-tokio = { workspace = true, features = ["macros", "rt"] }
 
 [features]
 default = ["desktop"]

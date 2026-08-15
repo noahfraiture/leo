@@ -95,21 +95,14 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "app"
 version = "0.1.0"
 dependencies = [
- "axum",
- "base64",
+ "backend",
  "dioxus",
  "dioxus-icons",
  "dioxus-primitives",
- "ffmpeg-sidecar",
- "futures-util",
- "reqwest",
- "rig-core",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
- "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -343,6 +336,26 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+]
+
+[[package]]
+name = "backend"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64",
+ "ffmpeg-sidecar",
+ "futures-util",
+ "reqwest",
+ "rig-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
 ]
 
 [[package]]

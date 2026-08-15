@@ -19,7 +19,7 @@ pub(super) const SCHEMA_VERSION: u8 = 1;
 /// One camera's software sampling configuration at the start of a session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SessionCamera {
+pub struct SessionCamera {
     /// Stable Surveillance Station camera ID.
     #[serde(rename = "camera_id")]
     pub id: u32,
@@ -34,7 +34,7 @@ pub(crate) struct SessionCamera {
 
 /// A completed session reconstructed from its event log.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Session {
+pub struct Session {
     /// UUID shared by the event log and analysis checkpoint.
     pub id: Uuid,
     /// UTC millisecond anchor captured by the session-start event.
@@ -49,7 +49,7 @@ pub(crate) struct Session {
 
 impl Session {
     /// Loads and validates a completed JSONL event log.
-    pub(crate) fn load(events_path: &Path) -> Result<Self> {
+    pub fn load(events_path: &Path) -> Result<Self> {
         let mut file = File::open(events_path)?;
         if file.metadata()?.len() > 0 {
             file.seek(SeekFrom::End(-1))?;

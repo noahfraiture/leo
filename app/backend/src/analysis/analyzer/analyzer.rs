@@ -335,10 +335,12 @@ mod tests {
     use std::{
         collections::HashMap,
         num::NonZeroUsize,
-        path::Path,
         sync::{Arc, Mutex},
         time::Duration,
     };
+
+    #[cfg(feature = "paid-openai-test")]
+    use std::path::Path;
 
     use axum::{
         Json, Router,
@@ -359,12 +361,15 @@ mod tests {
 
     use crate::{
         analysis::{
-            agent::{Agent, AnalysisResponse, ChecklistProgress, Observation, OpenAiAgent},
+            agent::{Agent, AnalysisResponse, ChecklistProgress, Observation},
             video::{Error as VideoError, Frame, FrameSet, Video},
         },
         recording::SynologyClient,
         session::{Session, SessionCamera},
     };
+
+    #[cfg(feature = "paid-openai-test")]
+    use crate::analysis::agent::OpenAiAgent;
 
     use super::{
         Analyzer, append_prompt_frame, append_prompt_frame_set, batch_windows, download_batch,
@@ -864,6 +869,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "paid-openai-test")]
     #[ignore = "costs money; requires LEO_RUN_PAID_OPENAI_TEST=1 and OpenAI environment"]
     async fn paid_openai_analyzes_table_setting_fixture() {
         if !matches!(
@@ -872,7 +878,7 @@ mod tests {
         ) {
             panic!(
                 "paid OpenAI test is disabled; run exactly:\n\
-                 LEO_RUN_PAID_OPENAI_TEST=1 cargo test -p app \
+                 LEO_RUN_PAID_OPENAI_TEST=1 cargo test -p backend --features paid-openai-test \
                  analysis::analyzer::analyzer::tests::paid_openai_analyzes_table_setting_fixture \
                  -- --ignored --exact --nocapture"
             );
