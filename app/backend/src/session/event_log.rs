@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    fs::File,
+    fs::{self, File},
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::Path,
     time::Duration,
@@ -20,7 +20,7 @@ pub(super) const SCHEMA_VERSION: u8 = 1;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionCamera {
-    /// Stable Surveillance Station camera ID.
+    /// Stable camera ID shared by recording, analysis, and UI state.
     #[serde(rename = "camera_id")]
     pub id: u32,
     /// Operator-facing camera name included in analysis prompts.
@@ -50,8 +50,12 @@ pub struct Session {
 impl Session {
     /// Loads and validates a completed JSONL event log.
     pub fn load(events_path: &Path) -> Result<Self> {
+        let metadata = fs::symlink_metadata(events_path)?;
+        if !metadata.file_type().is_file() {
+            return Err(Error::InvalidEventFile);
+        }
         let mut file = File::open(events_path)?;
-        if file.metadata()?.len() > 0 {
+        if metadata.len() > 0 {
             file.seek(SeekFrom::End(-1))?;
             let mut final_byte = [0];
             file.read_exact(&mut final_byte)?;
@@ -192,8 +196,14 @@ pub(super) enum SessionAction {
 }
 
 pub(super) fn camera_ids(cameras: &[SessionCamera]) -> Result<HashSet<u32>> {
+    if cameras.is_empty() {
+        return Err(Error::EmptyCameraList);
+    }
     let mut camera_ids = HashSet::with_capacity(cameras.len());
     for camera in cameras {
+        if camera.id == 0 {
+            return Err(Error::ZeroCameraId);
+        }
         duration_to_millis(camera.id, camera.sample_every)?;
         if !camera_ids.insert(camera.id) {
             return Err(Error::DuplicateCamera {
@@ -517,6 +527,40 @@ mod tests {
             .to_string();
 
         assert!(error.contains("final newline"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_load_rejects_a_symlinked_events_file() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        let target = directory.path().join("events-target.jsonl");
+        let path = directory.path().join("events.jsonl");
+        write_events(
+            &target,
+            &[started(vec![camera(1, 1_000)]), ended(1, SESSION_ID, 1_000)],
+        );
+        symlink(target, &path).expect("event symlink should be created");
+
+        let error = Session::load(&path)
+            .expect_err("symlinked events should be rejected")
+            .to_string();
+
+        assert!(error.contains("regular file"));
+    }
+
+    #[test]
+    fn session_load_rejects_a_directory_events_path() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        let path = directory.path().join("events.jsonl");
+        fs::create_dir(&path).expect("events directory should be created");
+
+        let error = Session::load(&path)
+            .expect_err("an events directory should be rejected")
+            .to_string();
+
+        assert!(error.contains("regular file"));
     }
 
     #[test]

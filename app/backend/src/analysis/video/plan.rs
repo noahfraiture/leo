@@ -1,21 +1,11 @@
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
+use serde::{Deserialize, Serialize};
+
+use crate::recording::RecordingSegment;
 use crate::session::{OperatorAction, Session};
 
 use super::error::{Error, Result};
-
-/// One catalogued Surveillance Station segment with inclusive-start, exclusive-end UTC bounds.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Video {
-    /// Surveillance Station catalogue event ID used for downloads.
-    pub(crate) recording_id: u64,
-    /// Camera that produced this segment.
-    pub(crate) camera_id: u32,
-    /// Inclusive recording start in UTC milliseconds since the Unix epoch.
-    pub(crate) start_utc_ms: i64,
-    /// Exclusive recording end in UTC milliseconds since the Unix epoch.
-    pub(crate) end_utc_ms: i64,
-}
 
 /// One enabled span with a fixed cadence on the session-relative timeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,19 +157,112 @@ impl SamplingSchedule {
     }
 }
 
-/// One planned sample tied to a recording, with offsets for both session and recording timelines.
+/// A recoverable physical recording gap on one camera's session timeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AnalysisWarning {
+    RecordingGap {
+        camera_id: u32,
+        start_offset_ms: u64,
+        end_offset_ms: u64,
+    },
+}
+
+/// Derives physical recording gaps for every session camera, independent of participation.
+pub fn recording_gap_warnings(
+    session: &Session,
+    segments: &[RecordingSegment],
+) -> Result<Vec<AnalysisWarning>> {
+    let session_duration_ms =
+        u64::try_from(session.end_offset.as_millis()).map_err(|_| Error::SessionEndUtcOverflow)?;
+    let session_end_utc_ms = session
+        .start_utc_ms
+        .checked_add(i64::try_from(session_duration_ms).map_err(|_| Error::SessionEndUtcOverflow)?)
+        .ok_or(Error::SessionEndUtcOverflow)?;
+    let mut warnings = Vec::new();
+
+    for camera in &session.cameras {
+        let mut coverage = segments
+            .iter()
+            .filter(|segment| segment.camera_id == camera.id)
+            .filter_map(|segment| {
+                let start = segment.start_utc_ms.max(session.start_utc_ms);
+                let end = segment.end_utc_ms.min(session_end_utc_ms);
+                (start < end).then_some((start, end))
+            })
+            .collect::<Vec<_>>();
+        coverage.sort_unstable();
+
+        let mut cursor = session.start_utc_ms;
+        for (start, end) in coverage {
+            if cursor < start {
+                push_recording_gap(session, camera.id, cursor, start, &mut warnings);
+            }
+            cursor = cursor.max(end);
+        }
+        if cursor < session_end_utc_ms {
+            push_recording_gap(
+                session,
+                camera.id,
+                cursor,
+                session_end_utc_ms,
+                &mut warnings,
+            );
+        }
+    }
+
+    warnings.sort_by_key(|warning| match warning {
+        AnalysisWarning::RecordingGap {
+            camera_id,
+            start_offset_ms,
+            end_offset_ms,
+        } => (*camera_id, *start_offset_ms, *end_offset_ms),
+    });
+    Ok(warnings)
+}
+
+fn push_recording_gap(
+    session: &Session,
+    camera_id: u32,
+    start_utc_ms: i64,
+    end_utc_ms: i64,
+    warnings: &mut Vec<AnalysisWarning>,
+) {
+    let start_offset_ms = u64::try_from(start_utc_ms - session.start_utc_ms)
+        .expect("clipped gap start is on the session timeline");
+    let end_offset_ms = u64::try_from(end_utc_ms - session.start_utc_ms)
+        .expect("clipped gap end is on the session timeline");
+    tracing::warn!(
+        session_id = %session.id,
+        camera_id,
+        start_offset_ms,
+        end_offset_ms,
+        "physical recording gap"
+    );
+    warnings.push(AnalysisWarning::RecordingGap {
+        camera_id,
+        start_offset_ms,
+        end_offset_ms,
+    });
+}
+
+/// One planned sample tied to a local segment and both session and recording timelines.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::analysis) struct Frame {
+pub struct Frame {
     /// Camera selected at this session offset.
-    pub(in crate::analysis) camera_id: u32,
-    /// Catalogue segment containing the selected sample.
-    pub(in crate::analysis) recording_id: u64,
+    pub camera_id: u32,
+    /// Inclusive UTC start of the local segment containing this sample.
+    pub segment_start_utc_ms: i64,
+    /// Exclusive UTC end of the local segment containing this sample.
+    pub segment_end_utc_ms: i64,
     /// Zero-based position across the camera's complete session sample sequence.
-    pub(in crate::analysis) sample_index: usize,
+    pub sample_index: usize,
     /// Position on the shared session-relative timeline.
-    pub(in crate::analysis) session_offset: Duration,
-    /// Position from the matched recording's inclusive UTC start.
-    pub(in crate::analysis) recording_offset: Duration,
+    pub session_offset: Duration,
+    /// Position from the matched segment's inclusive UTC start.
+    pub recording_offset: Duration,
+    /// Finalized local segment used for direct extraction.
+    pub path: PathBuf,
 }
 
 /// One camera's ordered planned samples across the recording segments that cover the session.
@@ -192,11 +275,11 @@ pub(in crate::analysis) struct SampleSequence {
 }
 
 impl SampleSequence {
-    /// Matches each planned sample to exactly one covering recording segment without decoding media.
-    pub(in crate::analysis) fn from_videos(
+    /// Matches each planned sample to zero or one local segment without decoding media.
+    pub(in crate::analysis) fn from_segments(
         session_start_utc_ms: i64,
         schedule: &SamplingSchedule,
-        videos: &[Video],
+        segments: &[RecordingSegment],
     ) -> Result<Self> {
         let sample_offsets = schedule.sample_offsets()?;
         let mut frames = Vec::with_capacity(sample_offsets.len());
@@ -215,29 +298,36 @@ impl SampleSequence {
                         camera_id: schedule.camera_id,
                         session_offset,
                     })?;
-            let mut matching_videos = videos.iter().filter(|video| {
-                video.camera_id == schedule.camera_id
-                    && video.start_utc_ms <= sample_utc_ms
-                    && sample_utc_ms < video.end_utc_ms
+            let mut matching_segments = segments.iter().filter(|segment| {
+                segment.camera_id == schedule.camera_id
+                    && segment.start_utc_ms <= sample_utc_ms
+                    && sample_utc_ms < segment.end_utc_ms
             });
-            let video = matching_videos.next().ok_or(Error::MissingRecording {
-                camera_id: schedule.camera_id,
-                session_offset,
-            })?;
-            if matching_videos.next().is_some() {
+            let Some(segment) = matching_segments.next() else {
+                continue;
+            };
+            if matching_segments.next().is_some() {
                 return Err(Error::OverlappingRecordings {
                     camera_id: schedule.camera_id,
                     session_offset,
                 });
             }
-            let recording_offset_ms = sample_utc_ms.abs_diff(video.start_utc_ms);
+            let recording_offset_ms = sample_utc_ms
+                .checked_sub(segment.start_utc_ms)
+                .and_then(|offset| u64::try_from(offset).ok())
+                .ok_or(Error::UtcTimestampOverflow {
+                    camera_id: schedule.camera_id,
+                    session_offset,
+                })?;
 
             frames.push(Frame {
                 camera_id: schedule.camera_id,
-                recording_id: video.recording_id,
+                segment_start_utc_ms: segment.start_utc_ms,
+                segment_end_utc_ms: segment.end_utc_ms,
                 sample_index,
                 session_offset,
                 recording_offset: Duration::from_millis(recording_offset_ms),
+                path: segment.path.clone(),
             });
         }
 
@@ -327,13 +417,19 @@ impl FrameSet {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{path::PathBuf, time::Duration};
 
     use uuid::Uuid;
 
-    use crate::session::{OperatorAction, Session, SessionCamera};
+    use crate::{
+        recording::RecordingSegment,
+        session::{OperatorAction, Session, SessionCamera},
+    };
 
-    use super::{Frame, FrameSet, SampleSequence, SamplingPeriod, SamplingSchedule, Video};
+    use super::{
+        AnalysisWarning, Frame, FrameSet, SampleSequence, SamplingPeriod, SamplingSchedule,
+        recording_gap_warnings,
+    };
 
     const SESSION_START_UTC_MS: i64 = 1_000_000;
 
@@ -386,6 +482,15 @@ mod tests {
 
     fn seconds(values: &[u64]) -> Vec<Duration> {
         values.iter().copied().map(Duration::from_secs).collect()
+    }
+
+    fn segment(camera_id: u32, start_offset_ms: i64, end_offset_ms: i64) -> RecordingSegment {
+        RecordingSegment {
+            camera_id,
+            start_utc_ms: SESSION_START_UTC_MS.checked_add(start_offset_ms).unwrap(),
+            end_utc_ms: SESSION_START_UTC_MS.checked_add(end_offset_ms).unwrap(),
+            path: PathBuf::from(format!("camera-{camera_id}-{start_offset_ms}.mkv")),
+        }
     }
 
     #[test]
@@ -588,27 +693,14 @@ mod tests {
     }
 
     #[test]
-    fn sequences_keep_global_indices_and_recording_offsets_across_videos() {
+    fn sequences_keep_global_indices_and_recording_offsets_across_segments() {
         let session = session(true, Duration::from_secs(2), Duration::from_secs(8), vec![]);
         let schedule =
             SamplingSchedule::from_session(&session, 1).expect("schedule should be built");
-        let videos = vec![
-            Video {
-                recording_id: 10,
-                camera_id: 1,
-                start_utc_ms: SESSION_START_UTC_MS - 1_000,
-                end_utc_ms: SESSION_START_UTC_MS + 4_000,
-            },
-            Video {
-                recording_id: 20,
-                camera_id: 1,
-                start_utc_ms: SESSION_START_UTC_MS + 4_000,
-                end_utc_ms: SESSION_START_UTC_MS + 8_000,
-            },
-        ];
+        let segments = vec![segment(1, -1_000, 4_000), segment(1, 4_000, 8_000)];
 
-        let sequence = SampleSequence::from_videos(SESSION_START_UTC_MS, &schedule, &videos)
-            .expect("videos should cover every sample");
+        let sequence = SampleSequence::from_segments(SESSION_START_UTC_MS, &schedule, &segments)
+            .expect("segments should cover every sample");
 
         assert_eq!(
             sequence,
@@ -617,31 +709,39 @@ mod tests {
                 frames: vec![
                     Frame {
                         camera_id: 1,
-                        recording_id: 10,
+                        segment_start_utc_ms: SESSION_START_UTC_MS - 1_000,
+                        segment_end_utc_ms: SESSION_START_UTC_MS + 4_000,
                         sample_index: 0,
                         session_offset: Duration::ZERO,
                         recording_offset: Duration::from_secs(1),
+                        path: segments[0].path.clone(),
                     },
                     Frame {
                         camera_id: 1,
-                        recording_id: 10,
+                        segment_start_utc_ms: SESSION_START_UTC_MS - 1_000,
+                        segment_end_utc_ms: SESSION_START_UTC_MS + 4_000,
                         sample_index: 1,
                         session_offset: Duration::from_secs(2),
                         recording_offset: Duration::from_secs(3),
+                        path: segments[0].path.clone(),
                     },
                     Frame {
                         camera_id: 1,
-                        recording_id: 20,
+                        segment_start_utc_ms: SESSION_START_UTC_MS + 4_000,
+                        segment_end_utc_ms: SESSION_START_UTC_MS + 8_000,
                         sample_index: 2,
                         session_offset: Duration::from_secs(4),
                         recording_offset: Duration::ZERO,
+                        path: segments[1].path.clone(),
                     },
                     Frame {
                         camera_id: 1,
-                        recording_id: 20,
+                        segment_start_utc_ms: SESSION_START_UTC_MS + 4_000,
+                        segment_end_utc_ms: SESSION_START_UTC_MS + 8_000,
                         sample_index: 3,
                         session_offset: Duration::from_secs(6),
                         recording_offset: Duration::from_secs(2),
+                        path: segments[1].path.clone(),
                     },
                 ],
             }
@@ -649,52 +749,35 @@ mod tests {
     }
 
     #[test]
-    fn sequences_reject_missing_recording_coverage() {
-        let session = session(true, Duration::from_secs(2), Duration::from_secs(5), vec![]);
+    fn sequence_skips_missing_samples_and_resumes_after_the_gap() {
+        let session = session(true, Duration::from_secs(1), Duration::from_secs(4), vec![]);
         let schedule =
             SamplingSchedule::from_session(&session, 1).expect("schedule should be built");
-        let videos = vec![
-            Video {
-                recording_id: 10,
-                camera_id: 1,
-                start_utc_ms: SESSION_START_UTC_MS,
-                end_utc_ms: SESSION_START_UTC_MS + 2_000,
-            },
-            Video {
-                recording_id: 20,
-                camera_id: 1,
-                start_utc_ms: SESSION_START_UTC_MS + 3_000,
-                end_utc_ms: SESSION_START_UTC_MS + 5_000,
-            },
-        ];
+        let segments = vec![segment(1, 0, 1_000), segment(1, 3_000, 4_000)];
 
-        let error = SampleSequence::from_videos(SESSION_START_UTC_MS, &schedule, &videos)
-            .expect_err("the sample at two seconds has no recording");
+        let sequence = SampleSequence::from_segments(SESSION_START_UTC_MS, &schedule, &segments)
+            .expect("missing coverage should skip only its samples");
 
-        assert!(error.to_string().contains("no recording"));
+        assert_eq!(
+            sequence
+                .frames
+                .iter()
+                .map(|frame| (frame.sample_index, frame.session_offset))
+                .collect::<Vec<_>>(),
+            vec![(0, Duration::ZERO), (3, Duration::from_secs(3))]
+        );
+        assert_eq!(sequence.frames[0].path, segments[0].path);
+        assert_eq!(sequence.frames[1].path, segments[1].path);
     }
 
     #[test]
-    fn sequences_reject_overlapping_recording_coverage() {
+    fn sequence_still_rejects_overlapping_segments() {
         let session = session(true, Duration::from_secs(2), Duration::from_secs(5), vec![]);
         let schedule =
             SamplingSchedule::from_session(&session, 1).expect("schedule should be built");
-        let videos = vec![
-            Video {
-                recording_id: 10,
-                camera_id: 1,
-                start_utc_ms: SESSION_START_UTC_MS,
-                end_utc_ms: SESSION_START_UTC_MS + 3_000,
-            },
-            Video {
-                recording_id: 20,
-                camera_id: 1,
-                start_utc_ms: SESSION_START_UTC_MS + 2_000,
-                end_utc_ms: SESSION_START_UTC_MS + 5_000,
-            },
-        ];
+        let segments = vec![segment(1, 0, 3_000), segment(1, 2_000, 5_000)];
 
-        let error = SampleSequence::from_videos(SESSION_START_UTC_MS, &schedule, &videos)
+        let error = SampleSequence::from_segments(SESSION_START_UTC_MS, &schedule, &segments)
             .expect_err("the sample at two seconds has two recordings");
 
         assert!(error.to_string().contains("multiple recordings"));
@@ -711,7 +794,7 @@ mod tests {
             }],
         };
 
-        let error = SampleSequence::from_videos(i64::MAX, &schedule, &[])
+        let error = SampleSequence::from_segments(i64::MAX, &schedule, &[])
             .expect_err("the session anchor and offset should be checked");
 
         assert!(error.to_string().contains("UTC timestamp"));
@@ -721,10 +804,12 @@ mod tests {
         let offset = Duration::from_secs(offset_secs);
         Frame {
             camera_id,
-            recording_id: u64::from(camera_id) * 10,
+            segment_start_utc_ms: SESSION_START_UTC_MS,
+            segment_end_utc_ms: SESSION_START_UTC_MS + 10_000,
             sample_index,
             session_offset: offset,
             recording_offset: offset,
+            path: PathBuf::from(format!("camera-{camera_id}.mkv")),
         }
     }
 
@@ -764,6 +849,143 @@ mod tests {
                 })
                 .collect::<Vec<_>>(),
             vec![vec![1, 2], vec![2], vec![1, 2], vec![2], vec![1, 2]]
+        );
+    }
+
+    #[test]
+    fn missing_camera_frame_keeps_the_other_camera_frame_set() {
+        let schedules = [
+            SamplingSchedule {
+                camera_id: 1,
+                periods: vec![SamplingPeriod {
+                    start: Duration::ZERO,
+                    end: Duration::from_secs(2),
+                    sample_every: Duration::from_secs(1),
+                }],
+            },
+            SamplingSchedule {
+                camera_id: 2,
+                periods: vec![SamplingPeriod {
+                    start: Duration::ZERO,
+                    end: Duration::from_secs(2),
+                    sample_every: Duration::from_secs(1),
+                }],
+            },
+        ];
+        let segments = vec![segment(1, 0, 1_000), segment(2, 0, 2_000)];
+        let sequences = schedules
+            .iter()
+            .map(|schedule| {
+                SampleSequence::from_segments(SESSION_START_UTC_MS, schedule, &segments)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("missing coverage should leave partial sequences");
+
+        let frame_sets = FrameSet::from_sequences(sequences).expect("partial sets should merge");
+
+        assert_eq!(
+            frame_sets
+                .iter()
+                .map(|frame_set| {
+                    (
+                        frame_set.session_offset,
+                        frame_set
+                            .frames
+                            .iter()
+                            .map(|frame| frame.camera_id)
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (Duration::ZERO, vec![1, 2]),
+                (Duration::from_secs(1), vec![2]),
+            ]
+        );
+    }
+
+    #[test]
+    fn gaps_before_between_and_after_segments_are_coalesced() {
+        let session = session(
+            true,
+            Duration::from_secs(1),
+            Duration::from_secs(10),
+            vec![],
+        );
+        let segments = vec![
+            segment(1, 6_000, 8_000),
+            segment(1, 2_000, 4_000),
+            segment(1, 1_000, 2_000),
+        ];
+
+        let warnings = recording_gap_warnings(&session, &segments)
+            .expect("valid session bounds should produce warnings");
+
+        assert_eq!(
+            warnings,
+            vec![
+                AnalysisWarning::RecordingGap {
+                    camera_id: 1,
+                    start_offset_ms: 0,
+                    end_offset_ms: 1_000,
+                },
+                AnalysisWarning::RecordingGap {
+                    camera_id: 1,
+                    start_offset_ms: 4_000,
+                    end_offset_ms: 6_000,
+                },
+                AnalysisWarning::RecordingGap {
+                    camera_id: 1,
+                    start_offset_ms: 8_000,
+                    end_offset_ms: 10_000,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn disabled_participation_does_not_hide_a_physical_recording_gap() {
+        let session = session(
+            true,
+            Duration::from_secs(1),
+            Duration::from_secs(6),
+            vec![participation(1, false), participation(5, true)],
+        );
+        let segments = vec![segment(1, 0, 2_000), segment(1, 4_000, 6_000)];
+
+        let warnings = recording_gap_warnings(&session, &segments)
+            .expect("participation should not affect physical coverage");
+
+        assert_eq!(
+            warnings,
+            vec![AnalysisWarning::RecordingGap {
+                camera_id: 1,
+                start_offset_ms: 2_000,
+                end_offset_ms: 4_000,
+            }]
+        );
+    }
+
+    #[test]
+    fn camera_without_segments_gets_one_full_session_gap() {
+        let mut session = session(true, Duration::from_secs(1), Duration::from_secs(5), vec![]);
+        session.cameras.push(SessionCamera {
+            id: 2,
+            name: "Side".into(),
+            enabled: false,
+            sample_every: Duration::from_secs(1),
+        });
+
+        let warnings = recording_gap_warnings(&session, &[segment(1, 0, 5_000)])
+            .expect("every session camera should be checked");
+
+        assert_eq!(
+            warnings,
+            vec![AnalysisWarning::RecordingGap {
+                camera_id: 2,
+                start_offset_ms: 0,
+                end_offset_ms: 5_000,
+            }]
         );
     }
 

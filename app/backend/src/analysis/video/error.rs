@@ -1,7 +1,7 @@
 use std::{io, process::ExitStatus, time::Duration};
 
 #[derive(Debug, thiserror::Error)]
-pub(in crate::analysis) enum Error {
+pub enum Error {
     #[error("camera {camera_id} is not part of the session")]
     UnknownCamera { camera_id: u32 },
 
@@ -42,11 +42,8 @@ pub(in crate::analysis) enum Error {
         session_offset: Duration,
     },
 
-    #[error("camera {camera_id} sample at {session_offset:?} has no recording coverage")]
-    MissingRecording {
-        camera_id: u32,
-        session_offset: Duration,
-    },
+    #[error("analysis session end cannot be represented as a UTC millisecond timestamp")]
+    SessionEndUtcOverflow,
 
     #[error("camera {camera_id} sample at {session_offset:?} matches multiple recordings")]
     OverlappingRecordings {

@@ -15,6 +15,12 @@ pub enum Error {
     #[error("session event log is missing its final newline")]
     MissingFinalNewline,
 
+    #[error("session event log must be a direct regular file")]
+    InvalidEventFile,
+
+    #[error("session directory must be a direct directory")]
+    InvalidSessionDirectory,
+
     #[error("failed to serialize a session event")]
     Serialize(#[source] serde_json::Error),
 
@@ -47,6 +53,12 @@ pub enum Error {
 
     #[error("duplicate camera {camera_id} in session start")]
     DuplicateCamera { camera_id: u32 },
+
+    #[error("a session requires at least one camera")]
+    EmptyCameraList,
+
+    #[error("camera ID must be non-zero")]
+    ZeroCameraId,
 
     #[error("camera {camera_id} has an invalid sampling interval")]
     InvalidSamplingInterval { camera_id: u32 },

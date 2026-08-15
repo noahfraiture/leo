@@ -10,63 +10,74 @@ const INSTRUCTIONS: &str = "Analyze the student's video frames against the suppl
 /// A timestamped action or state observed in the current batch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, rig_core::schemars::JsonSchema)]
 #[schemars(crate = "rig_core::schemars")]
-pub(in crate::analysis) struct Observation {
+pub struct Observation {
     /// Session-relative timestamp supplied with the observed frame set.
-    pub(in crate::analysis) timestamp: String,
+    pub timestamp: String,
     /// Visible evidence reported by the model.
-    pub(in crate::analysis) description: String,
+    pub description: String,
 }
 
 /// The cumulative assessment of one expected checklist item.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, rig_core::schemars::JsonSchema)]
 #[schemars(crate = "rig_core::schemars")]
-pub(in crate::analysis) struct ChecklistProgress {
+pub struct ChecklistProgress {
     /// Expected checklist item being assessed.
-    pub(in crate::analysis) item: String,
+    pub item: String,
     /// Free text such as "respected", "not yet", or "will not be completed".
-    pub(in crate::analysis) status: String,
+    pub status: String,
     /// Evidence or rationale supporting the current status.
-    pub(in crate::analysis) note: String,
+    pub note: String,
 }
 
 /// Structured result for one batch plus the cumulative sequence context.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, rig_core::schemars::JsonSchema)]
 #[schemars(crate = "rig_core::schemars")]
-pub(in crate::analysis) struct AnalysisResponse {
+pub struct AnalysisResponse {
     /// Evidence observed in the current batch.
-    pub(in crate::analysis) observations: Vec<Observation>,
+    pub observations: Vec<Observation>,
     /// Concise rolling context carried into the next batch request.
-    pub(in crate::analysis) sequence_summary: String,
+    pub sequence_summary: String,
     /// Latest status of every item in the correct-sequence checklist.
-    pub(in crate::analysis) checklist_progress: Vec<ChecklistProgress>,
+    pub checklist_progress: Vec<ChecklistProgress>,
 }
 
 /// Executes one stateless, structured video-analysis request with a Rig model.
-pub(in crate::analysis) struct Agent<M: CompletionModel> {
+pub struct Agent<M: CompletionModel> {
     model: M,
 }
 
 /// OpenAI Responses specialization used by the application analysis pipeline.
-pub(in crate::analysis) type OpenAiAgent = Agent<openai::responses_api::ResponsesCompletionModel>;
+pub type OpenAiAgent = Agent<openai::responses_api::ResponsesCompletionModel>;
 
 impl OpenAiAgent {
     /// Builds the model from `OPENAI_API_KEY`, `ANALYSIS_MODEL`, and optional `OPENAI_BASE_URL`.
-    pub(in crate::analysis) fn from_env() -> Result<Self> {
-        let client = openai::Client::from_env()?;
+    pub fn from_env() -> Result<Self> {
+        let api_key = required_env_var("OPENAI_API_KEY")?;
         let model = required_env_var("ANALYSIS_MODEL")?;
+        if !configuration_value_is_present(&api_key) {
+            return Err(Error::BlankConfiguration("OPENAI_API_KEY"));
+        }
+        if !configuration_value_is_present(&model) {
+            return Err(Error::BlankConfiguration("ANALYSIS_MODEL"));
+        }
+        let client = openai::Client::from_env()?;
 
         Ok(Self::new(client.completion_model(model)))
     }
 }
 
+fn configuration_value_is_present(value: &str) -> bool {
+    !value.trim().is_empty()
+}
+
 impl<M: CompletionModel> Agent<M> {
     /// Wraps a configured model, primarily for alternate providers and deterministic tests.
-    pub(in crate::analysis) fn new(model: M) -> Self {
+    pub fn new(model: M) -> Self {
         Self { model }
     }
 
     /// Sends one prebuilt prompt and parses its structured analysis response.
-    pub(in crate::analysis) async fn analyze(&self, prompt: Message) -> Result<AnalysisResponse> {
+    pub async fn analyze(&self, prompt: Message) -> Result<AnalysisResponse> {
         let response = self
             .model
             .completion_request(prompt)
@@ -96,7 +107,17 @@ impl<M: CompletionModel> Agent<M> {
 mod tests {
     use rig_core::test_utils::{MockCompletionModel, MockTurn};
 
-    use super::{Agent, AnalysisResponse, ChecklistProgress, Error, Message, Observation};
+    use super::{
+        Agent, AnalysisResponse, ChecklistProgress, Error, Message, Observation,
+        configuration_value_is_present,
+    };
+
+    #[test]
+    fn provider_configuration_rejects_blank_values() {
+        assert!(!configuration_value_is_present(""));
+        assert!(!configuration_value_is_present("  \t"));
+        assert!(configuration_value_is_present("configured"));
+    }
 
     #[test]
     fn response_schema_has_the_three_analysis_sections() {

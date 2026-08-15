@@ -1,10 +1,12 @@
-//! Catalogue-backed sampling plans, canonical frame sets, and JPEG extraction.
+//! Local recording sampling plans, canonical frame sets, and JPEG extraction.
 
 mod error;
 mod extractor;
-mod video;
+mod plan;
 
 pub(super) use error::Error;
 pub(super) use extractor::extract_jpeg;
-pub(crate) use video::Video;
-pub(super) use video::{Frame, FrameSet, SampleSequence, SamplingSchedule};
+pub use plan::AnalysisWarning;
+#[cfg(test)]
+pub use plan::Frame;
+pub(super) use plan::{FrameSet, SampleSequence, SamplingSchedule, recording_gap_warnings};

@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::{
     error::{Error, Result},
-    session::{
+    event_log::{
         SCHEMA_VERSION, SessionAction, SessionCamera, SessionEvent, camera_ids, duration_to_millis,
     },
 };
@@ -319,6 +319,28 @@ mod tests {
 
         assert!(error.to_string().contains("sampling interval"));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn session_controller_rejects_empty_and_zero_id_camera_lists() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+
+        for (name, cameras, expected) in [
+            ("empty.jsonl", vec![], "at least one camera"),
+            (
+                "zero-id.jsonl",
+                vec![camera(0, Duration::from_secs(1))],
+                "camera ID must be non-zero",
+            ),
+        ] {
+            let path = directory.path().join(name);
+
+            let error = SessionController::create(path.clone(), cameras)
+                .expect_err("invalid cameras should be rejected");
+
+            assert!(error.to_string().contains(expected));
+            assert!(!path.exists());
+        }
     }
 
     #[test]

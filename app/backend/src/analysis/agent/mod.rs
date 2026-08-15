@@ -1,11 +1,7 @@
 //! Stateless structured model calls for prebuilt analysis prompts.
 
-mod agent;
+mod client;
 mod error;
 
-#[cfg(all(test, feature = "paid-openai-test"))]
-pub(super) use agent::OpenAiAgent;
-pub(super) use agent::{Agent, AnalysisResponse};
-#[cfg(test)]
-pub(super) use agent::{ChecklistProgress, Observation};
-pub(super) use error::Error;
+pub use client::{Agent, AnalysisResponse, ChecklistProgress, Observation, OpenAiAgent};
+pub use error::Error;

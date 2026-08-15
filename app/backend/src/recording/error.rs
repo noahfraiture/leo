@@ -1,55 +1,109 @@
-use std::time::Duration;
-
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum Error {
-    #[error("Synology HTTP request failed")]
-    Http(#[source] reqwest::Error),
-
-    #[error("Synology API returned error code {code}")]
-    Api { code: u32 },
-
-    #[error("Synology API response is missing {field}")]
-    MissingResponseField { field: &'static str },
-
-    #[error("Synology HTTP request returned {status}")]
-    HttpStatus { status: reqwest::StatusCode },
-
-    #[error("recording destination I/O failed")]
+pub enum Error {
+    #[error("recording I/O failed")]
     Io(#[from] std::io::Error),
 
-    #[error("Synology download returned an unexpected successful JSON response")]
-    UnexpectedJsonDownload,
+    #[error("recording discovery requires at least one camera")]
+    EmptyCameraList,
 
-    #[error("invalid catalogue UTC millisecond bounds {from_utc_ms}..{to_utc_ms}")]
-    InvalidListRange { from_utc_ms: i64, to_utc_ms: i64 },
+    #[error("recording camera ID must be non-zero")]
+    ZeroCameraId,
 
-    #[error("recording {recording_id} has invalid UTC second bounds {start_time}..{stop_time}")]
-    InvalidRecordingRange {
-        recording_id: u64,
-        start_time: i64,
-        stop_time: i64,
+    #[error("duplicate recording camera {camera_id}")]
+    DuplicateCamera { camera_id: u32 },
+
+    #[error("recordings root must be a direct directory")]
+    InvalidRecordingsRoot,
+
+    #[error("recording camera {camera_id} directory must be a direct directory")]
+    InvalidCameraDirectory { camera_id: u32 },
+
+    #[error("recording camera {camera_id} contains a symbolic link")]
+    InvalidSegmentEntry { camera_id: u32 },
+
+    #[error("FFprobe rejected recording media")]
+    InvalidMedia,
+
+    #[error("recording media has an invalid duration")]
+    InvalidMediaDuration,
+
+    #[error("FFprobe returned malformed JSON")]
+    ProbeJson(#[source] serde_json::Error),
+
+    #[error("FFprobe timed out")]
+    ProbeTimeout,
+
+    #[error("recording operation was shut down")]
+    Shutdown,
+
+    #[error("recorder timeout cannot be represented as positive FFmpeg microseconds")]
+    InvalidRecorderTimeout,
+
+    #[error("recorder executable preflight failed")]
+    RecorderPreflightFailed,
+
+    #[error("recorder executable preflight timed out")]
+    RecorderPreflightTimeout,
+
+    #[error("recording camera {camera_id} must use a valid RTSP URL")]
+    InvalidCameraUrl { camera_id: u32 },
+
+    #[error("recorder command channel closed")]
+    RecorderCommandClosed,
+
+    #[error("recorder command reply was dropped")]
+    RecorderReplyDropped,
+
+    #[error("recorder management thread failed")]
+    RecorderThread,
+
+    #[error("recorder startup failed")]
+    RecorderStartupFailed,
+
+    #[error("recorder startup cleanup was uncertain")]
+    RecorderStartupCleanupFailed,
+
+    #[error("recorder process cleanup failed")]
+    RecorderCleanupFailed {
+        #[source]
+        source: Box<Error>,
     },
 
-    #[error(
-        "recording {recording_id} UTC timestamp {utc_seconds} cannot be stored as milliseconds"
-    )]
-    RecordingTimestampOverflow { recording_id: u64, utc_seconds: i64 },
+    #[error("recorder startup timed out")]
+    RecorderStartupTimeout,
 
-    #[error("Synology catalogue ended after {loaded} of {total} recordings")]
-    IncompletePagination { loaded: usize, total: usize },
+    #[error("a recording session is already active")]
+    RecorderAlreadyActive,
 
-    #[error("recording {recording_id} has invalid download range {start:?}..{end:?}")]
-    InvalidDownloadRange {
-        recording_id: u64,
-        start: Duration,
-        end: Duration,
-    },
+    #[error("no recording session is active")]
+    RecorderNotActive,
+
+    #[error("FFmpeg recorder pipes were unavailable")]
+    FfmpegPipes,
+
+    #[error("FFmpeg recorder progress was invalid")]
+    InvalidFfmpegProgress,
+
+    #[error("FFmpeg recorder parser failed")]
+    FfmpegParser,
+
+    #[error("FFmpeg recorder parser thread failed")]
+    FfmpegPump,
+
+    #[error("FFmpeg recorder could not be stopped gracefully")]
+    FfmpegQuit,
+
+    #[error("FFmpeg recorder event receiver closed")]
+    RecorderEventReceiverClosed,
+
+    #[error("FFmpeg recorder output was not a direct regular file")]
+    InvalidAttemptOutput,
+
+    #[error("recording timestamp overflowed")]
+    TimestampOverflow,
+
+    #[error("recording camera {camera_id} contains overlapping segments")]
+    OverlappingSegments { camera_id: u32 },
 }
 
-impl From<reqwest::Error> for Error {
-    fn from(error: reqwest::Error) -> Self {
-        Self::Http(error.without_url())
-    }
-}
-
-pub(crate) type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, Error>;
