@@ -8,17 +8,26 @@ prepare-camera-video INPUT OUTPUT:
 test-camera-stream:
     nix develop --command cargo test -p camera --test rtsp_stream fixture_streams_h264_to_two_readers_and_stops_cleanly -- --ignored --exact
 
-test-synology-recording:
-    nix develop --command cargo test -p synology downloads_partial_recording -- --ignored
+test-host-recording:
+    nix develop --command cargo test -p camera --test rtsp_stream host_recorder_records_playable_mkv -- --ignored --exact --nocapture
 
-camera:
-    nix develop --command cargo run -p camera -- --address 127.0.0.1:8080 --rtsp-address 127.0.0.1:8554 --video camera/fixtures/default.mp4
+test-host-reconnect:
+    nix develop --command cargo test -p camera --test rtsp_stream host_recorder_reconnects_into_a_second_segment -- --ignored --exact --nocapture
 
-synology:
-    nix develop --command cargo run -p synology -- --address 127.0.0.1:5000 --camera 127.0.0.1:8080 --recording-catalogue synology/fixtures/recordings.json
+test-local-analysis:
+    nix develop --command cargo test -p backend analysis::facade::tests::full_local_ffmpeg_and_mock_model_analysis_uses_pre_and_post_gap_segments -- --ignored --exact --nocapture
+
+camera-1:
+    nix develop --command cargo run -p camera -- --address 127.0.0.1:8080 --rtsp-address 127.0.0.1:8554 --video camera/fixtures/salon-1.mp4
+
+camera-2:
+    nix develop --command cargo run -p camera -- --address 127.0.0.1:8081 --rtsp-address 127.0.0.1:8555 --video camera/fixtures/salon-2.mp4
 
 vlc:
     nix develop --command vlc rtsp://127.0.0.1:8554/axis-media/media.amp
 
 app:
     nix develop --command dx serve -p app --desktop
+
+css:
+    nix develop --command tailwindcss -i app/tailwind.css -o app/assets/tailwind.css

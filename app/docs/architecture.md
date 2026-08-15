@@ -1,381 +1,254 @@
-# Leo architecture
+# Leo Architecture
 
-Leo is a session-oriented system for recording and analyzing student exercise with several cameras. It is designed to operate locally, keep archival recording independent from the operator laptop, and provide synchronized video and metadata to an analysis pipeline.
+Leo is a local, session-scoped two-camera recording and analysis application. The desktop process owns preview, direct host recording, operator metadata, completed-session discovery, and explicit model analysis. A session is portable under one configured data root.
 
-This document defines the domain model, component responsibilities and intended workflows. Where a workflow is incomplete, that status is stated in the section that owns it rather than separated into a legacy or future architecture.
+## Workspace
 
-## Vocabulary
+The Cargo workspace contains exactly three crates:
 
-These distinctions are part of the domain model and should be reflected in code and data structures.
+| Crate | Type | Responsibility |
+| --- | --- | --- |
+| `app` | Library plus desktop binary | Dioxus routes and views, startup configuration, preview bridge, shared workflow state, logging, and root-scoped tasks. |
+| `backend` | Library | Durable session events, FFmpeg recorder supervision, finalized segment discovery, sampling plans, gap warnings, frame extraction, provider transport, and checkpoints. |
+| `camera` | Binary | One fixture-backed Axis-shaped virtual camera per process for local development and acceptance. |
 
-| Term | Definition |
-| --- | --- |
-| **Session** | Software-defined exercise interval aligned with continuously recorded camera media. |
-| **Recording** | Raw camera media continuously archived and catalogued by Surveillance Station. |
-| **Video** | One catalogued recording segment with camera and UTC bounds used for sampling. |
-| **Video stream** | Continuous encoded video data. |
-| **Frame** | One decoded image. |
-| **Frame rate** | Number of frames produced per second. |
-| **Sampling rate** | Number of frames selected per second. |
-| **Sampling schedule** | Sampling rate changes over time. |
-| **Sample** | A selected frame. |
-| **Sample sequence** | Ordered samples for one camera across its catalogued recording segments. |
-| **Frame index** | Position of a frame in a recording. |
-| **Sample index** | Position of a sample in a sample sequence. |
-| **Frame timestamp** | Frame position on the session timeline. |
-| **Frame set** | Available camera samples associated with the same session timestamp. |
-| **Frame batch** | Ordered frame sets covering a bounded time range. |
-| **Session sequence** | Ordered frame sets covering the full session. |
-| **Preview** | Live stream shown to the operator; it is not the archival recording. |
-| **Virtual camera** | The `camera` process used in development instead of a physical Axis camera. |
-| **Synology simulator** | The `synology` process that implements a narrow subset of the Surveillance Station API. |
-| **MediaMTX** | External media server supervised by the virtual camera and desktop app for different purposes. |
-| **RTSP** | Camera-facing protocol used to transport encoded video streams. |
-| **WHEP/WebRTC** | Loopback protocol used to deliver previews to the desktop webview. |
+The desktop crate depends on `backend`. The virtual camera is a separate local process and communicates only through HTTP and RTSP sockets.
 
-## Goals
-
-The deployment is expected to use approximately three to five AXIS P3278-LV cameras. The system must:
-
-- record locally without depending on the internet
-- record reliably for an entire training day
-- continue recording if the operator laptop crashes or sleeps
-- allow an operator to monitor all cameras
-- support camera selection, digital zoom, quality profiles and annotations
-- provide live frames to an AI analysis pipeline
-- retain original high-quality recordings
-- detect failures and recording gaps quickly
-- make recordings accessible programmatically
-- require little or no manual post-production
-- allow exported or processed data to be taken home
-
-This is not a traditional surveillance deployment. Surveillance Station provides reliable recording infrastructure, while Leo adds session workflow, metadata and analysis.
-
-## System architecture
-
-The same responsibility boundaries apply to physical deployment and local development. Physical Axis and Synology services are represented during development by the `camera` and `synology` binaries.
+## End-To-End Flow
 
 ```text
-Camera source
-(Axis camera or virtual camera)
-|
-|-- high-quality stream --> Synology Surveillance Station --> archival recordings
-|                            | (continuous on physical hardware;
-|                            |  fixture-backed in the simulator)
-|                            `-- catalogue/download --> app analysis pipeline
-|                                                         (backend implemented; UI not wired)
-|
-|-- preview RTSP ---------> app-owned MediaMTX --> WHEP/WebRTC --> operator UI
-|                            (implemented)
-|
-`-- VAPIX API <----------> operator app
-                             (virtual API exists; app client is not implemented)
+camera 1 RTSP ------------------+--> app MediaMTX --> WHEP/WebRTC --> preview 1
+                                |
+                                `--> FFmpeg recorder 1 --> camera-1/*.mkv
+
+camera 2 RTSP ------------------+--> app MediaMTX --> WHEP/WebRTC --> preview 2
+                                |
+                                `--> FFmpeg recorder 2 --> camera-2/*.mkv
+
+events.jsonl + finalized MKVs + recording-complete
+                                |
+                                `--> local FFprobe/FFmpeg analysis plan
+                                      --> explicit provider batches
+                                      --> analysis.json
 ```
 
-The Cargo workspace contains three independent Rust binaries:
+Preview and recording make independent RTSP/TCP connections. Preview availability does not establish recording health, and a failed preview does not stop a recorder. Camera participation and cadence are analysis settings only: an excluded camera remains visible and records for the complete active session.
 
-| Component | Responsibility |
-| --- | --- |
-| `app` | Dioxus desktop UI, preview bridge, JSONL session metadata, Synology recording access and offline analysis orchestration. Only preview is wired to the UI. |
-| `camera` | Development replacement for one Axis camera, with a VAPIX-shaped HTTP API and fixture-backed RTSP stream. |
-| `synology` | Development replacement for a small Surveillance Station API surface, with in-memory camera/control state and a fixture-backed recording catalogue. |
+## Runtime Configuration
 
-Each binary runs as a separate process and communicates over sockets. They do not share memory or a database. The running UI currently consumes only camera RTSP; the session, Synology and analysis backends are implemented but are not wired to the Analyze route, and the app does not yet call VAPIX.
+Configuration is loaded before the desktop UI starts. Relative defaults are resolved from the app process working directory.
 
-## Ownership boundaries
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `LEO_CAMERA_CONFIG` | `./cameras.json` | JSON deployment configuration for exactly two cameras. |
+| `LEO_DATA_DIR` | `./data` | Parent of `sessions/` and `logs/`. |
+| `LEO_RECORDER_TIMEOUT_SECS` | `10` | Initial all-camera readiness deadline and bounded FFmpeg RTSP network I/O timeout. |
+| `OPENAI_API_KEY` | none | Required only for an explicit provider analysis. |
+| `ANALYSIS_MODEL` | none | Required provider model name; the app has no hard-coded model. |
+| `OPENAI_BASE_URL` | provider default | Optional endpoint override read by the provider client. |
+| `RUST_LOG` | `info` | Filter for compact console and JSON file logging. |
 
-The boundaries prevent two systems from trying to own the same recording concern.
+The camera file must contain exactly two rows. IDs must be unique and nonzero; names and URLs must be nonblank; URLs must use the `rtsp` scheme; and `sampleEveryMs` must be a positive whole number of seconds. Stable camera IDs are shared by preview metadata, workflow state, session events, recording directories, warnings, and results.
 
-### Surveillance Station owns
+`LEO_DATA_DIR`, `sessions/`, and `logs/` must be direct directories and not symbolic links. The app creates missing directories. The recorder timeout must be a positive integer that is representable both as FFmpeg microseconds and as a Rust deadline. Reconnect delay is fixed at one second, and graceful Stop has five seconds before forced termination.
 
-- archival recording
-- continuous recording execution independent of session actions
-- archival stream configuration
-- reconnection after camera or network interruptions
-- recording catalogue, media download and health monitoring
-- recording recovery
-- storage rotation and retention enforcement
+Missing `OPENAI_API_KEY` or `ANALYSIS_MODEL` disables the Analyze action with a sanitized message. Selection, refresh, route navigation, and checklist edits never construct a provider or send a request. `OPENAI_BASE_URL` is consumed only when explicit analysis constructs the provider.
 
-The `synology` crate does not implement those storage concerns. It simulates API discovery, camera listing, recording-control state, and fixture-backed recording catalogue and download responses.
+## Desktop Ownership
 
-### Operator app owns
+`app::launch` establishes process-level ownership in this order:
 
-- session workflow and naming
-- operator interface
-- durable JSONL session events
-- software-only camera participation and sampling schedules
-- low-resolution previews
-- analysis planning, orchestration and checkpoints
-- temporary batch-local processing media
-- timestamped custom metadata
-- supported PTZ or digital-view controls
-- operator presets
-- operator retention, export and deletion decisions
-- downstream processing status
-- alarms presented to the operator
+1. Load and validate camera and data configuration.
+2. Install compact stderr logging and a nonblocking daily JSON appender.
+3. Spawn `RecorderRuntime`, which preflights `ffmpeg` and `ffprobe` and owns its management thread.
+4. Create `Workflow` and discover completed sessions.
+5. Start the app-owned MediaMTX preview bridge.
+6. Launch Dioxus with the validated shared state.
 
-Only live preview and its failure presentation are currently connected to the UI. The session and analysis backends are not yet connected to operator controls.
+Configuration, logging, recorder preflight, or workflow discovery failure produces one unavailable UI with no Start control. Preview startup failure is independent: the recording workflow remains available and the Monitor route shows preview recovery guidance.
 
-### Axis VAPIX provides
+The desktop event-loop owner retains `RecorderRuntime`, the preview `Bridge`, and `LogGuard`. On normal loop destruction it requests recorder shutdown, interrupts in-progress readiness or finalization, stops or kills and reaps children, joins the management thread, stops and reaps MediaMTX, and then drops the log guard so queued JSON events flush.
 
-- camera status and capabilities
-- separate preview and analysis streams
-- supported PTZ controls
-- stream profiles
-- snapshots
-- overlays
-- camera-side events
-- advanced settings that Surveillance Station does not expose
+`ReadyApp` owns the single recorder event receiver and one `Signal<Workflow>` above the router. Root-scoped session and analysis futures own work across awaits, so changing between Monitor and Analyze cannot cancel recording finalization or model analysis. Recorder threads communicate with UI state only through the event channel.
 
-The app must not become a second archival recorder through VAPIX. It accesses media through supported Surveillance Station catalogue and download APIs rather than internal NAS files. Surveillance Station maintains continuous recording, storage, catalogue and retention execution; the app records operator decisions and orchestrates downstream analysis.
+## Preview
 
-## Desktop app
-
-The `app` crate is the main operator-facing component. It uses Dioxus Desktop for routing and UI, and supervises a local MediaMTX process to adapt camera RTSP streams into WebRTC streams the embedded webview can play.
-
-### Startup and shutdown
-
-`app/src/main.rs` currently defines one development camera named `Workshop` at `rtsp://127.0.0.1:8554/axis-media/media.amp`. Persisted camera configuration and discovery have not replaced this source yet.
-
-Before launching Dioxus, the app starts the preview bridge:
-
-1. Reserve TCP port `8889` and UDP port `8189` so occupied ports fail early.
-2. Verify that `mediamtx` is on `PATH` and reports exactly `v1.18.2`.
-3. Generate a temporary MediaMTX configuration with anonymous, read-only access limited to loopback and the generated camera paths.
-4. Start MediaMTX and wait up to five seconds for a WHEP readiness response.
-5. Convert camera sources into browser-safe `PreviewState` metadata.
-
-Bridge startup failure does not terminate the UI. The app provides `PreviewState::Unavailable` to Dioxus and the Monitor route displays the error with recovery guidance. A camera may still be unavailable after the bridge starts because RTSP sources are pulled on demand; that failure is reported by the individual feed.
-
-The Dioxus event-loop handler owns normal shutdown. When the loop is destroyed, it kills and reaps MediaMTX. `Bridge::drop` provides fallback cleanup, and the temporary configuration exists only while the bridge owns it.
-
-After readiness, the bridge retains the MediaMTX child for cleanup but does not monitor or restart it. An unexpected MediaMTX exit does not currently change `PreviewState`; its effect appears at the affected feeds.
-
-### Preview data flow
-
-The app-owned MediaMTX process is a loopback-only protocol adapter:
+The app supervises MediaMTX `v1.18.2` as a loopback-only protocol adapter:
 
 ```text
-camera RTSP URL
+configured camera RTSP URL
     -> on-demand RTSP/TCP pull
-    -> app-owned MediaMTX path (`camera-<index>`)
-    -> anonymous loopback WHEP endpoint
-    -> MediaMTX `reader.js`
-    -> WebRTC MediaStream
-    -> Dioxus `<video>` element
+    -> private MediaMTX camera index path
+    -> 127.0.0.1:8889 WHEP
+    -> WebRTC media on 127.0.0.1:8189/UDP
+    -> native webview video element
 ```
 
-For each feed, `CameraFeed` loads `reader.js` and starts a JavaScript `MediaMTXWebRTCReader` through Dioxus `document::Eval`. Rust sends feed configuration into the evaluator. JavaScript sends connection errors or a successful-track signal back to Rust, then waits for a shutdown message. Component teardown closes the reader and clears the video's `srcObject`.
+The generated configuration disables recording and unrelated protocols and grants anonymous read access only from loopback to generated paths. Credential-bearing RTSP URLs remain in the private temporary configuration and are never sent to the webview. The webview receives only loopback WHEP and reader-script URLs.
 
-RTSP URLs remain in the MediaMTX configuration and are not sent to the webview. The webview receives only loopback WHEP and reader script URLs.
+Monitor keeps exactly two keyed feeds mounted. It displays preview failure, analysis inclusion, and recorder status separately. Recorder states are Idle, Starting, Recording, or Reconnecting.
 
-The generated MediaMTX configuration:
+## Session Workflow
 
-- binds WHEP HTTP and WebRTC media to loopback
-- grants anonymous read access only from loopback and only to generated camera paths
-- stores configuration in a temporary file with mode `0600` on Unix
-- pulls RTSP over TCP only when a viewer requests the path
-- disables recording, RTSP serving, RTMP, HLS, SRT, metrics, pprof, playback and the MediaMTX API
+Only one recording session may run at a time.
 
-This limits the local bridge boundary to the operator laptop. Between releasing the reserved ports and MediaMTX binding them, another compatible MediaMTX process could rarely win the handoff and cause a recoverable failed preview; stop the conflicting process and restart the app.
+### Start
 
-### Operator interface and session workflow
+Start creates an exclusive timestamped staging directory and one camera directory per configured ID. Every camera is sent to `RecorderRuntime`, including cameras initially excluded from analysis. One supervisor per camera starts direct FFmpeg recording equivalent to:
 
-The app has two routes under a shared layout:
+```text
+ffmpeg -hide_banner -loglevel info
+  -rtsp_transport tcp
+  -timeout <LEO_RECORDER_TIMEOUT_SECS in microseconds>
+  -i <configured camera URL>
+  -map 0:v:0 -an -c:v copy
+  -avoid_negative_ts make_zero
+  -f matroska
+  <camera directory>/.attempt-<uuid>.partial.mkv
+```
 
-| Route | Component | State |
-| --- | --- | --- |
-| `/` | `Monitor` | Renders available preview feeds or bridge startup guidance. |
-| `/analyze` | `Analyze` | Placeholder UI. |
+There is no video transcoding and no audio output. Matroska accepts H.264 or H.265 stream copy and allows useful finalization after interruptions. FFmpeg progress must report at least one output frame and the partial file must be nonempty before that camera is ready. The session becomes Active only after every configured camera is ready and `SessionController` durably creates `events.jsonl` with the start event.
 
-The intended operator workflow includes:
+If any initial recorder fails or times out, startup interrupts every attempt, stops or kills and reaps all children, removes the staging directory when cleanup is sound, and returns to Idle with one shared error. It creates neither a completed event log nor a completion marker.
 
-- a master session control that starts and ends the software session clock and event log
-- live views for all cameras
-- per-camera recording and health status
-- warnings with suggested operator actions
-- per-camera software participation, sampling rate and digital zoom controls
-- timestamped notes and bookmarks
-- playback of saved videos where needed
-- an action to discard a session recording
+### Active Changes
 
-Physical cameras and Surveillance Station continue recording regardless of the master session action or participation events. Only the live preview grid is functional in the UI today; camera status badges, timestamps, selection labels, settings and route sidebars are static presentation.
+Participation and whole-second sampling cadence changes are appended to `events.jsonl` before UI state changes. They affect the later sampling schedule, not capture. Metadata write uncertainty faults the session and triggers recorder cleanup.
 
-### Session metadata
+Each event includes schema version, contiguous sequence number, session UUID, UTC audit time, deterministic session-relative offset, and the operator action. The monotonic session clock determines action offsets.
 
-The app persists session metadata as one newline-terminated `events.jsonl` file. Each ordered event contains a schema version, sequence number, session ID, UTC audit timestamp, deterministic session-relative offset and one action. The implemented actions are session start with the initial camera configuration, camera participation changes, sampling-interval changes and session end.
+### Disconnect And Reconnect
 
-Participation and interval events affect only software sampling. They never start or stop physical recording. The backend implements durable event writes and completed-session replay; UI controls and reopening an active session after application restart remain deferred. Analysis stores its separate `analysis.json` checkpoint beside the event log.
+After initial readiness, an unexpected camera exit or bounded RTSP timeout is a recording gap rather than an immediate session fault:
 
-### Retention and export
+1. Finalize any valid media from that attempt.
+2. Set only that camera to Reconnecting.
+3. Wait one second.
+4. Start a new unique partial MKV.
+5. Return to Recording when new media arrives.
 
-The session workflow must:
+Other camera supervisors continue independently, and retries continue until Stop. A failed host storage probe, child spawn, interruption, kill, reap, or finalization is fatal. A fatal event is claimed once by the root workflow, sets the canonical shared alert, attempts the end event and recorder cleanup, preserves the faulted directory, and never writes a completion marker.
 
-- align catalogued recording segments and metadata by session time
-- keep metadata aligned with the session timeline
-- warn when storage is insufficient and propose an operator action
-- request supported media downloads for manual or offline processing
-- allow the operator to discard a session recording deliberately
+### Stop
 
-Surveillance Station owns the recordings, storage, catalogue, download service and retention execution. The app records the operator's decision and tracks its result. The retention UI workflow is not implemented yet.
+Operator Stop first attempts the durable end event and always commands recorder Stop, even if the event append failed. Each camera receives FFmpeg's graceful `q`; a child still alive after five seconds is killed and reaped. Every nonempty attempt is probed before promotion:
 
-### Analysis pipeline
+- exactly one video stream is required;
+- container start must be finite and nonnegative;
+- duration must be finite and positive;
+- the segment start is estimated from first media progress and clamped after the previous segment end;
+- valid media is atomically renamed to `<segment-start-UTC-ms>.mkv` without overwrite;
+- empty attempts are removed and invalid nonempty attempts remain for diagnosis.
 
-The backend analysis pipeline preserves the distinction between catalogue segments, planned samples and extracted frames:
+Only when the end event, all recorder cleanup, probing, and promotion succeed does Stop create `recording-complete`, return the workflow to Idle, and refresh completed sessions. Any uncertain finalization leaves the session Faulted and unavailable to Analyze.
 
-1. Load the completed session event log and replay each camera's software sampling schedule.
-2. List Surveillance Station catalogue segments intersecting the complete session interval.
-3. Match every planned sample to exactly one segment, build per-camera sequences and merge them into chronological frame sets.
-4. Divide the frame sets into fixed-size batches and resume after the completed checkpoint prefix.
-5. For only the current batch, merge required windows per segment and download them into a temporary directory.
-6. Extract temporary JPEGs at the planned offsets with FFmpeg and append them directly to the Agent prompt in canonical order.
-7. Call the Agent with the checklist and previous complete response, then atomically replace `analysis.json` after success.
+## Portable Session Storage
 
-Downloaded clips are batch-scoped, and each extracted JPEG file is removed after its bytes are read, so temporary media disappears on every success or failure path. Cross-batch video caching is intentionally absent. If transfer becomes a measured bottleneck, extraction may move to a NAS-side FFmpeg or frame-extraction service. The backend pipeline is implemented but is not wired to the Dioxus Analyze route.
+All files needed to move and resume a completed session remain below one directory:
 
-Live analysis may consume a dedicated low-resolution camera stream. Offline analysis should use retained recordings so temporary processing failures can be retried without losing frames. Polling VAPIX JPEG snapshots is simpler, but delays produce irregular sampling and missed frames cannot be recovered; it is not equivalent to decoding a recording according to a sampling schedule.
+```text
+<LEO_DATA_DIR>/
+|-- logs/
+|   `-- leo.jsonl.<date>
+`-- sessions/
+    `-- <start-request-UTC-ms>/
+        |-- events.jsonl
+        |-- recording-complete
+        |-- analysis.json
+        `-- recordings/
+            |-- camera-1/
+            |   |-- <segment-start-UTC-ms>.mkv
+            |   |-- <later-segment-start-UTC-ms>.mkv
+            |   `-- .attempt-<uuid>.partial.mkv
+            `-- camera-2/
+                `-- <segment-start-UTC-ms>.mkv
+```
 
-### External integrations
+The directory timestamp is a collision-resistant creation key; the UUID in `events.jsonl` is the durable session identity. `recording-complete` is exactly a zero-byte regular file created atomically after Stop finalization. `analysis.json` appears after analysis planning. An active or crashed session can lack the marker and checkpoint.
 
-The implemented Synology client uses the supported API to:
+Discovery scans direct children only and rejects symbolic links. A completed session requires both a valid ended event log and the marker. Finalized segment discovery accepts only direct regular files whose names are numeric UTC milliseconds with exact `.mkv` extension. It ignores partial and unrelated files, probes duration, rejects duplicate starts and same-camera overlap, and sorts by stable camera ID and start time.
 
-- open one explicit optional SID login session
-- list Recording API version 5 catalogue entries from `data.events[]` with `id`, `cameraId`, `startTime` and `stopTime`
-- download bounded recording-relative media ranges with Recording API version 6 into atomically replaced local files
+Absolute paths are excluded from checkpoint plan identity, so a completed directory can move intact to another local filesystem path. Leo does not perform that move.
 
-The client currently relies on `List` v5 timestamps and `Download` v6. Optional `List` v6 metadata and composite `(dsId, cameraId, id)` correlation remain deferred until physical NAS responses require them.
+## Direct Local Analysis
 
-It will use Axis VAPIX to:
+Analyze operates only on a selected completed session while recording is Idle. `backend::analysis::analyze_session` performs these steps:
 
-- consume RTSP H.264 or H.265 streams for previews and live analysis
-- query camera status and capabilities
-- control PTZ or digital cropping where supported
-- request snapshots
-- select preview or analysis stream profiles
+1. Require a nonblank checklist, direct session directory, and valid completion marker.
+2. Load and validate the ended `events.jsonl`.
+3. Discover and FFprobe finalized MKV segments under every camera directory.
+4. Replay participation and cadence events into deterministic sample schedules.
+5. Derive every uncovered camera interval as a persisted recording-gap warning.
+6. Omit samples without media, retain available frames from the other camera, and continue after reconnect gaps.
+7. Build five-frame-set batches and write or validate the initial zero-response `analysis.json` checkpoint.
+8. Construct the provider only if an incomplete batch remains.
+9. Extract requested JPEG bytes directly from local MKVs with FFmpeg, send one structured batch request, and atomically replace the checkpoint after success.
+10. Emit each complete durable checkpoint snapshot to the real Workflow callback.
 
-The Synology recording client is implemented for backend use but is not invoked by the current UI. The Axis client is not implemented. The development Synology simulator provides fixture-backed `List` v5/v6 and `Download` v6 responses but does not create or persist recordings.
+A frame set may contain one or both cameras. An offset with no available frame is omitted. No available frames across the complete plan fails before provider construction. Invalid or overlapping segments fail without replacing a valid prior checkpoint.
 
-### Code boundaries
+The checkpoint stores schema version, session UUID, authoritative checklist, path-independent plan fingerprint, total batches, recording-gap warnings, and completed responses. Vector position is the batch number. Resume validates all plan identity and keeps prior responses. A completed checkpoint returns without provider construction.
 
-| Path | Responsibility |
-| --- | --- |
-| `app/src/main.rs` | Routes, preview startup, Dioxus context and MediaMTX cleanup. |
-| `app/src/preview/bridge.rs` | MediaMTX version check, port reservation, readiness, metadata and child lifecycle. |
-| `app/src/preview/config.rs` | Temporary loopback MediaMTX configuration. |
-| `app/src/preview/error.rs` | Preview startup and lifecycle errors. |
-| `app/src/components/camera/feed.rs` | Video card and Rust-to-JavaScript WHEP reader lifecycle. |
-| `app/src/views/monitor/` | Preview grid and unavailable-state guidance. |
-| `app/src/views/analyze/` | Analysis route placeholder. |
-| `app/src/views/navbar.rs` | Shared navigation, sidebar and route body layout. |
-| `app/src/session/` | Durable JSONL session events, completed-session replay and software sampling actions. |
-| `app/src/recording/` | Supported Surveillance Station catalogue, login and media download client. |
-| `app/src/analysis/video/` | Sampling schedules, catalogue-backed sequences, frame sets and FFmpeg extraction. |
-| `app/src/analysis/agent/` | Stateless structured model request transport. |
-| `app/src/analysis/analyzer/` | Batch-local media materialization, prompt construction and atomic resumable checkpoints. |
+Frame extraction removes its temporary JPEG after reading the bytes. There are no downloaded clips, temporary MP4s, or persistent JPEGs in the session tree. Provider or checkpoint failures preserve the last durable response prefix for retry.
 
-## Virtual camera
+## Virtual Cameras
 
-The `camera` crate is a local Axis-shaped service for development and integration tests. One process represents one camera and supervises one MediaMTX child.
+One `camera` process represents one local fixture-backed source and supervises one RTSP-only MediaMTX child. The checked-in recipes start:
 
-At startup it:
+| Recipe | HTTP | RTSP | Fixture |
+| --- | --- | --- | --- |
+| `just camera-1` | `127.0.0.1:8080` | `127.0.0.1:8554` | `camera/fixtures/salon-1.mp4` |
+| `just camera-2` | `127.0.0.1:8081` | `127.0.0.1:8555` | `camera/fixtures/salon-2.mp4` |
 
-1. Parses the HTTP address, RTSP address and fixture path.
-2. Validates and canonicalizes the fixture path.
-3. Creates an RTSP-only MediaMTX configuration and starts the child process.
-4. Waits up to five seconds for the RTSP TCP listener.
-5. Starts the Axum HTTP API only after RTSP is reachable.
+Each RTSP stream is available at `/axis-media/media.amp`. The HTTP process exposes health and a narrow PTZ-shaped development endpoint; PTZ commands validate inputs but do not alter fixture video. Ctrl-C, HTTP failure, or MediaMTX exit stops the process and cleans up its child and temporary configuration.
 
-The process exits when it receives Ctrl-C, the HTTP server fails, or MediaMTX exits. It then stops MediaMTX and removes the temporary configuration. MediaMTX is not restarted automatically.
+## Development Recipes
 
-The HTTP service exposes:
+Enter `nix develop` in each of three terminals, then start the complete local desktop workflow:
 
-- `GET /health`, which reports only that the Axum service is running
-- `GET /axis-cgi/com/ptz.cgi`, a small VAPIX-compatible PTZ surface
+```bash
+just camera-1
+just camera-2
+just app
+```
 
-The PTZ surface validates relative pan and tilt values from `-360` to `360` for camera channel `1`. It does not persist position or alter the video. VAPIX command failures use VAPIX-style text responses, generally with HTTP `200 OK`.
+`just vlc` inspects camera 1 independently. `just css` regenerates the app's checked-in Tailwind CSS and daisyUI output.
 
-The camera-owned MediaMTX serves the supplied fixture at `rtsp://<rtsp-address>/axis-media/media.amp`. The service is anonymous, read-only and TCP-only. Readiness verifies the listener, not that media can be decoded. The ignored `just test-camera-stream` acceptance test performs the stronger FFprobe-based check.
+The five local media checks must be selected by these exact test names; never run a blanket ignored suite:
 
-## Synology simulator
+```bash
+nix develop --command cargo test -p backend analysis::video::extractor::tests::extracts_fixture_frame_as_jpeg -- --ignored --exact
+nix develop --command cargo test -p backend analysis::facade::tests::full_local_ffmpeg_and_mock_model_analysis_uses_pre_and_post_gap_segments -- --ignored --exact --nocapture
+nix develop --command cargo test -p camera --test rtsp_stream fixture_streams_h264_to_two_readers_and_stops_cleanly -- --ignored --exact
+nix develop --command cargo test -p camera --test rtsp_stream host_recorder_records_playable_mkv -- --ignored --exact --nocapture
+nix develop --command cargo test -p camera --test rtsp_stream host_recorder_reconnects_into_a_second_segment -- --ignored --exact --nocapture
+```
 
-The `synology` crate simulates the Surveillance Station API surface used for development. It serves fixture-backed catalogue and download responses but does not record or proxy video or model the physical deployment's continuous archive.
+The last four commands are also exposed as `just test-local-analysis`, `just test-camera-stream`, `just test-host-recording`, and `just test-host-reconnect`.
 
-Camera definitions come from repeated `--camera <socket-address>` arguments. Argument order assigns IDs starting at `1` and names such as `camera-1`. State is an in-memory `Arc<Mutex<Vec<Camera>>>` and resets when the process stops.
+## Paid-Test Gates
 
-An optional `--recording-catalogue <path>` is loaded once at startup and attached to those configured cameras. `just synology` loads `synology/fixtures/recordings.json`, whose single five-second H.264, 1280x720, silent recording reads `camera/fixtures/default.mp4`. Each strict JSON row contains `id`, `cameraId`, `dsId`, `mountId`, `startTime`, `stopTime`, logical `filePath`, private fixture-relative `video`, `videoCodec`, `audioCodec`, `width`, `height`, and `locked`; `sizeByte` comes from the media file. IDs must be non-zero and unique, camera references and dimensions must be valid, times must increase, and the resolved media must be a regular MP4 file.
+The only paid workflow test is absent unless Cargo feature `paid-openai-test` is enabled, remains ignored with an explicit cost warning, and begins with an assertion requiring `LEO_RUN_PAID_OPENAI_TEST=1` before constructing temporary storage, recorder runtime, Workflow, session, or provider. It uses one short local MKV and applies backend checkpoints through the real Workflow callback.
 
-The simulator exposes these operations under `/webapi`:
+The safe verification is compile-only:
 
-| Endpoint | `api` | `method` | Version | Behavior |
-| --- | --- | --- | --- | --- |
-| `query.cgi` | `SYNO.API.Info` | `Query` | `1` | Describes the supported APIs. |
-| `entry.cgi` | `SYNO.SurveillanceStation.Camera` | `List` | `9` | Lists configured cameras and their reachability. |
-| `entry.cgi` | `SYNO.SurveillanceStation.ExternalRecording` | `Record` | `2` | Sets an in-memory recording flag for one reachable camera. |
-| `entry.cgi` | `SYNO.SurveillanceStation.Recording` | `List` | `5` | Returns timestamp-bearing `data.events`. |
-| `entry.cgi` | `SYNO.SurveillanceStation.Recording` | `List` | `6` | Returns catalogue metadata in `data.recordings`. |
-| `entry.cgi` or `entry.cgi/{filename}` | `SYNO.SurveillanceStation.Recording` | `Download` | `6` | Returns full or partial raw MP4 bytes. |
+```bash
+cargo test -p app --features paid-openai-test paid_openai_workflow::paid_openai_analyzes_one_local_application_session --no-run
+```
 
-`ExternalRecording.Record` is an independent legacy mock endpoint. It only mutates an in-memory flag, does not affect the immutable fixture catalogue, and is not used by Leo's continuous-recording workflow. Continuous archival recording remains a responsibility of physical Surveillance Station.
+Do not set `LEO_RUN_PAID_OPENAI_TEST=1`, execute the paid test, or send an external provider request without separate explicit approval. Normal suites and the five exact local media checks do not perform paid work.
 
-### Recording API contract
+## Logging And Sensitive Data
 
-The implementation follows Surveillance Station Web API v3.11 while preserving a conflict between its primary Recording section and compatibility appendix:
+The app emits compact human-readable logs to stderr and daily JSON lines to `<LEO_DATA_DIR>/logs/leo.jsonl.<date>`. `RUST_LOG` controls both with `info` as the fallback. The retained nonblocking writer guard flushes during normal desktop shutdown.
 
-- Recording [`List` v6](https://global.download.synology.com/download/Document/Software/DeveloperGuide/Package/SurveillanceStation/All/enu/Surveillance_Station_Web_API.pdf#page=115), PDF viewer pages 115-117.
-- Recording [`Download` v6](https://global.download.synology.com/download/Document/Software/DeveloperGuide/Package/SurveillanceStation/All/enu/Surveillance_Station_Web_API.pdf#page=127), PDF viewer pages 127-128.
-- [Recording errors](https://global.download.synology.com/download/Document/Software/DeveloperGuide/Package/SurveillanceStation/All/enu/Surveillance_Station_Web_API.pdf#page=132), PDF viewer pages 132-133.
-- Conflicting [`List` v5 events appendix](https://global.download.synology.com/download/Document/Software/DeveloperGuide/Package/SurveillanceStation/All/enu/Surveillance_Station_Web_API.pdf#page=559), PDF viewer pages 559-561.
+Structured events cover configuration, preview startup, recorder attempts and cleanup, workflow transitions, discovery skips, gap planning, checkpoint saves, and analysis completion or failure. Logs must not contain API keys, RTSP credentials or full URLs, checklists, prompts, image bytes, or model request bodies.
 
-The two List versions remain separate rather than merging fields from the conflicting schemas:
+## Current Limits
 
-| Method and version | Successful response | Intended client use |
-| --- | --- | --- |
-| `List` v5 | `data` contains `offset`, filtered `total`, current Unix `timestamp`, and `events`. Each event contains `archId`, string `audioCodec`, empty `bookmark`, `bookmarkCount`, `cameraId`, `dsId`, `folder`, `id`, `imgHeight`, `imgWidth`, `startTime`, `stopTime`, and string `videoCodec`. | Required for UTC recording boundaries. |
-| `List` v6 | `data` contains the requested `dsId`, filtered `total`, and `recordings`. Each recording contains `id`, numeric `videoCodec`, numeric `audioCodec`, `height`, `width`, `cameraId`, `cameraName`, `sizeByte`, logical `filePath`, and `locked`; it deliberately has no timestamps. | Optional richer catalogue metadata. |
-| `Download` v6 | Success is the MP4 body itself, without a JSON success envelope. `id` and `mountId` select the fixture; `offsetTimeMs` and `playTimeMs` optionally select a clip. | Required for full or bounded media retrieval. |
-
-`Download` accepts both `/webapi/entry.cgi` and `/webapi/entry.cgi/<filename>`; the filename suffix is optional and does not participate in lookup. Missing `id`, `mountId`, and `offsetTimeMs` default to `0`, while omitted `playTimeMs` means the configured duration remaining after the offset. A complete request returns the original fixture bytes. A partial request uses FFmpeg stream copy to produce an ephemeral MP4 response. Errors retain Synology's HTTP-200 JSON envelope: Recording code `400` means execution failed, `401` means invalid Recording parameters, and `414` means no recording matched `(mountId, id)`.
-
-The following behavior is intentionally simulator policy rather than a claim about physical NAS behavior:
-
-- **Simulator choice: anonymous authentication.** No login or privilege checks run, and `_sid` is accepted and ignored.
-- **Simulator choice: GET-only handling.** Only the documented GET-shaped routes are registered; POST is unsupported.
-- **Simulator choice: zero-bound interpretation.** `fromTime=0` and `toTime=0` mean unbounded lower and upper limits.
-- **Simulator choice: half-open overlap.** A recording matches when `(fromTime == 0 || stopTime > fromTime) && (toTime == 0 || startTime < toTime)`.
-- **Simulator choice: deterministic sorting.** Results sort by `(startTime, cameraId, id)` before pagination; `total` is the filtered count and an offset past it returns an empty page.
-- **Simulator choice: strict range rejection.** Download rejects a zero `playTimeMs`, an offset at or beyond the configured duration, overflow, or an end beyond that duration with code `401`; it does not clamp the range.
-- **Simulator choice: `Content-Type`.** Successful Download responses use `video/mp4` as a convenience. Clients must not depend on that undocumented header.
-
-Reachability is a TCP connection attempt with a 250 ms timeout. It does not call `/health`, identify the camera, or inspect RTSP. API failures use Synology-style JSON envelopes and generally return HTTP `200 OK`.
-
-The simulator does not ingest RTSP, persist recordings, perform retention, or create media. It only reads pre-existing fixture files; a partial Download's temporary clip is ephemeral response generation, not a recording. It also omits storage accounting, recording mutation, bookmarks, CMS behavior, dynamic camera management, HTTP range streaming, and graceful shutdown. It should be bound only to a trusted development interface.
-
-## Network and time
-
-Development recipes and examples use:
-
-| Service | Address |
-| --- | --- |
-| Virtual camera HTTP | `127.0.0.1:8080` |
-| Virtual camera RTSP | `127.0.0.1:8554` |
-| Synology simulator HTTP | `127.0.0.1:5000` |
-| App WHEP HTTP | `127.0.0.1:8889` |
-| App WebRTC media | `127.0.0.1:8189/UDP` |
-
-A physical deployment connects the cameras and NAS to the PoE switch and assigns static IP addresses, so recording does not require a router. Cameras, Synology, the operator laptop, metadata services and analysis services must use the same clock source. Clock synchronization is more important than issuing every start command in the same millisecond. Store timestamps in UTC internally.
-
-## Reliability and security constraints
-
-Archival recording must continue when the operator laptop fails or sleeps. Physical cameras and Surveillance Station are therefore configured to record continuously; session and sampling actions do not control recording execution. The laptop remains a replaceable metadata, analysis, control and preview client. The NAS and PoE switch should have protected power so storage and cameras fail predictably together.
-
-Production deployment requires:
-
-- an isolated camera network where anonymous viewing and PTZ are enabled under `System > Accounts > Anonymous access`
-- administrator camera accounts retained for device setup but not received or stored by the app
-- authenticated administrative and storage services
-- encrypted storage on the NAS and operator laptop
-- no externally reachable simulator or preview ports
-- explicit recovery before camera-local backup media is erased
-- storage monitoring before a session and clear retention or export actions when capacity is low
-
-Specific NAS models, disk capacities, switch models and retention values are deployment decisions rather than code architecture.
+- The app process owns recording. A hard crash, force quit, laptop sleep, or power loss can leave FFmpeg children or partial MKVs; orphan cleanup, a recorder daemon, active-session recovery, and recorder reattachment are not implemented.
+- Normal shutdown is supervised, but recording does not survive desktop-process loss.
+- `LEO_DATA_DIR` may point to an external SSD that is already mounted. Device discovery, identity checks, mounting, capacity monitoring, eject handling, and physical-SSD acceptance are not implemented.
+- Automatic retention, rotation, deletion, export, storage forecasting, and playback are not implemented.
+- Physical camera acceptance and timeout calibration remain separate hardware work. Current acceptance uses local virtual cameras and fixtures only.
+- Camera discovery, Settings UI, packaged media executables, multiple concurrent sessions or analyses, and analysis cancellation are not implemented.
