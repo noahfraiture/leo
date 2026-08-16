@@ -1,0 +1,5 @@
+{"type":"server-started","port":61130,"host":"127.0.0.1","url_host":"localhost","url":"http://localhost:61130/?key=5d258659608479ec951f1881821c47639482e4413439ea087e718af26f758863","screen_dir":"/Users/noah/Projects/leo/app/.superpowers/brainstorm/64879-1786552721/content","state_dir":"/Users/noah/Projects/leo/app/.superpowers/brainstorm/64879-1786552721/state","idle_timeout_ms":14400000}
+{"type":"screen-added","file":"/Users/noah/Projects/leo/app/.superpowers/brainstorm/64879-1786552721/content/local-recording-architecture.html"}
+{"source":"user-event","type":"click","text":"✓\n    This makes senseUse this direct local recording and analysis flow.","choice":"approve-direct-analysis","id":null,"timestamp":1786553883758}
+{"type":"screen-added","file":"/Users/noah/Projects/leo/app/.superpowers/brainstorm/64879-1786552721/content/waiting.html"}
+{"type":"server-stopped","reason":"idle timeout"}
