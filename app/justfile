@@ -5,18 +5,6 @@ prepare-camera-video INPUT OUTPUT:
       -pix_fmt yuv420p -bf 0 -g 15 -keyint_min 15 -sc_threshold 0 -flags +cgop \
       -movflags +faststart {{quote(OUTPUT)}}
 
-test-camera-stream:
-    nix develop --command cargo test -p camera --test rtsp_stream fixture_streams_h264_to_two_readers_and_stops_cleanly -- --ignored --exact
-
-test-host-recording:
-    nix develop --command cargo test -p camera --test rtsp_stream host_recorder_records_playable_mkv -- --ignored --exact --nocapture
-
-test-host-reconnect:
-    nix develop --command cargo test -p camera --test rtsp_stream host_recorder_reconnects_into_a_second_segment -- --ignored --exact --nocapture
-
-test-local-analysis:
-    nix develop --command cargo test -p backend analysis::facade::tests::full_local_ffmpeg_and_mock_model_analysis_uses_pre_and_post_gap_segments -- --ignored --exact --nocapture
-
 camera-1:
     nix develop --command cargo run -p camera -- --address 127.0.0.1:8080 --rtsp-address 127.0.0.1:8554 --video camera/fixtures/salon-1.mp4
 
