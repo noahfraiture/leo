@@ -13,6 +13,7 @@ The Cargo workspace has exactly three crates:
 | [`camera`](camera/) | Fixture-backed Axis-shaped virtual camera for local development and media checks. |
 
 See [`docs/architecture.md`](docs/architecture.md) for lifecycle, storage, and failure semantics.
+Use the [operational pilot runbook](docs/operational-pilot.md) before validating real cameras or external storage.
 
 ## Local Workflow
 
