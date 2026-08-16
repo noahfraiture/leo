@@ -1,465 +1,350 @@
 # Operational Pilot
 
-Use this runbook on the intended Apple Silicon macOS host and SSD. Shell blocks run from `/Users/noah/Projects/leo/app`; replace every `<...>` value before running a block. Keep credential-bearing RTSP URLs out of the evidence directory and stop at the first failed gate.
+Use Bash on the intended Apple Silicon macOS host. Replace every `<...>` marker before running a block; any nonzero command fails the gate. Keep RTSP URLs only in the protected camera config and prompted shell variables, never in evidence.
 
 ## Acceptance Boundary
-
-Recording acceptance requires reviewed evidence for all of these gates on the intended SSD:
-
-- [ ] Failed start recovers cleanly.
-- [ ] Nominal recording completes.
-- [ ] Camera reconnect completes.
-- [ ] Clean exit and restart rediscover completed sessions.
-- [ ] One full expected class-duration soak completes.
-
-Keep provider variables absent throughout recording acceptance. Do not create `analysis.json`; it must remain absent from every pilot session until recording sign-off.
+Recording sign-off requires reviewed failed-start, nominal, reconnect, clean-restart, and full-class-duration soak evidence on the intended SSD. Keep provider variables absent and require `analysis.json` to remain absent until sign-off.
 
 ## Site Decisions
+Record values the repository cannot infer:
 
-Record these site-owned values in the operator record before touching hardware. They cannot be inferred from this repository.
+- Exactly two physical Axis cameras: stable nonzero ID, model, firmware, and vendor-confirmed H.264 RTSP URL/profile for each.
+- SSD: exact mount path, `VolumeUUID`, and lowercase `FilesystemType` reported by `diskutil info -plist`.
+- Minimum free-space margin and full expected class duration.
 
-| Decision | Required record |
-| --- | --- |
-| Cameras | Stable nonzero ID, model, and firmware for each physical camera |
-| Streams | Vendor-confirmed RTSP URL for each camera, stored as a secret |
-| SSD | Expected volume name, Volume UUID, and filesystem |
-| Capacity | Minimum free-space margin that must remain throughout the soak |
-| Duration | Full expected class duration |
-
-Do not substitute the fixture URL, frame rate, or capacity assumptions for site decisions.
+Store RTSP URLs only in the mode-`600` config outside the evidence directory.
 
 ## Preparation
-
-Create one UTC-named evidence directory and keep its path in every operator shell:
+In the main operator shell, establish the workspace, private evidence root, approved paths, and SSD validator. The workspace is the directory containing `Cargo.toml`, `flake.nix`, and `justfile`.
 
 ```bash
-cd /Users/noah/Projects/leo/app
 set -eu
 set -o pipefail
-export PILOT_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
-export PILOT_EVIDENCE="$HOME/LeoPilotEvidence/$PILOT_RUN_ID"
-mkdir -p "$PILOT_EVIDENCE"
+umask 077
+cd "<path-to-cargo-workspace>"
+test -f Cargo.toml && test -f flake.nix && test -f justfile
+export LEO_WORKSPACE_ROOT="$PWD"
 
+export PILOT_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$HOME/LeoPilotEvidence"
+chmod 700 "$HOME/LeoPilotEvidence"
+export PILOT_EVIDENCE="$HOME/LeoPilotEvidence/$PILOT_RUN_ID"
+mkdir "$PILOT_EVIDENCE"
+test "$(stat -f '%Lp' "$PILOT_EVIDENCE")" = 700
+
+export SSD_MOUNT="/Volumes/<exact-volume-name>"
+export EXPECTED_VOLUME_UUID="<exact-VolumeUUID>"
+export EXPECTED_FILESYSTEM="<exact-FilesystemType>"
+export LEO_DATA_DIR="$SSD_MOUNT/leo"
+export LEO_CAMERA_CONFIG="<existing-private-directory>/pilot-cameras.json"
+case "$LEO_CAMERA_CONFIG" in "$PILOT_EVIDENCE"/*) exit 1 ;; esac
+
+verify_ssd() {
+  local label="$1" plist actual_mount actual_uuid actual_filesystem
+  case "$label" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+  plist="$(mktemp "$PILOT_EVIDENCE/.diskutil.XXXXXX")"
+  diskutil info -plist "$SSD_MOUNT" > "$plist" || { rm -f "$plist"; return 1; }
+  actual_mount="$(plutil -extract MountPoint raw -expect string "$plist")" \
+    || { rm -f "$plist"; return 1; }
+  actual_uuid="$(plutil -extract VolumeUUID raw -expect string "$plist")" \
+    || { rm -f "$plist"; return 1; }
+  actual_filesystem="$(plutil -extract FilesystemType raw -expect string "$plist")" \
+    || { rm -f "$plist"; return 1; }
+  rm -f "$plist"
+  printf 'MountPoint=%s\nVolumeUUID=%s\nFilesystemType=%s\n' \
+    "$actual_mount" "$actual_uuid" "$actual_filesystem" \
+    | tee "$PILOT_EVIDENCE/ssd-identity-$label.txt" || return 1
+  test -d "$SSD_MOUNT" && test ! -L "$SSD_MOUNT" || return 1
+  test "$actual_mount" = "$SSD_MOUNT" || return 1
+  test "$actual_uuid" = "$EXPECTED_VOLUME_UUID" || return 1
+  test "$actual_filesystem" = "$EXPECTED_FILESYSTEM" || return 1
+  df -h "$SSD_MOUNT" | tee "$PILOT_EVIDENCE/ssd-space-$label.txt"
+}
+```
+
+Record versions, require preview ports to be free, and run only the safe local suites:
+
+```bash
+cd "$LEO_WORKSPACE_ROOT"
 nix develop --command mediamtx --version 2>&1 | tee "$PILOT_EVIDENCE/mediamtx-version.txt"
 nix develop --command ffmpeg -version 2>&1 | tee "$PILOT_EVIDENCE/ffmpeg-version.txt"
 nix develop --command ffprobe -version 2>&1 | tee "$PILOT_EVIDENCE/ffprobe-version.txt"
-
-if lsof -nP -iTCP:8889 -sTCP:LISTEN; then
-  printf 'TCP port 8889 is in use\n' >&2
-  exit 1
-fi
-if lsof -nP -iUDP:8189; then
-  printf 'UDP port 8189 is in use\n' >&2
-  exit 1
-fi
-
+if lsof -nP -iTCP:8889 -sTCP:LISTEN >/dev/null; then exit 1; fi
+if lsof -nP -iUDP:8189 >/dev/null; then exit 1; fi
 nix develop --command just test-unit 2>&1 | tee "$PILOT_EVIDENCE/test-unit.log"
 nix develop --command just test-e2e 2>&1 | tee "$PILOT_EVIDENCE/test-e2e.log"
 ```
 
-- [ ] MediaMTX reports `v1.18.2`; FFmpeg and FFprobe versions are recorded.
-- [ ] Both test recipes exit zero. The E2E recipe uses fixtures and a loopback model mock.
-- [ ] `8889/TCP` and `8189/UDP` were free before the E2E run.
+Require MediaMTX `v1.18.2` and both recipes to exit zero.
 
 ## Camera Bench
-
-Connect one physical camera at a time. Enter URLs without placing credentials in shell history, then collect one bounded RTSP/TCP probe per camera:
+Record both Axis models and firmware, then probe each vendor-confirmed URL for 12 seconds. Restricted JSON is safe to retain; raw stderr is discarded because it can repeat credentials.
 
 ```bash
-cd /Users/noah/Projects/leo/app
-set -eu
-set -o pipefail
-export PILOT_EVIDENCE="$HOME/LeoPilotEvidence/<UTC-run-id>"
-
-IFS= read -r -s -p 'Camera 1 RTSP URL: ' CAMERA_1_RTSP
-printf '\n'
-IFS= read -r -s -p 'Camera 2 RTSP URL: ' CAMERA_2_RTSP
-printf '\n'
-
-nix develop --command ffprobe -v error -rtsp_transport tcp -timeout 10000000 \
-  -read_intervals '%+12' -select_streams v -count_packets \
-  -show_entries 'stream=index,codec_name,nb_read_packets' -of json \
-  "$CAMERA_1_RTSP" 2>"$PILOT_EVIDENCE/camera-1.ffprobe.err" \
-  | tee "$PILOT_EVIDENCE/camera-1.ffprobe.json"
-
-nix develop --command ffprobe -v error -rtsp_transport tcp -timeout 10000000 \
-  -read_intervals '%+12' -select_streams v -count_packets \
-  -show_entries 'stream=index,codec_name,nb_read_packets' -of json \
-  "$CAMERA_2_RTSP" 2>"$PILOT_EVIDENCE/camera-2.ffprobe.err" \
-  | tee "$PILOT_EVIDENCE/camera-2.ffprobe.json"
-
+cd "$LEO_WORKSPACE_ROOT"
+validate_camera_json() {
+  local json="$1" count codec packets
+  count="$(plutil -extract streams raw -expect array "$json" 2>/dev/null)" || return 1
+  codec="$(plutil -extract streams.0.codec_name raw "$json" 2>/dev/null)" || return 1
+  packets="$(plutil -extract streams.0.nb_read_packets raw "$json" 2>/dev/null)" || return 1
+  test "$count" -eq 1 || return 1
+  test "$codec" = h264 || return 1
+  case "$packets" in ''|*[!0-9]*) return 1 ;; esac
+  test "$packets" -gt 0 || return 1
+}
+probe_axis() {
+  local url="$2" json="$PILOT_EVIDENCE/camera-$1.ffprobe.json"
+  if ! nix develop --command ffprobe -v error -rtsp_transport tcp -timeout 10000000 \
+    -read_intervals '%+12' -select_streams v -count_packets \
+    -show_entries 'stream=codec_name,nb_read_packets' -of json "$url" \
+    > "$json" 2>/dev/null; then
+    rm -f "$json"
+    return 1
+  fi
+  validate_camera_json "$json"
+}
+IFS= read -r -s -p 'Axis camera 1 RTSP URL: ' CAMERA_1_RTSP; printf '\n'
+IFS= read -r -s -p 'Axis camera 2 RTSP URL: ' CAMERA_2_RTSP; printf '\n'
+trap 'unset CAMERA_1_RTSP CAMERA_2_RTSP' EXIT
+probe_axis 1 "$CAMERA_1_RTSP"
+probe_axis 2 "$CAMERA_2_RTSP"
 unset CAMERA_1_RTSP CAMERA_2_RTSP
+trap - EXIT
 ```
 
-Each 12-second result must contain exactly one video stream, `codec_name` equal to `h264`, and a positive `nb_read_packets`. Do not impose the fixture-specific 15 fps or 150-packet threshold. The nominal app session, not a second bench reader, accepts concurrent preview and recording connections.
+Both probes must pass. Do not apply the fixture-specific 15 fps or 150-packet threshold; the nominal app run accepts concurrent preview and recording readers.
 
 ## Storage And Preview
-
-Set the approved values, inspect the mounted device, and stop before creating anything unless the reported mount point, Volume UUID, and filesystem exactly match the site record. Confirm `df` meets the site-defined free-space margin.
+Verify identity immediately before creating any SSD directory. Reject existing symlinks first, write-probe the data root, then create a private config without placing its URL contents in shell history.
 
 ```bash
-cd /Users/noah/Projects/leo/app
-set -eu
-set -o pipefail
-export PILOT_EVIDENCE="$HOME/LeoPilotEvidence/<UTC-run-id>"
-export SSD_MOUNT="/Volumes/<exact-volume-name>"
-export EXPECTED_VOLUME_UUID="<expected-volume-uuid>"
-export EXPECTED_FILESYSTEM="<expected-filesystem>"
-export LEO_DATA_DIR="$SSD_MOUNT/leo"
-export LEO_CAMERA_CONFIG="/absolute/path/to/pilot-cameras.json"
+cd "$LEO_WORKSPACE_ROOT"
+verify_ssd precreate
+for directory in "$LEO_DATA_DIR" "$LEO_DATA_DIR/sessions" "$LEO_DATA_DIR/logs"; do
+  if test -e "$directory" || test -L "$directory"; then
+    test -d "$directory" && test ! -L "$directory"
+  fi
+done
+mkdir -p "$LEO_DATA_DIR/sessions" "$LEO_DATA_DIR/logs"
+for directory in "$LEO_DATA_DIR" "$LEO_DATA_DIR/sessions" "$LEO_DATA_DIR/logs"; do test -d "$directory" && test ! -L "$directory"; done
+probe="$LEO_DATA_DIR/.leo-write-probe.$$"
+printf x > "$probe" && rm "$probe"
 
-test -d "$SSD_MOUNT"
-test ! -L "$SSD_MOUNT"
-diskutil info "$SSD_MOUNT" | tee "$PILOT_EVIDENCE/ssd-info.txt"
-df -h "$SSD_MOUNT" | tee "$PILOT_EVIDENCE/ssd-space-before.txt"
+config_parent="${LEO_CAMERA_CONFIG%/*}"
+test -d "$config_parent" && test ! -L "$config_parent"
+test ! -e "$LEO_CAMERA_CONFIG" && test ! -L "$LEO_CAMERA_CONFIG"
+umask 077
+install -m 600 /dev/null "$LEO_CAMERA_CONFIG"
+"${EDITOR:-vi}" "$LEO_CAMERA_CONFIG"
+chmod 600 "$LEO_CAMERA_CONFIG"
+plutil -lint "$LEO_CAMERA_CONFIG"
 ```
 
-Create the protected camera configuration at `LEO_CAMERA_CONFIG`. It must have exactly two rows like these, with two unique nonzero IDs, nonblank names, vendor-confirmed RTSP URLs, and positive whole-second sampling cadences:
+Enter exactly two rows with the approved Axis IDs, names, URLs, initial participation, and positive whole-second cadence:
 
 ```json
 [
-  {
-    "id": <camera-1-nonzero-id>,
-    "name": "<camera-1-name>",
-    "rtspUrl": "rtsp://<camera-1-vendor-confirmed-url>",
-    "enabled": true,
-    "sampleEveryMs": 1000
-  },
-  {
-    "id": <camera-2-different-nonzero-id>,
-    "name": "<camera-2-name>",
-    "rtspUrl": "rtsp://<camera-2-vendor-confirmed-url>",
-    "enabled": true,
-    "sampleEveryMs": 1000
-  }
+  {"id": <axis-1-id>, "name": "<axis-1-name>", "rtspUrl": "rtsp://<vendor-url>", "enabled": true, "sampleEveryMs": 1000},
+  {"id": <axis-2-id>, "name": "<axis-2-name>", "rtspUrl": "rtsp://<vendor-url>", "enabled": true, "sampleEveryMs": 1000}
 ]
 ```
 
-Only after the identity review passes and the configuration exists, rerun the identity inspection immediately before this block. Reject existing symlinks before creating and probing the direct directories:
+Define one launch gate. It revalidates SSD identity before every app launch and removes every provider or paid-test variable:
 
 ```bash
-cd /Users/noah/Projects/leo/app
-set -eu
-: "${SSD_MOUNT:?set SSD_MOUNT after identity review}"
-: "${LEO_DATA_DIR:?set LEO_DATA_DIR after identity review}"
-: "${LEO_CAMERA_CONFIG:?set LEO_CAMERA_CONFIG}"
-test -d "$SSD_MOUNT"
-test ! -L "$SSD_MOUNT"
-diskutil info "$SSD_MOUNT" > /dev/null
-
-for directory in "$LEO_DATA_DIR" "$LEO_DATA_DIR/sessions" "$LEO_DATA_DIR/logs"; do
-  if [ -e "$directory" ] || [ -L "$directory" ]; then
-    test -d "$directory"
-    test ! -L "$directory"
-  fi
-done
-
-mkdir -p "$LEO_DATA_DIR/sessions" "$LEO_DATA_DIR/logs"
-test -d "$LEO_DATA_DIR" && test ! -L "$LEO_DATA_DIR"
-test -d "$LEO_DATA_DIR/sessions" && test ! -L "$LEO_DATA_DIR/sessions"
-test -d "$LEO_DATA_DIR/logs" && test ! -L "$LEO_DATA_DIR/logs"
-
-probe="$LEO_DATA_DIR/.leo-write-probe.$$"
-(umask 077; printf 'x' > "$probe")
-test -f "$probe"
-rm "$probe"
-
-test -f "$LEO_CAMERA_CONFIG"
-test ! -L "$LEO_CAMERA_CONFIG"
-chmod 600 "$LEO_CAMERA_CONFIG"
+launch_leo() {
+  local label="$1"
+  verify_ssd "$label" || return 1
+  if lsof -nP -iTCP:8889 -sTCP:LISTEN >/dev/null; then return 1; fi
+  if lsof -nP -iUDP:8189 >/dev/null; then return 1; fi
+  cd "$LEO_WORKSPACE_ROOT"
+  env -u OPENAI_API_KEY -u ANALYSIS_MODEL -u OPENAI_BASE_URL \
+    -u LEO_E2E_REAL_OPENAI -u LEO_RUN_PAID_OPENAI_TEST \
+    LEO_CAMERA_CONFIG="$LEO_CAMERA_CONFIG" LEO_DATA_DIR="$LEO_DATA_DIR" \
+    LEO_RECORDER_TIMEOUT_SECS=10 RUST_LOG=info \
+    nix develop --command just app 2>&1 | tee "$PILOT_EVIDENCE/$label-console.log"
+}
+ps -axo pid=,ppid=,comm= | awk '$3 ~ /(^|\/)(ffmpeg|ffprobe|mediamtx)$/ {print}' \
+  | LC_ALL=C sort > "$PILOT_EVIDENCE/processes-before-app.txt"
+launch_leo initial
 ```
 
-Launch with explicit paths and timeout, removing all provider and paid-test variables even if the shell loaded them from `.env`:
-
-```bash
-cd /Users/noah/Projects/leo/app
-set -eu
-set -o pipefail
-: "${PILOT_EVIDENCE:?set PILOT_EVIDENCE}"
-: "${LEO_CAMERA_CONFIG:?set LEO_CAMERA_CONFIG}"
-: "${LEO_DATA_DIR:?set LEO_DATA_DIR}"
-
-env \
-  -u OPENAI_API_KEY \
-  -u ANALYSIS_MODEL \
-  -u OPENAI_BASE_URL \
-  -u LEO_E2E_REAL_OPENAI \
-  -u LEO_RUN_PAID_OPENAI_TEST \
-  LEO_CAMERA_CONFIG="$LEO_CAMERA_CONFIG" \
-  LEO_DATA_DIR="$LEO_DATA_DIR" \
-  LEO_RECORDER_TIMEOUT_SECS=10 \
-  RUST_LOG=info \
-  nix develop --command just app 2>&1 | tee "$PILOT_EVIDENCE/app-console.log"
-```
-
-- [ ] Startup reports the reviewed SSD paths and `Session idle`.
-- [ ] Both previews show moving video; `preview ready` alone is insufficient.
-- [ ] Analyze is disabled because provider configuration is absent.
+While `launch_leo initial` runs, require `Session idle`, reviewed SSD paths, two moving previews, and disabled provider analysis.
 
 ## Failed Start
-
-Record the current completed-session list and direct session entries before disconnecting anything:
+In a second shell, establish the same workspace and private run paths; keep this shell for all session checks:
 
 ```bash
-cd /Users/noah/Projects/leo/app
 set -eu
 set -o pipefail
-: "${PILOT_EVIDENCE:?set PILOT_EVIDENCE}"
-: "${LEO_DATA_DIR:?set LEO_DATA_DIR}"
-
-find "$LEO_DATA_DIR/sessions" -mindepth 1 -maxdepth 1 -print \
-  | LC_ALL=C sort \
-  | tee "$PILOT_EVIDENCE/failed-start-sessions-before.txt"
-```
-
-1. Disconnect only camera 2 before clicking Start.
-2. Click Start and wait for the failure; restore camera 2 afterward.
-3. Require recovery to `Session idle`, no new completed session, no completion marker, and no retained staging directory when cleanup is sound.
-4. Confirm camera 1's recorder was stopped. The app-owned preview MediaMTX process may remain while Leo is open, but no Leo recording FFmpeg process may remain.
-
-Capture and compare the after-state, then collect a credential-free process list:
-
-```bash
-cd /Users/noah/Projects/leo/app
-set -eu
-set -o pipefail
-: "${PILOT_EVIDENCE:?set PILOT_EVIDENCE}"
-: "${LEO_DATA_DIR:?set LEO_DATA_DIR}"
-
-find "$LEO_DATA_DIR/sessions" -mindepth 1 -maxdepth 1 -print \
-  | LC_ALL=C sort \
-  | tee "$PILOT_EVIDENCE/failed-start-sessions-after.txt"
-cmp "$PILOT_EVIDENCE/failed-start-sessions-before.txt" \
-  "$PILOT_EVIDENCE/failed-start-sessions-after.txt"
-{ pgrep -lx 'ffmpeg|ffprobe|mediamtx' || true; } \
-  | tee "$PILOT_EVIDENCE/failed-start-processes.txt"
-```
-
-`Session faulted`, a failed comparison, any retained new directory, or any Leo-owned recorder process fails the gate. Preserve the directory and all evidence without deleting or repairing it.
-
-## Nominal Session
-
-1. Start a fresh session and require both previews moving, `Session active`, and two `Recording` statuses.
-2. Change camera 1 cadence to 2 seconds once.
-3. Exclude camera 2 from analysis, wait 15 seconds, then include it again. Both cameras must keep previewing and recording.
-4. Continue until at least two minutes have elapsed, then Stop normally and wait for `Session idle`.
-5. Open Analyze only to confirm completed-session discovery; do not start analysis. Record the displayed session directory.
-
-Set the nominal values in a second operator shell, then run the artifact block below:
-
-```bash
-cd /Users/noah/Projects/leo/app
+umask 077
+cd "<same-cargo-workspace>"
+test -f Cargo.toml && test -f flake.nix && test -f justfile
+export LEO_WORKSPACE_ROOT="$PWD"
 export PILOT_EVIDENCE="$HOME/LeoPilotEvidence/<UTC-run-id>"
+test -d "$PILOT_EVIDENCE" && test ! -L "$PILOT_EVIDENCE"
+test "$(stat -f '%Lp' "$PILOT_EVIDENCE")" = 700
 export LEO_DATA_DIR="/Volumes/<exact-volume-name>/leo"
-export CAMERA_1_ID="<camera-1-nonzero-id>"
-export CAMERA_2_ID="<camera-2-different-nonzero-id>"
-export SESSION_LABEL="nominal"
-export EXPECTED_EVENT_LINES=5
-export SESSION_DIR="$LEO_DATA_DIR/sessions/<displayed-start-request-UTC-ms>"
-```
-
-Use this same artifact block for nominal, reconnect, and soak sessions after setting their section-specific values:
-
-```bash
-cd /Users/noah/Projects/leo/app
-set -eu
-set -o pipefail
-: "${PILOT_EVIDENCE:?set PILOT_EVIDENCE}"
-: "${CAMERA_1_ID:?set CAMERA_1_ID}"
-: "${CAMERA_2_ID:?set CAMERA_2_ID}"
-: "${SESSION_LABEL:?set SESSION_LABEL}"
-: "${EXPECTED_EVENT_LINES:?set EXPECTED_EVENT_LINES}"
-: "${SESSION_DIR:?set SESSION_DIR}"
-case "$CAMERA_1_ID" in 0|*[!0-9]*) exit 1 ;; esac
-case "$CAMERA_2_ID" in 0|*[!0-9]*) exit 1 ;; esac
-test "$CAMERA_1_ID" != "$CAMERA_2_ID"
-
-test -d "$SESSION_DIR" && test ! -L "$SESSION_DIR"
-test -f "$SESSION_DIR/events.jsonl" && test ! -L "$SESSION_DIR/events.jsonl"
-test -f "$SESSION_DIR/recording-complete" && test ! -L "$SESSION_DIR/recording-complete"
-test "$(stat -f '%z' "$SESSION_DIR/recording-complete")" -eq 0
-test "$(wc -l < "$SESSION_DIR/events.jsonl")" -eq "$EXPECTED_EVENT_LINES"
-test ! -e "$SESSION_DIR/analysis.json"
-
-stat -f 'size=%z path=%N' "$SESSION_DIR/recording-complete" \
-  | tee "$PILOT_EVIDENCE/$SESSION_LABEL-completion-marker.txt"
-nl -ba "$SESSION_DIR/events.jsonl" \
-  | tee "$PILOT_EVIDENCE/$SESSION_LABEL-events-numbered.txt"
-cp "$SESSION_DIR/events.jsonl" "$PILOT_EVIDENCE/$SESSION_LABEL-events.jsonl"
-
-for camera_id in "$CAMERA_1_ID" "$CAMERA_2_ID"; do
-  camera_dir="$SESSION_DIR/recordings/camera-$camera_id"
-  manifest="$PILOT_EVIDENCE/$SESSION_LABEL-camera-$camera_id-segments.txt"
-  test -d "$camera_dir" && test ! -L "$camera_dir"
-  : > "$manifest"
-  count=0
-  for file in "$camera_dir"/*.mkv; do
-    test -f "$file" || continue
-    test ! -L "$file"
-    name="${file##*/}"
-    stem="${name%.mkv}"
-    case "$stem" in
-      ''|*[!0-9]*) exit 1 ;;
-    esac
-    count=$((count + 1))
-    printf '%s\n' "$file" >> "$manifest"
-    nix develop --command ffprobe -v error -select_streams v -count_packets \
-      -show_entries 'stream=index,codec_name,nb_read_packets:format=format_name,start_time,duration' \
-      -of json "$file" 2> "$PILOT_EVIDENCE/$SESSION_LABEL-camera-$camera_id-$stem.ffprobe.err" \
-      > "$PILOT_EVIDENCE/$SESSION_LABEL-camera-$camera_id-$stem.ffprobe.json"
-  done
-  test "$count" -ge 1
-done
-
-for partial in "$SESSION_DIR"/recordings/camera-*/.attempt-*.partial.mkv; do
-  test ! -e "$partial"
-done
-printf 'no partial attempts\n' > "$PILOT_EVIDENCE/$SESSION_LABEL-no-partials.txt"
-```
-
-For every generated FFprobe JSON, require exactly one video stream, H.264 codec, Matroska format, positive packet count, and positive duration. FFprobe must exit zero. For nominal, the five numbered events must be start, cadence change, camera 2 exclusion, camera 2 inclusion, and end, in that order. Any partial attempt or `analysis.json` fails the gate.
-
-## Reconnect Session
-
-Keep `LEO_RECORDER_TIMEOUT_SECS=10`; do not change it for this run.
-
-1. Start a fresh session and wait for both cameras to report `Recording`.
-2. Disconnect only camera 2 after useful media has accumulated. Camera 1 must remain `Recording` while camera 2 shows `Reconnecting`.
-3. Restore camera 2 at the same URL and require it to return to `Recording`.
-4. Record UTC and epoch-second timestamps for disconnect, detection, restore, and recovery; calculate detection and recovery latency.
-5. Stop normally, confirm completed-session discovery, and rerun the Nominal Session artifact block with `SESSION_LABEL=reconnect`, `EXPECTED_EVENT_LINES=2`, and the fresh `SESSION_DIR`.
-
-Use this helper at each of the four moments, not all at once:
-
-```bash
-cd /Users/noah/Projects/leo/app
-set -eu
-set -o pipefail
-export PILOT_EVIDENCE="$HOME/LeoPilotEvidence/<UTC-run-id>"
-record_time() {
-  date -u "+event=$1 utc=%Y-%m-%dT%H:%M:%SZ epoch_s=%s" \
-    | tee -a "$PILOT_EVIDENCE/reconnect-timings.txt"
+export CAMERA_1_ID="<axis-1-id>"
+export CAMERA_2_ID="<axis-2-id>"
+media_snapshot() {
+  ps -axo pid=,ppid=,comm= | awk '$3 ~ /(^|\/)(ffmpeg|ffprobe|mediamtx)$/ {print}' \
+    | LC_ALL=C sort > "$1"
 }
 ```
 
-Run `record_time camera_2_disconnected`, `record_time reconnecting_observed`, `record_time camera_2_restored`, and `record_time recording_observed` at their respective moments.
-
-Camera 2 must have at least two playable finalized numeric segments. In filename order, calculate and record for each adjacent pair:
+1. Snapshot direct session entries and media processes, disconnect only Axis camera 2, then press Start.
+2. Require recovery to `Session idle`, unchanged completed sessions, no marker or retained staging directory, and camera 1 recorder cleanup.
+3. Restore camera 2. A faulted or retained directory fails the gate and must be preserved.
 
 ```bash
-cd /Users/noah/Projects/leo/app
-set -eu
-: "${PILOT_EVIDENCE:?set PILOT_EVIDENCE}"
-: "${CAMERA_2_ID:?set CAMERA_2_ID}"
-test "$(wc -l < "$PILOT_EVIDENCE/reconnect-camera-$CAMERA_2_ID-segments.txt")" -ge 2
+find "$LEO_DATA_DIR/sessions" -mindepth 1 -maxdepth 1 -print | LC_ALL=C sort \
+  > "$PILOT_EVIDENCE/failed-start-sessions-before.txt"
+media_snapshot "$PILOT_EVIDENCE/failed-start-processes-before.txt"
 ```
 
-```text
-media_span_ms = ceil(format.duration * 1000) - floor(format.start_time * 1000)
-segment_end_utc_ms = numeric_filename_ms + media_span_ms
-next_numeric_filename_ms >= segment_end_utc_ms
+Perform the drill, restore camera 2, then run:
+
+```bash
+find "$LEO_DATA_DIR/sessions" -mindepth 1 -maxdepth 1 -print | LC_ALL=C sort \
+  > "$PILOT_EVIDENCE/failed-start-sessions-after.txt"
+media_snapshot "$PILOT_EVIDENCE/failed-start-processes-after.txt"
+cmp "$PILOT_EVIDENCE/failed-start-sessions-before.txt" \
+  "$PILOT_EVIDENCE/failed-start-sessions-after.txt"
+comm -13 "$PILOT_EVIDENCE/failed-start-processes-before.txt" \
+  "$PILOT_EVIDENCE/failed-start-processes-after.txt" \
+  > "$PILOT_EVIDENCE/failed-start-new-processes.txt"
+test ! -s "$PILOT_EVIDENCE/failed-start-new-processes.txt"
 ```
 
-Use the FFprobe JSON as inputs and save the calculation as `reconnect-overlap.txt`. Any overlap, camera 1 interruption, session fault, or fatal recorder event fails the gate.
+## Nominal Session
+1. Start fresh; require both previews moving, `Session active`, and both Axis recorders `Recording`.
+2. Change camera 1 cadence to 2 seconds. Exclude camera 2 from analysis for 15 seconds, then include it; both must continue recording.
+3. Run at least two minutes, Stop normally, and wait for `Session idle`.
+4. Navigate to the Analyze view only to confirm the completed row. Do not press the Analyze or Resume provider action.
+
+Define the executable artifact validator in the inspection shell:
+
+```bash
+# acceptance-validator-start
+validate_h264_json() {
+  local json="$1" count codec packets
+  count="$(plutil -extract streams raw -expect array "$json" 2>/dev/null)" || return 1
+  codec="$(plutil -extract streams.0.codec_name raw "$json" 2>/dev/null)" || return 1
+  packets="$(plutil -extract streams.0.nb_read_packets raw "$json" 2>/dev/null)" || return 1
+  test "$count" -eq 1 || return 1
+  test "$codec" = h264 || return 1
+  case "$packets" in ''|*[!0-9]*) return 1 ;; esac
+  test "$packets" -gt 0 || return 1
+}
+validate_segment_json() {
+  local json="$1" format start duration span
+  validate_h264_json "$json" || return 1
+  format="$(plutil -extract format.format_name raw "$json" 2>/dev/null)" || return 1
+  start="$(plutil -extract format.start_time raw "$json" 2>/dev/null)" || return 1
+  duration="$(plutil -extract format.duration raw "$json" 2>/dev/null)" || return 1
+  case ",$format," in *,matroska,*) ;; *) return 1 ;; esac
+  span="$(awk -v s="$start" -v d="$duration" '
+    function floor_ms(v,a,f) { split(v,a,"."); f=a[2] "000"; return a[1]*1000 + substr(f,1,3) }
+    function ceil_ms(v,a,n) { n=floor_ms(v); split(v,a,"."); if (substr(a[2],4) ~ /[1-9]/) n++; return n }
+    BEGIN {
+      if (s !~ /^[0-9]+([.][0-9]+)?$/ || d !~ /^[0-9]+([.][0-9]+)?$/ || d+0 <= 0) exit 1
+      n=ceil_ms(d)-floor_ms(s); if (n <= 0) exit 1; printf "%.0f\n", n
+    }')" || return 1
+  printf '%s\n' "$span"
+}
+# acceptance-validator-end
+inspect_session() {
+  local label="$1" session="$2" events="$3" camera2_min="$4"
+  local id camera_dir manifest count file name stem json span previous_end
+  cd "$LEO_WORKSPACE_ROOT"
+  test -d "$session" && test ! -L "$session" || return 1
+  test -f "$session/events.jsonl" && test ! -L "$session/events.jsonl" || return 1
+  test -f "$session/recording-complete" && test ! -L "$session/recording-complete" || return 1
+  test "$(stat -f '%z' "$session/recording-complete")" -eq 0 || return 1
+  test "$(wc -l < "$session/events.jsonl")" -eq "$events" || return 1
+  test ! -e "$session/analysis.json" || return 1
+  test "$CAMERA_1_ID" != "$CAMERA_2_ID" || return 1
+  nl -ba "$session/events.jsonl" > "$PILOT_EVIDENCE/$label-events.txt"
+  cp "$session/events.jsonl" "$PILOT_EVIDENCE/$label-events.jsonl"
+  for id in "$CAMERA_1_ID" "$CAMERA_2_ID"; do
+    case "$id" in ''|0|*[!0-9]*) return 1 ;; esac
+    camera_dir="$session/recordings/camera-$id"
+    test -d "$camera_dir" && test ! -L "$camera_dir" || return 1
+    manifest="$PILOT_EVIDENCE/$label-camera-$id-segments.txt"
+    : > "$manifest"; count=0
+    for file in "$camera_dir"/*.mkv; do
+      test -f "$file" || continue
+      test ! -L "$file" || return 1
+      name="${file##*/}"; stem="${name%.mkv}"
+      case "$stem" in ''|*[!0-9]*) return 1 ;; esac
+      printf '%s\n' "$stem" >> "$manifest"; count=$((count + 1))
+    done
+    test "$count" -ge 1 || return 1
+    if test "$id" = "$CAMERA_2_ID"; then test "$count" -ge "$camera2_min" || return 1; fi
+    LC_ALL=C sort -n -o "$manifest" "$manifest"
+    previous_end=""
+    while IFS= read -r stem; do
+      file="$camera_dir/$stem.mkv"
+      json="$PILOT_EVIDENCE/$label-camera-$id-$stem.ffprobe.json"
+      if ! nix develop --command ffprobe -v error -select_streams v -count_packets \
+        -show_entries 'stream=codec_name,nb_read_packets:format=format_name,start_time,duration' \
+        -of json "$file" > "$json" 2>/dev/null; then rm -f "$json"; return 1; fi
+      span="$(validate_segment_json "$json")" || return 1
+      if test -n "$previous_end"; then test "$stem" -ge "$previous_end" || return 1; fi
+      previous_end=$((stem + span))
+    done < "$manifest"
+  done
+  for file in "$session"/recordings/camera-*/.attempt-*.partial.mkv; do test ! -e "$file" || return 1; done
+  printf 'marker_bytes=0\npartials=0\n' > "$PILOT_EVIDENCE/$label-artifacts.txt"
+}
+```
+
+Run `inspect_session nominal "$LEO_DATA_DIR/sessions/<displayed-UTC-ms>" 5 1`. Require numbered events in order: start, cadence change, camera 2 exclusion, camera 2 inclusion, end.
+
+## Reconnect Session
+Keep timeout `10`. Start fresh, disconnect only Axis camera 2 after useful media, require camera 1 to remain `Recording`, camera 2 to show `Reconnecting`, then restore it and require `Recording`.
+
+Record four moments with `date -u '+event=<name> utc=%Y-%m-%dT%H:%M:%SZ epoch_s=%s' | tee -a "$PILOT_EVIDENCE/reconnect-timings.txt"`: disconnect, detection, restore, recovery. Calculate both latencies. Stop normally, navigate to the Analyze view without pressing Analyze or Resume, then run `inspect_session reconnect "$LEO_DATA_DIR/sessions/<displayed-UTC-ms>" 2 2`. The validator requires two non-overlapping playable camera-2 segments.
 
 ## Soak Session
-
-1. Start a fresh session with non-sensitive content and record for one full site-defined class duration.
-2. Require both previews to stay live, both recorder statuses to stay `Recording`, and the site-defined SSD free-space margin to remain available. Record `df -h "$SSD_MOUNT"` at start, periodically, and before Stop.
-3. Stop normally and rerun the Nominal Session artifact block with `SESSION_LABEL=soak`, `EXPECTED_EVENT_LINES=2`, and the fresh `SESSION_DIR`.
-4. Close Leo normally only after it returns to idle. Do not eject the SSD.
-5. Require no Leo-owned FFmpeg, FFprobe, or MediaMTX process to survive shutdown.
-
-At the start, periodically during the run, and immediately before Stop, append a timestamped capacity sample and confirm it remains above the approved margin:
+Run one fresh session for the full expected class duration with non-sensitive content. Both previews and recorders must remain stable. At start, periodically, and before Stop run:
 
 ```bash
-cd /Users/noah/Projects/leo/app
-set -eu
-set -o pipefail
-: "${PILOT_EVIDENCE:?set PILOT_EVIDENCE}"
-: "${SSD_MOUNT:?set SSD_MOUNT}"
 date -u '+utc=%Y-%m-%dT%H:%M:%SZ' | tee -a "$PILOT_EVIDENCE/soak-space.txt"
-df -h "$SSD_MOUNT" | tee -a "$PILOT_EVIDENCE/soak-space.txt"
+df -h "$LEO_DATA_DIR" | tee -a "$PILOT_EVIDENCE/soak-space.txt"
 ```
 
-Collect the final storage, logs, and first shutdown evidence:
+Maintain the approved margin, Stop normally, and run `inspect_session soak "$LEO_DATA_DIR/sessions/<displayed-UTC-ms>" 2 1`. Close Leo normally after idle. In the main shell, `launch_leo initial` then returns; compare process state, clean-restart with a fresh SSD identity check, navigate to Analyze without pressing Analyze or Resume, confirm all completed rows, and close normally:
 
 ```bash
-cd /Users/noah/Projects/leo/app
-set -eu
-set -o pipefail
-export PILOT_EVIDENCE="$HOME/LeoPilotEvidence/<UTC-run-id>"
-export SSD_MOUNT="/Volumes/<exact-volume-name>"
-export LEO_DATA_DIR="$SSD_MOUNT/leo"
+ps -axo pid=,ppid=,comm= | awk '$3 ~ /(^|\/)(ffmpeg|ffprobe|mediamtx)$/ {print}' \
+  | LC_ALL=C sort > "$PILOT_EVIDENCE/processes-after-app.txt"
+comm -13 "$PILOT_EVIDENCE/processes-before-app.txt" "$PILOT_EVIDENCE/processes-after-app.txt" \
+  > "$PILOT_EVIDENCE/processes-new-after-app.txt"
+test ! -s "$PILOT_EVIDENCE/processes-new-after-app.txt"
 
-df -h "$SSD_MOUNT" | tee "$PILOT_EVIDENCE/ssd-space-after.txt"
 cp "$LEO_DATA_DIR"/logs/leo.jsonl.* "$PILOT_EVIDENCE/"
-{ pgrep -lx 'ffmpeg|ffprobe|mediamtx' || true; } \
-  | tee "$PILOT_EVIDENCE/post-soak-shutdown-processes.txt"
-```
-
-For the clean-restart gate, first confirm those preview ports are free. Relaunch with the same paths and provider-free environment, verify Analyze discovers the completed nominal, reconnect, and soak sessions without clicking Analyze, then close Leo normally:
-
-```bash
-cd /Users/noah/Projects/leo/app
-set -eu
-set -o pipefail
-export PILOT_EVIDENCE="$HOME/LeoPilotEvidence/<UTC-run-id>"
-export LEO_CAMERA_CONFIG="/absolute/path/to/pilot-cameras.json"
-export LEO_DATA_DIR="/Volumes/<exact-volume-name>/leo"
-
-if lsof -nP -iTCP:8889 -sTCP:LISTEN; then exit 1; fi
-if lsof -nP -iUDP:8189; then exit 1; fi
-
-env \
-  -u OPENAI_API_KEY \
-  -u ANALYSIS_MODEL \
-  -u OPENAI_BASE_URL \
-  -u LEO_E2E_REAL_OPENAI \
-  -u LEO_RUN_PAID_OPENAI_TEST \
-  LEO_CAMERA_CONFIG="$LEO_CAMERA_CONFIG" \
-  LEO_DATA_DIR="$LEO_DATA_DIR" \
-  LEO_RECORDER_TIMEOUT_SECS=10 \
-  RUST_LOG=info \
-  nix develop --command just app 2>&1 \
-  | tee "$PILOT_EVIDENCE/clean-restart-console.log"
-
-{ pgrep -lx 'ffmpeg|ffprobe|mediamtx' || true; } \
-  | tee "$PILOT_EVIDENCE/post-restart-shutdown-processes.txt"
+ps -axo pid=,ppid=,comm= | awk '$3 ~ /(^|\/)(ffmpeg|ffprobe|mediamtx)$/ {print}' \
+  | LC_ALL=C sort > "$PILOT_EVIDENCE/processes-before-restart.txt"
+launch_leo clean-restart
+ps -axo pid=,ppid=,comm= | awk '$3 ~ /(^|\/)(ffmpeg|ffprobe|mediamtx)$/ {print}' \
+  | LC_ALL=C sort > "$PILOT_EVIDENCE/processes-after-restart.txt"
+comm -13 "$PILOT_EVIDENCE/processes-before-restart.txt" "$PILOT_EVIDENCE/processes-after-restart.txt" \
+  > "$PILOT_EVIDENCE/processes-new-after-restart.txt"
+test ! -s "$PILOT_EVIDENCE/processes-new-after-restart.txt"
 cp "$LEO_DATA_DIR"/logs/leo.jsonl.* "$PILOT_EVIDENCE/"
 ```
-
-Both process files must contain no Leo-owned survivor. The clean restart must leave `analysis.json` absent.
 
 ## Evidence And Sign-Off
-
-The evidence directory must contain:
-
-- [ ] Every daily `leo.jsonl.<date>` spanning the pilot.
-- [ ] Initial and clean-restart console logs.
-- [ ] SSD identity and before, periodic, and after free-space output.
-- [ ] Both 12-second camera probe outputs and errors.
-- [ ] `events.jsonl` and numbered events for each attempted accepted session.
-- [ ] FFprobe JSON for every finalized segment.
-- [ ] Zero-byte completion-marker checks and no-partial checks.
-- [ ] Post-shutdown process lists.
-- [ ] Failed-start recovery, start readiness, stop finalization, and reconnect detection/recovery timings, plus the overlap calculation.
-- [ ] Operator name, UTC date, site, and pass/fail result for every gate.
-
-Open one focused GitHub issue for every failure, linking only non-sensitive evidence, before pilot sign-off. Do not combine unrelated failures or sign off with an unresolved gate.
+Require daily JSON logs, both console logs, sanitized SSD identity and before/during/after capacity, Axis model/firmware records, camera probe JSON, each `events.jsonl`, FFprobe JSON for every segment, marker/no-partial PASS files, process snapshots/differences, reconnect timings/latencies, operator/date, and pass/fail per gate. Open one focused issue for every failure before sign-off; attach no secrets. Failed-start, readiness, and Stop timing are not acceptance criteria.
 
 ## Provider Gate
-
-Recording sign-off does not authorize paid work. Before `just test-paid`, a real-provider desktop E2E, or Analyze with real credentials, obtain a second explicit approval naming the provider, model, target session, and accepted cost.
-
-Paid tests use fixture media. Judge actual pilot-session analysis quality separately through an explicitly approved Analyze action in the app; a paid fixture result is not physical-session acceptance.
+Recording sign-off does not authorize paid work. Before `just test-paid`, real-provider desktop E2E, or pressing Analyze/Resume with real credentials, obtain separate explicit approval naming provider, model, target session, and accepted cost. Paid tests use fixtures; judge actual pilot quality separately in the app.
 
 ## Known Limits
-
-- SSD discovery, identity enforcement, mounting, eject, lifecycle handling, and capacity monitoring are absent.
-- Active-session recovery after app crash, force quit, laptop sleep, or power loss is absent.
-- Packaged deployment is absent; the pilot uses the Nix development launch.
-- Physical-camera timeout calibration is not established.
-- Retention, export, deletion, and playback are absent.
-- No arbitrary-session validation CLI exists; segment review is manual.
-- Concurrent recording sessions and concurrent analyses are unsupported.
+- No SSD discovery, mount/eject lifecycle, or automatic capacity monitoring.
+- No active-session crash, force-quit, sleep, or power-loss recovery.
+- No packaged deployment or physical-camera timeout calibration.
+- No retention, export, deletion, playback, or arbitrary-session validation CLI.
+- No concurrent recording sessions or analyses.
