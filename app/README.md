@@ -59,11 +59,29 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 Each media command selects one approved ignored test by exact name:
 
 ```bash
-nix develop --command cargo test -p backend analysis::video::extractor::tests::extracts_fixture_frame_as_jpeg -- --ignored --exact
-just test-local-analysis
-just test-camera-stream
-just test-host-recording
-just test-host-reconnect
+cargo test -p backend analysis::video::extractor::tests::extracts_fixture_frame_as_jpeg -- --ignored --exact
+cargo test -p backend analysis::session::tests::full_local_ffmpeg_and_mock_model_analysis_uses_pre_and_post_gap_segments -- --ignored --exact --nocapture
+cargo test -p camera --test rtsp_stream fixture_streams_h264_to_two_readers_and_stops_cleanly -- --ignored --exact
+cargo test -p camera --test rtsp_stream host_recorder_records_playable_mkv -- --ignored --exact --nocapture
+cargo test -p camera --test rtsp_stream host_recorder_reconnects_into_a_second_segment -- --ignored --exact --nocapture
+```
+
+The opt-in macOS desktop E2E starts both camera binaries, launches the real WKWebView app, drives Start through Analyze, uses a loopback OpenAI-compatible mock, and validates the durable session:
+
+```bash
+cargo test -p camera --features desktop-e2e --test desktop_e2e desktop_operator_flow_records_two_cameras_and_analyzes -- --ignored --exact --nocapture --test-threads=1
+```
+
+Preview ports `127.0.0.1:8889/TCP` and `127.0.0.1:8189/UDP` must be free; the test will not interrupt a running Leo app.
+
+To judge a real OpenAI result, provide credentials and explicitly enable both paid gates. The test preserves artifacts under `target/desktop-e2e-real/` or `LEO_E2E_OUTPUT_DIR`:
+
+```bash
+LEO_E2E_REAL_OPENAI=1 \
+LEO_RUN_PAID_OPENAI_TEST=1 \
+OPENAI_API_KEY=... \
+ANALYSIS_MODEL=... \
+cargo test -p camera --features desktop-e2e --test desktop_e2e desktop_operator_flow_records_two_cameras_and_analyzes -- --ignored --exact --nocapture --test-threads=1
 ```
 
 The paid app test may be compiled, never executed, without explicit approval:
@@ -72,7 +90,7 @@ The paid app test may be compiled, never executed, without explicit approval:
 cargo test -p app --features paid-openai-test paid_openai_workflow::paid_openai_analyzes_one_local_application_session --no-run
 ```
 
-Do not set `LEO_RUN_PAID_OPENAI_TEST=1` or run the ignored paid test unless the user separately approves the provider request and cost.
+Do not set `LEO_RUN_PAID_OPENAI_TEST=1`, enable the real-provider E2E, or run the ignored paid test without deliberately accepting the provider request and cost.
 
 ## Limits
 

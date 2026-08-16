@@ -86,8 +86,14 @@ just css
 
 ```bash
 cargo test -p app
-cargo fmt --all --check
+cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+```
+
+The full mock-provider desktop flow is a Cargo test owned by the camera crate so it can launch both real camera binaries:
+
+```bash
+cargo test -p camera --features desktop-e2e --test desktop_e2e desktop_operator_flow_records_two_cameras_and_analyzes -- --ignored --exact --nocapture --test-threads=1
 ```
 
 The feature-scoped paid test is ignored and has a runtime environment assertion before provider, recorder-runtime, session, or workflow construction. Compile it only unless explicit paid-provider approval is given:
