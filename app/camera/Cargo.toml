@@ -3,7 +3,11 @@ name = "camera"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+desktop-e2e = ["dep:app", "tokio/sync"]
+
 [dependencies]
+app = { path = "../app", optional = true, features = ["desktop-e2e"] }
 axum = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 serde.workspace = true
@@ -15,3 +19,13 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "pro
 [dev-dependencies]
 backend = { path = "../backend", features = ["test-support"] }
 tower = { workspace = true }
+
+[[bin]]
+name = "desktop-e2e-app"
+path = "src/desktop_e2e_app.rs"
+required-features = ["desktop-e2e"]
+
+[[test]]
+name = "desktop_e2e"
+path = "tests/desktop_e2e.rs"
+required-features = ["desktop-e2e"]

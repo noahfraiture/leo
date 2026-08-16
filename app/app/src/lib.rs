@@ -16,6 +16,8 @@ use workflow::Workflow;
 mod analysis_task;
 mod camera_config;
 mod components;
+#[cfg(feature = "desktop-e2e")]
+mod desktop_e2e;
 mod logging;
 #[cfg(all(test, feature = "paid-openai-test"))]
 mod paid_openai_workflow;
@@ -283,9 +285,12 @@ fn ReadyApp() -> Element {
     let initial_workflow = use_context::<InitialWorkflow>();
     let recorder = use_context::<RecorderBootstrap>();
     let event_recorder = recorder.clone();
-    let mut workflow = use_signal(move || {
-        take_initial_workflow(&initial_workflow)
-            .expect("Ready root should take its initialized Workflow exactly once")
+    let mut workflow = use_hook(move || {
+        Signal::new_in_scope(
+            take_initial_workflow(&initial_workflow)
+                .expect("Ready root should take its initialized Workflow exactly once"),
+            ScopeId::ROOT,
+        )
     });
     use_context_provider(|| workflow);
 
@@ -313,7 +318,21 @@ fn ReadyApp() -> Element {
         })
     });
 
-    rsx! { Router::<Route> {} }
+    let desktop_e2e: Element = {
+        #[cfg(feature = "desktop-e2e")]
+        {
+            rsx! { desktop_e2e::DesktopE2eDriver {} }
+        }
+        #[cfg(not(feature = "desktop-e2e"))]
+        {
+            rsx! {}
+        }
+    };
+
+    rsx! {
+        Router::<Route> {}
+        {desktop_e2e}
+    }
 }
 
 #[cfg(all(test, unix))]
