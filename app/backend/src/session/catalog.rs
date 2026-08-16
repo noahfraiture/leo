@@ -1,3 +1,5 @@
+//! Discovers analyzable completed sessions and creates their durable completion markers.
+
 use std::{
     fs::{self, File},
     io::{self, Write},

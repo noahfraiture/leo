@@ -1,3 +1,5 @@
+//! Validates operator actions and durably appends them to one active session event log.
+
 use std::{
     collections::HashSet,
     fs::{File, OpenOptions},
@@ -15,7 +17,7 @@ use super::{
     },
 };
 
-/// Software-session actions accepted from future UI and internal callers.
+/// An action durably appended to the active session's `events.jsonl` timeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OperatorAction {
     /// Includes or excludes a camera from subsequent software sampling.
@@ -25,7 +27,7 @@ pub enum OperatorAction {
         camera_id: u32,
         sample_every: Duration,
     },
-    /// Ends the software session timeline without affecting physical recording.
+    /// Ends the persisted session timeline; recorder shutdown remains the caller's responsibility.
     EndSession,
 }
 
@@ -46,7 +48,7 @@ impl SessionController {
         })
     }
 
-    /// Validates and durably records one operator action.
+    /// Validates and durably records one action before returning.
     pub fn apply(&mut self, action: OperatorAction) -> Result<()> {
         if self.log.ended {
             return Err(Error::SessionEnded);

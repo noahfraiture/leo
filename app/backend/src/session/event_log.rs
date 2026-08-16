@@ -1,3 +1,5 @@
+//! Defines and strictly replays the private, versioned JSONL session event schema.
+
 use std::{
     collections::HashSet,
     fs::{self, File},

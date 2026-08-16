@@ -1,3 +1,6 @@
+//! Owns the recorder actor, per-camera supervisors, and each FFmpeg attempt's cleanup.
+//! These layers share stop and fault ownership, so they remain one state machine.
+
 use std::{
     collections::HashSet,
     fs::{self, OpenOptions},
@@ -37,6 +40,7 @@ const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// One camera source supervised by the host recorder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordingCamera {
+    /// Stable camera ID used by recorder events and the output directory name.
     pub id: u32,
     /// The credential-bearing source URL; recorder diagnostics never expose it.
     pub rtsp_url: String,
@@ -45,8 +49,11 @@ pub struct RecordingCamera {
 /// Time bounds controlling recorder I/O, reconnects, and graceful stops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecorderSettings {
+    /// Bound for executable preflight, startup readiness, and recorder network I/O.
     pub io_timeout: Duration,
+    /// Delay before restarting a camera after an interrupted attempt.
     pub retry_delay: Duration,
+    /// Grace period before an FFmpeg child is killed during Stop.
     pub stop_timeout: Duration,
 }
 

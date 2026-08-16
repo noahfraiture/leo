@@ -1,3 +1,5 @@
+//! Validates one completed session and drives its resumable analysis to completion.
+
 use std::{fs, num::NonZeroUsize, path::PathBuf};
 
 use rig_core::completion::CompletionModel;

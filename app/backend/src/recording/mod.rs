@@ -1,4 +1,4 @@
-//! Finalized local recording segment discovery and validation.
+//! Host recording supervision plus finalized local segment discovery and validation.
 
 mod error;
 mod recorder;

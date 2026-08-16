@@ -51,71 +51,81 @@ impl Analyzer {
         let session_id = session.id;
         tracing::info!(session_id = %session_id, "planning analysis");
 
-        let result = (|| {
-            let mut schedules = Vec::new();
-            for camera in &session.cameras {
-                let schedule = SamplingSchedule::from_session(&session, camera.id)?;
-                if !schedule.periods.is_empty() {
-                    schedules.push(schedule);
-                }
-            }
-            let warnings = recording_gap_warnings(&session, &segments)?;
-            let sequences = schedules
-                .iter()
-                .map(|schedule| {
-                    SampleSequence::from_segments(session.start_utc_ms, schedule, &segments)
-                })
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            let frame_sets = FrameSet::from_sequences(sequences)?;
-            if frame_sets.is_empty() {
-                return Err(Error::NoAnalyzableFrames);
-            }
-            let plan_fingerprint = plan_fingerprint(&frame_sets, frame_sets_per_batch)?;
-            let total_batches = frame_sets.chunks(frame_sets_per_batch.get()).count();
-            tracing::info!(session_id = %session_id, total_batches, "analysis plan ready");
-            let (checkpoint, is_new) = load_or_new(
-                &progress_path,
-                session_id,
-                &checklist,
-                &plan_fingerprint,
-                total_batches,
-                &warnings,
-            )?;
+        Self::resume_inner(
+            segments,
+            session,
+            checklist,
+            frame_sets_per_batch,
+            progress_path,
+        )
+        .inspect_err(|_| tracing::error!(session_id = %session_id, "analysis planning failed"))
+    }
 
-            if is_new {
-                save_checkpoint(&checkpoint, &progress_path)?;
-                tracing::info!(
-                    session_id = %session_id,
-                    completed_batches = 0,
-                    total_batches,
-                    "analysis checkpoint saved"
-                );
-            } else {
-                tracing::info!(
-                    session_id = %session_id,
-                    completed_batches = checkpoint.responses.len(),
-                    total_batches,
-                    "analysis resumed"
-                );
+    fn resume_inner(
+        segments: Vec<RecordingSegment>,
+        session: Session,
+        checklist: String,
+        frame_sets_per_batch: NonZeroUsize,
+        progress_path: PathBuf,
+    ) -> Result<Self> {
+        let mut schedules = Vec::new();
+        for camera in &session.cameras {
+            let schedule = SamplingSchedule::from_session(&session, camera.id)?;
+            if !schedule.periods.is_empty() {
+                schedules.push(schedule);
             }
-            if checkpoint.responses.len() == total_batches {
-                tracing::info!(session_id = %session_id, total_batches, "analysis complete");
-            }
-
-            Ok(Self {
-                session,
-                checklist,
-                frame_sets,
-                frame_sets_per_batch,
-                progress_path,
-                checkpoint,
-            })
-        })();
-
-        if result.is_err() {
-            tracing::error!(session_id = %session_id, "analysis planning failed");
         }
-        result
+        let warnings = recording_gap_warnings(&session, &segments)?;
+        let sequences = schedules
+            .iter()
+            .map(|schedule| {
+                SampleSequence::from_segments(session.start_utc_ms, schedule, &segments)
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let frame_sets = FrameSet::from_sequences(sequences)?;
+        if frame_sets.is_empty() {
+            return Err(Error::NoAnalyzableFrames);
+        }
+        let plan_fingerprint = plan_fingerprint(&frame_sets, frame_sets_per_batch)?;
+        let total_batches = frame_sets.chunks(frame_sets_per_batch.get()).count();
+        tracing::info!(session_id = %session.id, total_batches, "analysis plan ready");
+        let (checkpoint, is_new) = load_or_new(
+            &progress_path,
+            session.id,
+            &checklist,
+            &plan_fingerprint,
+            total_batches,
+            &warnings,
+        )?;
+
+        if is_new {
+            save_checkpoint(&checkpoint, &progress_path)?;
+            tracing::info!(
+                session_id = %session.id,
+                completed_batches = 0,
+                total_batches,
+                "analysis checkpoint saved"
+            );
+        } else {
+            tracing::info!(
+                session_id = %session.id,
+                completed_batches = checkpoint.responses.len(),
+                total_batches,
+                "analysis resumed"
+            );
+        }
+        if checkpoint.responses.len() == total_batches {
+            tracing::info!(session_id = %session.id, total_batches, "analysis complete");
+        }
+
+        Ok(Self {
+            session,
+            checklist,
+            frame_sets,
+            frame_sets_per_batch,
+            progress_path,
+            checkpoint,
+        })
     }
 
     /// Index the caller should materialize next after rebuilding the batch plan.

@@ -3,13 +3,13 @@
 mod agent;
 mod analyzer;
 mod error;
-mod facade;
+mod session;
 mod video;
 
 pub use agent::{AnalysisResponse, ChecklistProgress, Observation};
 pub use analyzer::{AnalysisCheckpoint, AnalysisWarning};
 pub use error::Error;
-pub use facade::{AnalyzeSession, analyze_session};
+pub use session::{AnalyzeSession, analyze_session};
 
 #[cfg(feature = "test-support")]
 #[doc(hidden)]

@@ -1,3 +1,5 @@
+//! Discovers finalized camera segments and validates their timing with bounded FFprobe calls.
+
 use std::{
     collections::HashSet,
     ffi::OsStr,

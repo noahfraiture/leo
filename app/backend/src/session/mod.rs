@@ -1,4 +1,4 @@
-//! Durable JSONL session metadata and software-only sampling controls.
+//! Durable JSONL session timelines, completion discovery, and software-only sampling controls.
 
 mod catalog;
 mod controller;
