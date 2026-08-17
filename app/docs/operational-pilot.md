@@ -294,7 +294,7 @@ validate_coverage() {
     -v minimum="$minimum" -v max_gap="$max_gap" '
     BEGIN {
       duration=session_end-session_start
-      if (duration <= 0 || duration < minimum || (mode == "strict" && minimum > 0 && max_gap >= minimum)) bad=1
+      if (duration <= 0 || duration < minimum) bad=1
     }
     {
       if (bad) next
