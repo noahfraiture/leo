@@ -25,7 +25,7 @@ use rig_core::{
 };
 use sha2::{Digest, Sha256};
 
-use super::progress::{ANALYSIS_SCHEMA_VERSION, AnalysisCheckpoint};
+use super::progress::{ANALYSIS_SCHEMA_VERSION, AnalysisCheckpoint, AnalysisIdentity};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -45,6 +45,7 @@ impl Analyzer {
         segments: Vec<RecordingSegment>,
         session: Session,
         checklist: String,
+        analysis_identity: AnalysisIdentity,
         frame_sets_per_batch: NonZeroUsize,
         progress_path: PathBuf,
     ) -> Result<Self> {
@@ -55,6 +56,7 @@ impl Analyzer {
             segments,
             session,
             checklist,
+            analysis_identity,
             frame_sets_per_batch,
             progress_path,
         )
@@ -65,6 +67,7 @@ impl Analyzer {
         segments: Vec<RecordingSegment>,
         session: Session,
         checklist: String,
+        analysis_identity: AnalysisIdentity,
         frame_sets_per_batch: NonZeroUsize,
         progress_path: PathBuf,
     ) -> Result<Self> {
@@ -92,6 +95,7 @@ impl Analyzer {
         let (checkpoint, is_new) = load_or_new(
             &progress_path,
             session.id,
+            &analysis_identity,
             &checklist,
             &plan_fingerprint,
             total_batches,
@@ -257,6 +261,7 @@ impl Analyzer {
 fn load_or_new(
     path: &Path,
     session_id: uuid::Uuid,
+    analysis_identity: &AnalysisIdentity,
     checklist: &str,
     plan_fingerprint: &str,
     total_batches: usize,
@@ -264,6 +269,12 @@ fn load_or_new(
 ) -> Result<(AnalysisCheckpoint, bool)> {
     match AnalysisCheckpoint::read(path, session_id) {
         Ok(checkpoint) => {
+            if checkpoint.analysis_identity.model != analysis_identity.model {
+                return Err(Error::CheckpointModel);
+            }
+            if checkpoint.analysis_identity.endpoint_id != analysis_identity.endpoint_id {
+                return Err(Error::CheckpointEndpointId);
+            }
             if checkpoint.checklist != checklist {
                 return Err(Error::CheckpointChecklist);
             }
@@ -289,6 +300,7 @@ fn load_or_new(
                 AnalysisCheckpoint {
                     schema_version: ANALYSIS_SCHEMA_VERSION,
                     session_id,
+                    analysis_identity: analysis_identity.clone(),
                     checklist: checklist.to_owned(),
                     plan_fingerprint: plan_fingerprint.to_owned(),
                     total_batches,
@@ -438,7 +450,7 @@ mod tests {
     use crate::{
         analysis::{
             agent::{Agent, AnalysisResponse, ChecklistProgress, Observation},
-            analyzer::AnalysisCheckpoint,
+            analyzer::{AnalysisCheckpoint, AnalysisIdentity},
             video::{AnalysisWarning, Frame, FrameSet},
         },
         recording::RecordingSegment,
@@ -493,6 +505,13 @@ mod tests {
         segment(camera_id, 0, 5_000, fixture_path())
     }
 
+    fn analysis_identity() -> AnalysisIdentity {
+        AnalysisIdentity {
+            model: "safe-model-byte-sentinel".into(),
+            endpoint_id: "safe-endpoint-byte-sentinel".into(),
+        }
+    }
+
     fn fingerprint_plan(path: PathBuf) -> Vec<FrameSet> {
         vec![FrameSet {
             session_offset: Duration::from_millis(1_000),
@@ -513,6 +532,7 @@ mod tests {
             vec![covering_segment(1)],
             session(vec![camera(1, true, 2)]),
             "Start the exercise".into(),
+            analysis_identity(),
             NonZeroUsize::new(frame_sets_per_batch).unwrap(),
             checkpoint,
         )
@@ -621,6 +641,7 @@ mod tests {
             vec![segment(1, 0, 5_000, invalid_segment)],
             session(vec![camera(1, true, 2)]),
             "Start the exercise".into(),
+            analysis_identity(),
             NonZeroUsize::new(2).unwrap(),
             extraction_checkpoint.clone(),
         )
@@ -753,6 +774,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_requires_exact_analysis_identity_without_rewriting_checkpoint() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        let checkpoint = directory.path().join("analysis.json");
+        let identity = analysis_identity();
+        let first = response("The first batch is complete.");
+        let model = MockCompletionModel::text(
+            serde_json::to_string(&first).expect("response should serialize"),
+        );
+        let mut analyzer = Analyzer::resume(
+            vec![covering_segment(1)],
+            session(vec![camera(1, true, 2)]),
+            "Start the exercise".into(),
+            identity.clone(),
+            NonZeroUsize::new(2).unwrap(),
+            checkpoint.clone(),
+        )
+        .await
+        .expect("initial analysis should be checkpointed");
+        analyzer
+            .submit_prompt(&Agent::new(model), Message::user("prebuilt prompt"))
+            .await
+            .expect("first batch should be saved");
+        drop(analyzer);
+
+        let saved_bytes = std::fs::read(&checkpoint).expect("checkpoint should be readable");
+        let saved_json: serde_json::Value =
+            serde_json::from_slice(&saved_bytes).expect("checkpoint should be valid JSON");
+        assert_eq!(saved_json["schema_version"], 3);
+        assert_eq!(saved_json["analysis_identity"]["model"], identity.model);
+        assert_eq!(
+            saved_json["analysis_identity"]["endpoint_id"],
+            identity.endpoint_id
+        );
+        let matching = Analyzer::resume(
+            vec![covering_segment(1)],
+            session(vec![camera(1, true, 2)]),
+            "Start the exercise".into(),
+            identity.clone(),
+            NonZeroUsize::new(2).unwrap(),
+            checkpoint.clone(),
+        )
+        .await
+        .expect("matching identity should resume");
+        assert_eq!(matching.next_batch_index(), 1);
+        drop(matching);
+        assert_eq!(
+            std::fs::read(&checkpoint).expect("checkpoint should remain readable"),
+            saved_bytes
+        );
+
+        let mismatches = [
+            (
+                AnalysisIdentity {
+                    model: format!(" {}", identity.model),
+                    endpoint_id: identity.endpoint_id.clone(),
+                },
+                "analysis checkpoint model does not match the configured analysis",
+            ),
+            (
+                AnalysisIdentity {
+                    model: identity.model.clone(),
+                    endpoint_id: format!("{} ", identity.endpoint_id),
+                },
+                "analysis checkpoint endpoint ID does not match the configured analysis",
+            ),
+        ];
+        for (mismatch, expected_message) in mismatches {
+            let result = Analyzer::resume(
+                vec![covering_segment(1)],
+                session(vec![camera(1, true, 2)]),
+                "Start the exercise".into(),
+                mismatch,
+                NonZeroUsize::new(2).unwrap(),
+                checkpoint.clone(),
+            )
+            .await;
+            let Err(error) = result else {
+                panic!("identity mismatch should be rejected");
+            };
+            assert_eq!(error.to_string(), expected_message);
+            for sensitive in [identity.model.as_str(), identity.endpoint_id.as_str()] {
+                assert!(!error.to_string().contains(sensitive));
+            }
+            assert_eq!(
+                std::fs::read(&checkpoint).expect("checkpoint should remain readable"),
+                saved_bytes
+            );
+        }
+    }
+
+    #[tokio::test]
     #[ignore = "requires FFmpeg on PATH"]
     async fn full_local_ffmpeg_and_model_pipeline_uses_the_existing_fixture() {
         let directory = tempfile::tempdir().expect("temporary directory should be created");
@@ -772,6 +884,7 @@ mod tests {
             ],
             exercise,
             "Start the exercise".into(),
+            analysis_identity(),
             NonZeroUsize::new(2).unwrap(),
             checkpoint.clone(),
         )
@@ -838,6 +951,7 @@ mod tests {
             segments.clone(),
             first_session,
             "Start the exercise".into(),
+            analysis_identity(),
             NonZeroUsize::new(2).unwrap(),
             checkpoint.clone(),
         )
@@ -858,6 +972,7 @@ mod tests {
             segments,
             resumed_session,
             "Start the exercise".into(),
+            analysis_identity(),
             NonZeroUsize::new(2).unwrap(),
             checkpoint,
         )
@@ -919,6 +1034,7 @@ mod tests {
             vec![covering_segment(1)],
             exercise(),
             "Start the exercise".into(),
+            analysis_identity(),
             NonZeroUsize::new(2).unwrap(),
             checkpoint.clone(),
         )
@@ -929,6 +1045,7 @@ mod tests {
             vec![covering_segment(1)],
             exercise(),
             "Use a different checklist".into(),
+            analysis_identity(),
             NonZeroUsize::new(2).unwrap(),
             checkpoint.clone(),
         )
@@ -942,6 +1059,7 @@ mod tests {
             vec![segment(1, -100, 5_000, fixture_path())],
             exercise(),
             "Start the exercise".into(),
+            analysis_identity(),
             NonZeroUsize::new(2).unwrap(),
             checkpoint.clone(),
         )
@@ -955,6 +1073,7 @@ mod tests {
             vec![covering_segment(1), covering_segment(2)],
             exercise(),
             "Start the exercise".into(),
+            analysis_identity(),
             NonZeroUsize::new(2).unwrap(),
             checkpoint,
         )
@@ -1003,6 +1122,7 @@ mod tests {
             vec![covering_segment(1)],
             session(vec![camera(1, true, 2), camera(2, false, 1)]),
             "Start the exercise".into(),
+            analysis_identity(),
             NonZeroUsize::new(2).unwrap(),
             checkpoint.clone(),
         )
@@ -1044,6 +1164,7 @@ mod tests {
             Vec::new(),
             session(vec![camera(1, true, 1)]),
             "Start the exercise".into(),
+            analysis_identity(),
             NonZeroUsize::new(2).unwrap(),
             directory.path().join("analysis.json"),
         )

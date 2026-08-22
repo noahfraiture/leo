@@ -408,6 +408,9 @@ mod tests {
 fn CheckpointResults(checkpoint: AnalysisCheckpoint) -> Element {
     let completed = checkpoint.responses.len();
     let total = checkpoint.total_batches;
+    let model = checkpoint.analysis_identity.model.clone();
+    let endpoint_id = checkpoint.analysis_identity.endpoint_id.clone();
+    let schema_version = checkpoint.schema_version;
     let warnings = checkpoint
         .warnings
         .iter()
@@ -437,6 +440,17 @@ fn CheckpointResults(checkpoint: AnalysisCheckpoint) -> Element {
             class: "flex flex-col gap-4 rounded-box border border-base-300 p-4",
             aria_labelledby: "analysis-results-title",
             h2 { id: "analysis-results-title", class: "text-lg font-semibold", "Analysis results" }
+            section { class: "flex flex-col gap-2", aria_labelledby: "analysis-identity-title",
+                h3 { id: "analysis-identity-title", class: "font-semibold", "Analysis identity" }
+                dl { class: "grid gap-x-3 gap-y-1 text-sm sm:grid-cols-[max-content_minmax(0,1fr)]",
+                    dt { class: "font-medium", "Model" }
+                    dd { class: "break-all font-mono", "{model}" }
+                    dt { class: "font-medium", "Endpoint/deployment ID" }
+                    dd { class: "break-all font-mono", "{endpoint_id}" }
+                    dt { class: "font-medium", "Pipeline/checkpoint schema version" }
+                    dd { class: "font-mono", "{schema_version}" }
+                }
+            }
             div { class: "flex flex-col gap-2",
                 progress {
                     class: "progress progress-primary w-full",

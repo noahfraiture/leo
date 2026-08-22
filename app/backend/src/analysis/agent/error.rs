@@ -3,6 +3,9 @@ use rig_core::completion::CompletionError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("analysis configuration {0} is required")]
+    MissingConfiguration(&'static str),
+
     #[error("analysis configuration {0} must not be blank")]
     BlankConfiguration(&'static str),
 

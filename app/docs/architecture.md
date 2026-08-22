@@ -61,14 +61,15 @@ Configuration is loaded before the desktop UI starts. Relative defaults are reso
 | `LEO_RECORDER_TIMEOUT_SECS` | `10` | Initial all-camera readiness deadline and bounded FFmpeg RTSP network I/O timeout. |
 | `OPENAI_API_KEY` | none | Required only for an explicit provider analysis. |
 | `ANALYSIS_MODEL` | none | Required provider model name; the app has no hard-coded model. |
-| `OPENAI_BASE_URL` | provider default | Optional endpoint override read by the provider client. |
+| `OPENAI_BASE_URL` | provider default | Optional request endpoint override; a present value must be nonblank. |
+| `ANALYSIS_ENDPOINT_ID` | none | Stable operator label required with a custom `OPENAI_BASE_URL`; never a URL or secret. Public OpenAI checkpoints use `openai-public`. |
 | `RUST_LOG` | `info` | Filter for compact console and JSON file logging. |
 
 The camera file must contain exactly two rows. IDs must be unique and nonzero; names and URLs must be nonblank; URLs must use the `rtsp` scheme; and `sampleEveryMs` must be a positive whole number of seconds. Stable camera IDs are shared by preview metadata, workflow state, session events, recording directories, warnings, and results.
 
 `LEO_DATA_DIR`, `sessions/`, and `logs/` must be direct directories and not symbolic links. The app creates missing directories. The recorder timeout must be a positive integer that is representable both as FFmpeg microseconds and as a Rust deadline. Reconnect delay is fixed at one second, and graceful Stop has five seconds before forced termination.
 
-Missing `OPENAI_API_KEY` or `ANALYSIS_MODEL` disables the Analyze action with a sanitized message. Selection, refresh, route navigation, and checklist edits never construct a provider or send a request. `OPENAI_BASE_URL` is consumed only when explicit analysis constructs the provider.
+Missing `OPENAI_API_KEY` or `ANALYSIS_MODEL` disables the Analyze action with a sanitized message. Startup reads `OPENAI_BASE_URL` and `ANALYSIS_ENDPOINT_ID` to validate Analyze availability but does not construct a provider. Explicit analysis reads them into provider configuration; provider construction uses the raw base URL for requests, while `analysis.json` persists only the endpoint label. Change a custom label whenever endpoint or deployment semantics change. Selection, refresh, route navigation, and checklist edits never construct a provider or send a request.
 
 ## Desktop Ownership
 
@@ -224,7 +225,9 @@ Analyze operates only on a selected completed session while recording is Idle. `
 
 A frame set may contain one or both cameras. An offset with no available frame is omitted. No available frames across the complete plan fails before provider construction. Invalid or overlapping segments fail without replacing a valid prior checkpoint.
 
-The checkpoint stores schema version, session UUID, authoritative checklist, path-independent plan fingerprint, total batches, recording-gap warnings, and completed responses. Vector position is the batch number. Resume validates all plan identity and keeps prior responses. A completed checkpoint returns without provider construction.
+The checkpoint stores schema version, session UUID, exact model and endpoint/deployment identity, authoritative checklist, path-independent plan fingerprint, total batches, recording-gap warnings, and completed responses. Vector position is the batch number. Resume validates all plan identity and keeps prior responses. A completed checkpoint returns without provider construction.
+
+The analysis schema version covers compatibility of behavior-changing instructions, prompt construction, output schema or parsing, request construction, provider dialect, and provider-library behavior. It must be bumped whenever one of those changes can alter analysis requests or results.
 
 Frame extraction removes its temporary JPEG after reading the bytes. There are no downloaded clips, temporary MP4s, or persistent JPEGs in the session tree. Provider or checkpoint failures preserve the last durable response prefix for retry.
 

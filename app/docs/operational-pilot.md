@@ -159,7 +159,7 @@ launch_leo() {
   if lsof -nP -iUDP:8189 >/dev/null; then return 1; fi
   cd "$LEO_WORKSPACE_ROOT"
   env -u OPENAI_API_KEY -u ANALYSIS_MODEL -u OPENAI_BASE_URL \
-    -u LEO_E2E_REAL_OPENAI -u LEO_RUN_PAID_OPENAI_TEST \
+    -u ANALYSIS_ENDPOINT_ID -u LEO_E2E_REAL_OPENAI -u LEO_RUN_PAID_OPENAI_TEST \
     LEO_CAMERA_CONFIG="$LEO_CAMERA_CONFIG" LEO_DATA_DIR="$LEO_DATA_DIR" \
     LEO_RECORDER_TIMEOUT_SECS=10 RUST_LOG=info \
     nix develop --command cargo run --locked -p app --bin app 2>&1 \
