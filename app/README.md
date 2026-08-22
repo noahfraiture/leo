@@ -1,104 +1,112 @@
-# Leo
+# Desktop App
 
-Leo is a local desktop workflow for recording and analyzing a student's exercise from two RTSP cameras. Recording is scoped to an operator session and stored directly on the host with its metadata and analysis checkpoint.
+The `app` crate is the Dioxus Desktop operator application. It owns one shared `Workflow` above the router, keeps recorder and analysis tasks alive across route changes, and presents the Monitor and Analyze routes. Reusable file, process, session, and analysis logic stays in `backend`.
 
-## Workspace
+See [`docs/architecture.md`](../docs/architecture.md) for the complete data flow and ownership boundaries.
 
-The Cargo workspace has exactly three crates:
+## Run Locally
 
-| Crate | Responsibility |
-| --- | --- |
-| [`app`](app/) | Dioxus desktop UI, two-camera preview, workflow state, runtime ownership, and background tasks. |
-| [`backend`](backend/) | Durable session metadata, supervised FFmpeg recording, local segment discovery, and resumable analysis. |
-| [`camera`](camera/) | Fixture-backed Axis-shaped virtual camera for local development and media checks. |
-
-See [`docs/architecture.md`](docs/architecture.md) for lifecycle, storage, and failure semantics.
-Use the [validation checklist](docs/validation.md) to check Leo locally, with a real provider, or with physical cameras and external storage.
-
-## Local Workflow
-
-The Nix development shell supplies Rust, Dioxus CLI, MediaMTX `v1.18.2`, FFmpeg, FFprobe, Tailwind CSS, daisyUI, and Just. The current flake targets Apple Silicon macOS (`aarch64-darwin`).
-
-From the workspace root, enter `nix develop` in each of three terminals, then run:
+From the workspace root, enter `nix develop` in each terminal. Start both fixture-backed cameras in separate terminals:
 
 ```bash
 just camera-1
 just camera-2
+```
+
+Start the app in a third terminal:
+
+```bash
 just app
 ```
 
-The virtual cameras serve RTSP at `127.0.0.1:8554` and `127.0.0.1:8555`. Leo renders both previews through a separate loopback MediaMTX bridge. Start requires both direct FFmpeg RTSP/TCP recorders to receive media, even when a camera is excluded from analysis. Participation and sampling cadence affect analysis only; both cameras continue recording until Stop.
+The checked-in `cameras.json` points to:
 
-Stop appends the session end, stops and reaps both recorders, validates and finalizes their Matroska stream-copy segments, and then writes the zero-byte `recording-complete` marker. Analyze discovers only marked sessions, reads finalized MKVs directly, skips recording gaps while preserving later media, and saves resumable progress and results in `analysis.json`.
+```text
+rtsp://127.0.0.1:8554/axis-media/media.amp
+rtsp://127.0.0.1:8555/axis-media/media.amp
+```
+
+Preview requires `mediamtx v1.18.2`, TCP port `8889`, and UDP port `8189`. The bridge pulls RTSP/TCP into loopback WHEP/WebRTC. Recording does not use the preview bridge: each session recorder connects directly to its configured camera URL. A preview can fail while recording continues, and recorder health does not claim preview health.
+
+## Operator Flow
+
+1. Monitor keeps exactly two previews mounted.
+2. Start creates a new staging directory and waits for every configured camera to produce recorded media.
+3. Active allows camera selection, analysis inclusion/exclusion, whole-second cadence changes, and Stop. Exclusion never stops preview or recording.
+4. A camera interruption finalizes valid media, reports Reconnecting, and attempts a new RTSP/TCP stream-copy segment every second while the other camera continues.
+5. Stop writes the end event, stops and reaps every FFmpeg child, validates and renames MKVs, then writes `recording-complete` only when finalization is sound.
+6. Analyze refreshes completed sessions, shows persisted recording-gap warnings, and starts or resumes provider work only after an explicit Analyze action.
+
+The root desktop event-loop owner retains `RecorderRuntime`, the preview `Bridge`, and the log guard. On normal window destruction it shuts down the recorder runtime, stops the preview bridge, and flushes logging. Root-scoped session and analysis tasks are independent of route component lifetime.
 
 ## Configuration
 
-Paths are resolved from the process working directory.
-
-| Variable | Default | Purpose |
+| Variable | Default | Validation and effect |
 | --- | --- | --- |
-| `LEO_CAMERA_CONFIG` | `./cameras.json` | Exactly two camera IDs, names, RTSP URLs, initial participation values, and whole-second sampling cadences. |
-| `LEO_DATA_DIR` | `./data` | Parent of portable `sessions/` and daily `logs/`. May be an already-mounted local volume. |
-| `LEO_RECORDER_TIMEOUT_SECS` | `10` | Positive initial-readiness and RTSP I/O timeout. Reconnect delay is one second; Stop allows five seconds before forced termination. |
-| `OPENAI_API_KEY` | none | Required only for explicit provider analysis. |
-| `ANALYSIS_MODEL` | none | Required only for explicit provider analysis; no model is hard-coded. |
-| `OPENAI_BASE_URL` | provider default | Optional provider endpoint override. |
-| `RUST_LOG` | `info` | Console and daily JSON log filter. |
+| `LEO_CAMERA_CONFIG` | `./cameras.json` | Must contain exactly two unique nonzero IDs, nonblank names, `rtsp` URLs, and positive whole-second cadences. |
+| `LEO_DATA_DIR` | `./data` | Creates direct `sessions/` and `logs/` directories and keeps each session portable under one root. |
+| `LEO_RECORDER_TIMEOUT_SECS` | `10` | Positive bounded initial-readiness and FFmpeg network I/O timeout. |
+| `OPENAI_API_KEY` | none | Required with `ANALYSIS_MODEL` before the UI enables provider analysis. |
+| `ANALYSIS_MODEL` | none | Required provider model name. |
+| `OPENAI_BASE_URL` | provider default | Optional endpoint override consumed when analysis constructs the provider. |
+| `RUST_LOG` | `info` | Filter for compact stderr logs and daily JSON files. |
 
-Logs are written to stderr and `<LEO_DATA_DIR>/logs/leo.jsonl.<date>`. Leo does not log credentials, full RTSP URLs, checklists, image bytes, or model request bodies.
+The default data layout is:
 
-## Checks
+```text
+data/
+|-- logs/
+|   `-- leo.jsonl.<date>
+`-- sessions/
+    `-- <start-request-UTC-ms>/
+        |-- events.jsonl
+        |-- recording-complete
+        |-- analysis.json
+        `-- recordings/
+            |-- camera-1/
+            |   |-- <segment-start-UTC-ms>.mkv
+            |   `-- .attempt-<uuid>.partial.mkv
+            `-- camera-2/
+                `-- <segment-start-UTC-ms>.mkv
+```
 
-Normal checks do not execute ignored media or paid tests:
+`analysis.json` appears after analysis planning. A partial file exists during an attempt and may remain after invalid media or an unclean exit; only numeric `.mkv` files are analyzed. `recording-complete` is a zero-byte marker created after a durable end event and successful recorder finalization.
+
+Analysis probes local MKV segments, derives uncovered time ranges, omits unavailable samples, and continues with recovered post-gap media. It writes an initial zero-response checkpoint and atomically replaces the checkpoint after each successful five-frame-set batch. Temporary JPEGs are removed after use; the session directory should not gain MP4 downloads or persistent JPEGs.
+
+## Styling
+
+[`tailwind.css`](tailwind.css) is the Tailwind CSS and daisyUI source. Regenerate [`assets/tailwind.css`](assets/tailwind.css) from the workspace root with:
 
 ```bash
-cargo test --workspace --all-targets
-cargo test --workspace --all-targets --all-features --no-run
+just css
+```
+
+## Verification
+
+```bash
+cargo test -p app
+cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-Each media command selects one approved ignored test by exact name:
-
-```bash
-cargo test -p backend analysis::video::extractor::tests::extracts_fixture_frame_as_jpeg -- --ignored --exact
-cargo test -p backend analysis::session::tests::full_local_ffmpeg_and_mock_model_analysis_uses_pre_and_post_gap_segments -- --ignored --exact --nocapture
-cargo test -p camera --test rtsp_stream fixture_streams_h264_to_two_readers_and_stops_cleanly -- --ignored --exact
-cargo test -p camera --test rtsp_stream host_recorder_records_playable_mkv -- --ignored --exact --nocapture
-cargo test -p camera --test rtsp_stream host_recorder_reconnects_into_a_second_segment -- --ignored --exact --nocapture
-```
-
-The opt-in macOS desktop E2E starts both camera binaries, launches the real WKWebView app, drives Start through Analyze, uses a loopback OpenAI-compatible mock, and validates the durable session:
+The full mock-provider desktop flow is a Cargo test owned by the camera crate so it can launch both real camera binaries:
 
 ```bash
 cargo test -p camera --features desktop-e2e --test desktop_e2e desktop_operator_flow_records_two_cameras_and_analyzes -- --ignored --exact --nocapture --test-threads=1
 ```
 
-Preview ports `127.0.0.1:8889/TCP` and `127.0.0.1:8189/UDP` must be free; the test will not interrupt a running Leo app.
-
-To judge a real OpenAI result, provide credentials and explicitly enable both paid gates. The test preserves artifacts under `target/desktop-e2e-real/` or `LEO_E2E_OUTPUT_DIR`:
-
-```bash
-LEO_E2E_REAL_OPENAI=1 \
-LEO_RUN_PAID_OPENAI_TEST=1 \
-OPENAI_API_KEY=... \
-ANALYSIS_MODEL=... \
-cargo test -p camera --features desktop-e2e --test desktop_e2e desktop_operator_flow_records_two_cameras_and_analyzes -- --ignored --exact --nocapture --test-threads=1
-```
-
-The paid app test may be compiled, never executed, without explicit approval:
+The feature-scoped paid test is ignored and has a runtime environment assertion before provider, recorder-runtime, session, or workflow construction. Compile it only unless explicit paid-provider approval is given:
 
 ```bash
 cargo test -p app --features paid-openai-test paid_openai_workflow::paid_openai_analyzes_one_local_application_session --no-run
 ```
 
-Do not set `LEO_RUN_PAID_OPENAI_TEST=1`, enable the real-provider E2E, or run the ignored paid test without deliberately accepting the provider request and cost.
+Never set `LEO_RUN_PAID_OPENAI_TEST=1` or execute that test without separate approval. Normal tests and exact local media checks do not send provider requests.
 
-## Limits
+## Current Limits
 
-- Normal shutdown owns, interrupts, kills when necessary, reaps, and joins recorder and preview processes. A hard app crash, forced termination, sleep, or power loss can leave partial files or child processes; active-session recovery is not implemented.
-- `LEO_DATA_DIR` can target an already-mounted external SSD, but Leo does not discover, validate, mount, eject, or monitor one.
-- Disk-capacity monitoring, automatic retention, deletion, export, and playback are not implemented.
-- Physical cameras and timeout calibration have not been accepted by the automated local fixtures.
-- Only one recording session and one analysis may run at a time.
-
-App-specific operation and styling notes are in [`app/README.md`](app/README.md).
+- Hard-crash cleanup, orphan detection, active-session recovery, and recording survival across app exit or laptop sleep are not implemented.
+- An external SSD must already be mounted and selected through `LEO_DATA_DIR`; discovery, identity checks, capacity monitoring, and safe eject are absent.
+- Retention, automatic deletion, export, settings, camera discovery, and video playback are absent.
+- Physical-camera behavior and recorder timeout calibration require separate on-hardware acceptance.

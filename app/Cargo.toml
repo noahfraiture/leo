@@ -1,20 +1,33 @@
-[workspace]
-members = [
-    "app",
-    "backend",
-    "camera",
-]
-resolver = "3"
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2024"
 
-[workspace.dependencies]
-axum = "0.8.9"
-clap = { version = "=4.6.1", features = ["derive"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tempfile = "3"
-thiserror = "2"
-tokio = "1.53.0"
-tower = { version = "0.5.3", features = ["util"] }
-tracing = "0.1"
-url = "2"
-uuid = { version = "1.24.0", features = ["serde", "v4"] }
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+desktop-e2e = []
+paid-openai-test = []
+
+[dependencies]
+backend = { path = "../backend" }
+dioxus = {
+    version = "0.7.9",
+    default-features = false,
+    features = ["desktop", "lib", "launch", "router"]
+}
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true }
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+url = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+backend = { path = "../backend", features = ["test-support"] }
+dioxus-ssr = "=0.7.9"
+tokio = { workspace = true, features = ["macros", "rt"] }

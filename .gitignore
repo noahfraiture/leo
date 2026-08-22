@@ -1,3 +1,5 @@
-/codebook.toml
-/app/data/
-/.superpowers/
+codebook.toml
+app/data/
+.superpowers/
+target/
+.env
