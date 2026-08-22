@@ -1,7 +1,0 @@
-Metadata-Version: 2.4
-Name: videollm
-Version: 0.1.0
-Summary: Analyze videos directly with Gemini
-Requires-Python: >=3.11
-Description-Content-Type: text/markdown
-Requires-Dist: google-genai>=1.0.0

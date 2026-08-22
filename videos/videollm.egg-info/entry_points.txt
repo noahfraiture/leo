@@ -1,2 +1,0 @@
-[console_scripts]
-videollm = analyze_video:main

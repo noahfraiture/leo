@@ -1,7 +1,0 @@
-pyproject.toml
-videollm.egg-info/PKG-INFO
-videollm.egg-info/SOURCES.txt
-videollm.egg-info/dependency_links.txt
-videollm.egg-info/entry_points.txt
-videollm.egg-info/requires.txt
-videollm.egg-info/top_level.txt
