@@ -51,30 +51,8 @@ struct InitialWorkflow(Arc<Mutex<Option<Workflow>>>);
 
 const MODEL_CONFIG_ERROR: &str = "Analysis requires OPENAI_API_KEY and ANALYSIS_MODEL.";
 
-fn model_config_error(
-    openai_api_key: bool,
-    analysis_model: bool,
-    openai_base_url: Option<&str>,
-    analysis_endpoint_id: Option<&str>,
-) -> Option<String> {
-    if !openai_api_key || !analysis_model {
-        return Some(MODEL_CONFIG_ERROR.to_owned());
-    }
-
-    match openai_base_url {
-        None => None,
-        Some(base_url) if !configuration_value_is_present(Some(base_url)) => {
-            Some("Analysis configuration OPENAI_BASE_URL must not be blank.".to_owned())
-        }
-        Some(_) if analysis_endpoint_id.is_none() => Some(
-            "Analysis configuration ANALYSIS_ENDPOINT_ID is required for a custom OPENAI_BASE_URL."
-                .to_owned(),
-        ),
-        Some(_) if !configuration_value_is_present(analysis_endpoint_id) => {
-            Some("Analysis configuration ANALYSIS_ENDPOINT_ID must not be blank.".to_owned())
-        }
-        Some(_) => None,
-    }
+fn model_config_error(openai_api_key: bool, analysis_model: bool) -> Option<String> {
+    (!openai_api_key || !analysis_model).then(|| MODEL_CONFIG_ERROR.to_owned())
 }
 
 fn configuration_value_is_present(value: Option<&str>) -> bool {
@@ -87,8 +65,6 @@ fn initialize_workflow(
 ) -> Result<InitialWorkflow, String> {
     let openai_api_key = std::env::var("OPENAI_API_KEY").ok();
     let analysis_model = std::env::var("ANALYSIS_MODEL").ok();
-    let openai_base_url = std::env::var("OPENAI_BASE_URL").ok();
-    let analysis_endpoint_id = std::env::var("ANALYSIS_ENDPOINT_ID").ok();
     Workflow::new(
         config.cameras.clone(),
         config.sessions_root.clone(),
@@ -96,8 +72,6 @@ fn initialize_workflow(
         model_config_error(
             configuration_value_is_present(openai_api_key.as_deref()),
             configuration_value_is_present(analysis_model.as_deref()),
-            openai_base_url.as_deref(),
-            analysis_endpoint_id.as_deref(),
         ),
     )
     .map(|workflow| InitialWorkflow(Arc::new(Mutex::new(Some(workflow)))))
@@ -433,51 +407,10 @@ mod tests {
     fn model_configuration_availability_is_sanitized_without_environment_mutation() {
         let unavailable = Some("Analysis requires OPENAI_API_KEY and ANALYSIS_MODEL.".to_owned());
 
-        assert_eq!(model_config_error(false, false, None, None), unavailable);
-        assert_eq!(model_config_error(false, true, None, None), unavailable);
-        assert_eq!(model_config_error(true, false, None, None), unavailable);
-        assert_eq!(model_config_error(true, true, None, None), None);
-    }
-
-    #[test]
-    fn model_config_error_requires_endpoint_id_for_custom_base() {
-        const BASE_URL: &str = "https://custom-base-value.invalid/v1";
-        const ENDPOINT_ID: &str = "endpoint-value";
-
-        assert_eq!(model_config_error(true, true, None, None), None);
-        assert_eq!(
-            model_config_error(true, true, None, Some(ENDPOINT_ID)),
-            None
-        );
-        assert_eq!(
-            model_config_error(true, true, Some(BASE_URL), Some(ENDPOINT_ID)),
-            None
-        );
-
-        for (reason, base_url, endpoint_id, expected) in [
-            (
-                "blank custom base",
-                Some(" \t"),
-                Some(ENDPOINT_ID),
-                "Analysis configuration OPENAI_BASE_URL must not be blank.",
-            ),
-            (
-                "missing endpoint ID",
-                Some(BASE_URL),
-                None,
-                "Analysis configuration ANALYSIS_ENDPOINT_ID is required for a custom OPENAI_BASE_URL.",
-            ),
-            (
-                "blank endpoint ID",
-                Some(BASE_URL),
-                Some(" \t"),
-                "Analysis configuration ANALYSIS_ENDPOINT_ID must not be blank.",
-            ),
-        ] {
-            let message = model_config_error(true, true, base_url, endpoint_id)
-                .unwrap_or_else(|| panic!("{reason} should disable analysis"));
-            assert_eq!(message, expected, "{reason}");
-        }
+        assert_eq!(model_config_error(false, false), unavailable);
+        assert_eq!(model_config_error(false, true), unavailable);
+        assert_eq!(model_config_error(true, false), unavailable);
+        assert_eq!(model_config_error(true, true), None);
     }
 
     #[test]

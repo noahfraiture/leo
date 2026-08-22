@@ -560,8 +560,7 @@ mod tests {
 
     use backend::{
         analysis::{
-            ANALYSIS_SCHEMA_VERSION, AnalysisCheckpoint, AnalysisIdentity, AnalysisResponse,
-            AnalysisWarning, ChecklistProgress, Observation,
+            AnalysisCheckpoint, AnalysisResponse, AnalysisWarning, ChecklistProgress, Observation,
         },
         recording::{
             RecorderEvent, RecorderRuntime, RecorderSettings, RecorderStatus, spawn_for_test,
@@ -739,12 +738,8 @@ mod tests {
         responses: Vec<AnalysisResponse>,
     ) -> AnalysisCheckpoint {
         AnalysisCheckpoint {
-            schema_version: ANALYSIS_SCHEMA_VERSION,
+            schema_version: 2,
             session_id,
-            analysis_identity: AnalysisIdentity {
-                model: "test-model".into(),
-                endpoint_id: "test-endpoint".into(),
-            },
             checklist: checklist.into(),
             plan_fingerprint: "0123456789abcdef".into(),
             total_batches,
@@ -772,9 +767,9 @@ mod tests {
         if let Some(saved) = saved {
             fs::write(
                 directory.join("analysis.json"),
-                serde_json::to_vec_pretty(saved).expect("v3 checkpoint should serialize"),
+                serde_json::to_vec_pretty(saved).expect("v2 checkpoint should serialize"),
             )
-            .expect("v3 checkpoint should be written");
+            .expect("v2 checkpoint should be written");
         }
         harness
             .workflow

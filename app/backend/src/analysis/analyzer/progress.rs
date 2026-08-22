@@ -1,22 +1,12 @@
-use std::path::Path;
+use std::{fs::File, path::Path};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::analysis::{agent::AnalysisResponse, error::Error, video::AnalysisWarning};
 
-/// Current on-disk schema and behavior-changing analysis-pipeline revision.
-pub const ANALYSIS_SCHEMA_VERSION: u8 = 3;
-
-/// Non-secret provider configuration that identifies analysis output.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct AnalysisIdentity {
-    /// Exact provider model name used for analysis requests.
-    pub model: String,
-    /// Stable deployment-defined identifier for the provider endpoint.
-    pub endpoint_id: String,
-}
+/// Current on-disk analysis checkpoint schema.
+pub const ANALYSIS_SCHEMA_VERSION: u8 = 2;
 
 /// Durable analysis identity, warnings, and completed response prefix for one session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -26,8 +16,6 @@ pub struct AnalysisCheckpoint {
     pub schema_version: u8,
     /// Session UUID whose analysis is being checkpointed.
     pub session_id: Uuid,
-    /// Exact non-secret provider identity used for every response.
-    pub analysis_identity: AnalysisIdentity,
     /// Correct-sequence checklist used for every model request.
     pub checklist: String,
     /// Path-independent SHA-256 identity of the canonical frame plan.
@@ -47,20 +35,7 @@ impl AnalysisCheckpoint {
             return Err(Error::InvalidCheckpointFile);
         }
 
-        #[derive(Deserialize)]
-        struct VersionEnvelope {
-            schema_version: u8,
-        }
-
-        let bytes = std::fs::read(path)?;
-        let version = serde_json::from_slice::<VersionEnvelope>(&bytes)?.schema_version;
-        if version != ANALYSIS_SCHEMA_VERSION {
-            return Err(Error::CheckpointSchema {
-                expected: ANALYSIS_SCHEMA_VERSION,
-                actual: version,
-            });
-        }
-        let checkpoint: Self = serde_json::from_slice(&bytes)?;
+        let checkpoint: Self = serde_json::from_reader(File::open(path)?)?;
         checkpoint.validate(expected_session_id)?;
         Ok(checkpoint)
     }
@@ -77,12 +52,6 @@ impl AnalysisCheckpoint {
                 expected: expected_session_id,
                 actual: self.session_id,
             });
-        }
-        if self.analysis_identity.model.trim().is_empty() {
-            return Err(Error::BlankCheckpointModel);
-        }
-        if self.analysis_identity.endpoint_id.trim().is_empty() {
-            return Err(Error::BlankCheckpointEndpointId);
         }
         if self.checklist.is_empty() {
             return Err(Error::EmptyCheckpointChecklist);
@@ -106,13 +75,10 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    use crate::analysis::{
-        agent::{AnalysisResponse, ChecklistProgress, Observation},
-        error::Error,
-        video::AnalysisWarning,
-    };
+    use crate::analysis::agent::{AnalysisResponse, ChecklistProgress, Observation};
+    use crate::analysis::video::AnalysisWarning;
 
-    use super::{ANALYSIS_SCHEMA_VERSION, AnalysisCheckpoint, AnalysisIdentity};
+    use super::{ANALYSIS_SCHEMA_VERSION, AnalysisCheckpoint};
 
     const TOTAL_BATCHES: usize = 2;
 
@@ -135,18 +101,10 @@ mod tests {
         }
     }
 
-    fn analysis_identity() -> AnalysisIdentity {
-        AnalysisIdentity {
-            model: "model-byte-sentinel".into(),
-            endpoint_id: "endpoint-byte-sentinel".into(),
-        }
-    }
-
     fn checkpoint() -> AnalysisCheckpoint {
         AnalysisCheckpoint {
             schema_version: ANALYSIS_SCHEMA_VERSION,
             session_id: session_id(),
-            analysis_identity: analysis_identity(),
             checklist: "Start the exercise".into(),
             plan_fingerprint: "0123456789abcdef".into(),
             total_batches: TOTAL_BATCHES,
@@ -160,11 +118,10 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_v3_round_trips_identity_and_results() {
+    fn checkpoint_v2_round_trips_checklist_fingerprint_warnings_and_responses() {
         let directory = tempfile::tempdir().expect("temporary directory should be created");
         let path = directory.path().join("analysis.json");
         let expected = checkpoint();
-        assert_eq!(ANALYSIS_SCHEMA_VERSION, 3);
         std::fs::write(
             &path,
             serde_json::to_vec_pretty(&expected).expect("checkpoint should serialize"),
@@ -172,86 +129,13 @@ mod tests {
         .expect("checkpoint should be written");
 
         let actual =
-            AnalysisCheckpoint::read(&path, session_id()).expect("valid v3 checkpoint should load");
+            AnalysisCheckpoint::read(&path, session_id()).expect("valid v2 checkpoint should load");
 
         assert_eq!(actual, expected);
-        assert_eq!(actual.analysis_identity, analysis_identity());
     }
 
     #[test]
-    fn genuine_v2_checkpoint_is_schema_mismatch() {
-        let directory = tempfile::tempdir().expect("temporary directory should be created");
-        let path = directory.path().join("analysis.json");
-        let fixture = json!({
-            "schema_version": 2,
-            "session_id": session_id(),
-            "checklist": "Start the exercise",
-            "plan_fingerprint": "0123456789abcdef",
-            "total_batches": 1,
-            "warnings": [],
-            "responses": []
-        });
-        assert!(fixture.get("analysis_identity").is_none());
-        std::fs::write(
-            &path,
-            serde_json::to_vec_pretty(&fixture).expect("v2 fixture should serialize"),
-        )
-        .expect("v2 fixture should be written");
-
-        assert!(matches!(
-            AnalysisCheckpoint::read(&path, session_id()),
-            Err(Error::CheckpointSchema {
-                expected: ANALYSIS_SCHEMA_VERSION,
-                actual: 2
-            })
-        ));
-    }
-
-    #[test]
-    fn read_rejects_unknown_or_blank_identity() {
-        let directory = tempfile::tempdir().expect("temporary directory should be created");
-        let path = directory.path().join("analysis.json");
-        let valid = serde_json::to_value(checkpoint()).expect("checkpoint should serialize");
-
-        for field in ["model", "endpoint_id"] {
-            let mut value = valid.clone();
-            value["analysis_identity"][field] = json!(" \n\t");
-            std::fs::write(
-                &path,
-                serde_json::to_vec_pretty(&value).expect("invalid checkpoint should serialize"),
-            )
-            .expect("invalid checkpoint should be written");
-
-            let error = AnalysisCheckpoint::read(&path, session_id())
-                .expect_err("blank identity field must be rejected");
-            match field {
-                "model" => assert!(matches!(error, Error::BlankCheckpointModel)),
-                "endpoint_id" => {
-                    assert!(matches!(error, Error::BlankCheckpointEndpointId))
-                }
-                _ => unreachable!(),
-            }
-        }
-
-        let mut unknown = valid;
-        unknown["analysis_identity"]
-            .as_object_mut()
-            .expect("identity should be an object")
-            .insert("provider".into(), json!("must be rejected"));
-        std::fs::write(
-            &path,
-            serde_json::to_vec_pretty(&unknown).expect("invalid checkpoint should serialize"),
-        )
-        .expect("invalid checkpoint should be written");
-
-        assert!(matches!(
-            AnalysisCheckpoint::read(&path, session_id()),
-            Err(Error::Json(_))
-        ));
-    }
-
-    #[test]
-    fn read_rejects_wrong_schema_session_empty_plan_fields_and_excess_responses() {
+    fn read_rejects_wrong_schema_session_empty_identity_and_excess_responses() {
         let directory = tempfile::tempdir().expect("temporary directory should be created");
         let path = directory.path().join("analysis.json");
         let valid = serde_json::to_value(checkpoint()).expect("checkpoint should serialize");

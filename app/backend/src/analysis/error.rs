@@ -56,12 +56,6 @@ pub enum Error {
         actual: uuid::Uuid,
     },
 
-    #[error("analysis checkpoint model must not be blank")]
-    BlankCheckpointModel,
-
-    #[error("analysis checkpoint endpoint ID must not be blank")]
-    BlankCheckpointEndpointId,
-
     #[error("analysis checkpoint checklist is empty")]
     EmptyCheckpointChecklist,
 
@@ -70,12 +64,6 @@ pub enum Error {
 
     #[error("analysis checkpoint checklist does not match the requested analysis")]
     CheckpointChecklist,
-
-    #[error("analysis checkpoint model does not match the configured analysis")]
-    CheckpointModel,
-
-    #[error("analysis checkpoint endpoint ID does not match the configured analysis")]
-    CheckpointEndpointId,
 
     #[error("analysis checkpoint plan fingerprint does not match the rebuilt plan")]
     CheckpointPlanFingerprint,

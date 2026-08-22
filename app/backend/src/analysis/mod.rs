@@ -7,9 +7,7 @@ mod session;
 mod video;
 
 pub use agent::{AnalysisResponse, ChecklistProgress, Observation};
-pub use analyzer::{
-    ANALYSIS_SCHEMA_VERSION, AnalysisCheckpoint, AnalysisIdentity, AnalysisWarning,
-};
+pub use analyzer::{AnalysisCheckpoint, AnalysisWarning};
 pub use error::Error;
 pub use session::{AnalyzeSession, analyze_session};
 

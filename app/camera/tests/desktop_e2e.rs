@@ -27,9 +27,6 @@ const CAMERA_READY_TIMEOUT: Duration = Duration::from_secs(20);
 const DRIVER_READY_TIMEOUT: Duration = Duration::from_secs(15);
 const E2E_TIMEOUT: Duration = Duration::from_secs(120);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
-const E2E_CHECKLIST: &str = "Keep movement controlled";
-const E2E_RESULT: &str = "E2E mock analysis complete.";
-const MOCK_ANALYSIS_ENDPOINT_ID: &str = "desktop-e2e-loopback";
 const ESRCH: i32 = 3;
 const SIGINT: i32 = 2;
 const SIGKILL: i32 = 9;
@@ -119,13 +116,11 @@ fn desktop_operator_flow_records_two_cameras_and_analyzes() {
         }
         app.env("OPENAI_API_KEY", "local-e2e-key")
             .env("ANALYSIS_MODEL", "local-e2e-model")
-            .env("ANALYSIS_ENDPOINT_ID", MOCK_ANALYSIS_ENDPOINT_ID)
             .env("OPENAI_BASE_URL", format!("http://{}/v1", mock.address))
             .env("NO_PROXY", "*")
             .env("no_proxy", "*");
     } else {
         app.env_remove("OPENAI_BASE_URL");
-        app.env_remove("ANALYSIS_ENDPOINT_ID");
     }
     let mut app = ProcessGuard::spawn("desktop app", &mut app, &logs);
 
@@ -183,78 +178,24 @@ fn desktop_operator_flow_records_two_cameras_and_analyzes() {
     assert!(segments.iter().any(|segment| segment.camera_id == 1));
     assert!(segments.iter().any(|segment| segment.camera_id == 2));
 
-    let checkpoint_path = stored.directory.join("analysis.json");
-    let checkpoint_bytes = fs::read(&checkpoint_path).expect("read raw E2E analysis checkpoint");
-    let checkpoint = AnalysisCheckpoint::read(&checkpoint_path, stored.session.id)
-        .expect("read E2E analysis checkpoint");
+    let checkpoint =
+        AnalysisCheckpoint::read(&stored.directory.join("analysis.json"), stored.session.id)
+            .expect("read E2E analysis checkpoint");
     assert!(checkpoint.total_batches > 0);
     assert_eq!(checkpoint.responses.len(), checkpoint.total_batches);
     if let Some(mock) = &mock_openai {
-        assert_eq!(rendered_summary, E2E_RESULT);
-        assert_eq!(checkpoint.checklist, E2E_CHECKLIST);
-        assert_eq!(
-            checkpoint.analysis_identity.endpoint_id,
-            MOCK_ANALYSIS_ENDPOINT_ID
-        );
+        assert_eq!(rendered_summary, "E2E mock analysis complete.");
         assert!(
             checkpoint
                 .responses
                 .iter()
-                .all(|response| response.sequence_summary == E2E_RESULT)
+                .all(|response| response.sequence_summary == "E2E mock analysis complete.")
         );
-        for (description, required) in [
-            ("checklist", E2E_CHECKLIST),
-            ("analysis result", E2E_RESULT),
-        ] {
-            assert!(
-                checkpoint_bytes
-                    .windows(required.len())
-                    .any(|bytes| bytes == required.as_bytes()),
-                "raw analysis checkpoint omitted required {description}"
-            );
-        }
-        let request_bodies = mock.requests.lock().expect("mock requests mutex");
+        let requests = mock.requests.lock().expect("mock requests mutex");
         assert!(
-            !request_bodies.is_empty(),
+            !requests.is_empty(),
             "mock OpenAI server received no requests"
         );
-        let requests = request_bodies
-            .iter()
-            .map(|body| serde_json::from_str(body).expect("mock request should be valid JSON"))
-            .collect::<Vec<Value>>();
-        for request in requests.iter() {
-            assert_eq!(
-                request.get("model").and_then(Value::as_str),
-                Some(checkpoint.analysis_identity.model.as_str()),
-                "loopback request model did not match persisted analysis identity"
-            );
-            let instructions = request
-                .get("instructions")
-                .and_then(Value::as_str)
-                .filter(|instructions| !instructions.is_empty())
-                .expect("loopback request should contain system instructions");
-            assert_bytes_absent(
-                &checkpoint_bytes,
-                instructions.as_bytes(),
-                "system instructions",
-            );
-            let image_urls = request_image_urls(request);
-            assert!(
-                !image_urls.is_empty(),
-                "loopback request contained no image URLs"
-            );
-            for image_url in image_urls {
-                let payload = image_url
-                    .strip_prefix("data:image/jpeg;base64,")
-                    .filter(|payload| !payload.is_empty())
-                    .expect("loopback image should contain a JPEG payload");
-                assert_bytes_absent(&checkpoint_bytes, image_url.as_bytes(), "image URL");
-                assert_bytes_absent(&checkpoint_bytes, payload.as_bytes(), "image payload");
-            }
-        }
-        for body in request_bodies.iter() {
-            assert_bytes_absent(&checkpoint_bytes, body.as_bytes(), "complete request body");
-        }
         for camera_id in [1, 2] {
             assert!(
                 requests
@@ -377,12 +318,7 @@ fn start_camera(name: &'static str, fixture: &Path, logs: &Path) -> (SocketAddr,
             "--video",
             fixture.to_str().expect("fixture path should be UTF-8"),
         ]);
-    for variable in [
-        "OPENAI_API_KEY",
-        "ANALYSIS_MODEL",
-        "OPENAI_BASE_URL",
-        "ANALYSIS_ENDPOINT_ID",
-    ] {
+    for variable in ["OPENAI_API_KEY", "ANALYSIS_MODEL", "OPENAI_BASE_URL"] {
         command.env_remove(variable);
     }
     let mut camera = ProcessGuard::spawn(name, &mut command, logs);
@@ -495,38 +431,6 @@ fn request_contains_camera_frame(request: &Value, camera_id: u32) -> bool {
     })
 }
 
-fn request_image_urls(request: &Value) -> Vec<&str> {
-    let mut urls = Vec::new();
-    for message in request
-        .get("input")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        for content in message
-            .get("content")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            if let Some(url) = content.get("image_url").and_then(Value::as_str) {
-                urls.push(url);
-            }
-        }
-    }
-    urls
-}
-
-fn assert_bytes_absent(checkpoint: &[u8], sensitive: &[u8], description: &str) {
-    assert!(!sensitive.is_empty(), "{description} should not be empty");
-    assert!(
-        !checkpoint
-            .windows(sensitive.len())
-            .any(|bytes| bytes == sensitive),
-        "raw analysis checkpoint contained request-only {description}"
-    );
-}
-
 fn redacted_requests(requests: &[Value]) -> String {
     fn redact(value: &Value) -> Value {
         match value {
@@ -559,7 +463,7 @@ fn redacted_requests(requests: &[Value]) -> String {
 
 struct MockOpenAi {
     address: SocketAddr,
-    requests: Arc<Mutex<Vec<String>>>,
+    requests: Arc<Mutex<Vec<Value>>>,
     shutdown: Option<oneshot::Sender<()>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -611,19 +515,18 @@ impl Drop for MockOpenAi {
 }
 
 async fn mock_response(
-    State(requests): State<Arc<Mutex<Vec<String>>>>,
-    body: String,
+    State(requests): State<Arc<Mutex<Vec<Value>>>>,
+    Json(request): Json<Value>,
 ) -> Json<Value> {
-    serde_json::from_str::<Value>(&body).expect("mock request should be valid JSON");
-    requests.lock().expect("mock requests mutex").push(body);
+    requests.lock().expect("mock requests mutex").push(request);
     let response = json!({
         "observations": [{
             "timestamp": "00:00:00.000",
             "description": "The fixture student begins the exercise."
         }],
-        "sequence_summary": E2E_RESULT,
+        "sequence_summary": "E2E mock analysis complete.",
         "checklist_progress": [{
-            "item": E2E_CHECKLIST,
+            "item": "Keep movement controlled",
             "status": "respected",
             "note": "Deterministic local E2E response."
         }]

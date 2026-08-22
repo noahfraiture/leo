@@ -48,11 +48,8 @@ The root desktop event-loop owner retains `RecorderRuntime`, the preview `Bridge
 | `LEO_RECORDER_TIMEOUT_SECS` | `10` | Positive bounded initial-readiness and FFmpeg network I/O timeout. |
 | `OPENAI_API_KEY` | none | Required with `ANALYSIS_MODEL` before the UI enables provider analysis. |
 | `ANALYSIS_MODEL` | none | Required provider model name. |
-| `OPENAI_BASE_URL` | provider default | Optional request endpoint override; a present value must be nonblank. |
-| `ANALYSIS_ENDPOINT_ID` | none | Stable operator label required with a custom `OPENAI_BASE_URL`; never a URL or secret. Public OpenAI checkpoints use `openai-public`. |
+| `OPENAI_BASE_URL` | provider default | Optional endpoint override consumed when analysis constructs the provider. |
 | `RUST_LOG` | `info` | Filter for compact stderr logs and daily JSON files. |
-
-Startup reads the base URL and endpoint label to validate Analyze availability. Explicit analysis reads them into provider configuration; provider construction uses the raw base URL for requests, while `analysis.json` persists only the endpoint label. Change a custom label whenever endpoint or deployment semantics change.
 
 The default data layout is:
 

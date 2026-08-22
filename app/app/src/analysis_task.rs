@@ -37,8 +37,8 @@ mod tests {
 
     use backend::{
         analysis::{
-            ANALYSIS_SCHEMA_VERSION, AnalysisCheckpoint, AnalysisIdentity, AnalysisResponse,
-            AnalysisWarning, AnalyzeSession, ChecklistProgress, Observation,
+            AnalysisCheckpoint, AnalysisResponse, AnalysisWarning, AnalyzeSession,
+            ChecklistProgress, Observation,
         },
         recording::{RecorderRuntime, RecorderSettings, spawn_for_test},
         session::mark_recording_complete,
@@ -163,12 +163,8 @@ mod tests {
 
     fn checkpoint(session_id: Uuid, responses: Vec<AnalysisResponse>) -> AnalysisCheckpoint {
         AnalysisCheckpoint {
-            schema_version: ANALYSIS_SCHEMA_VERSION,
+            schema_version: 2,
             session_id,
-            analysis_identity: AnalysisIdentity {
-                model: "test-model".into(),
-                endpoint_id: "test-endpoint".into(),
-            },
             checklist: "Persisted checklist".into(),
             plan_fingerprint: "0123456789abcdef".into(),
             total_batches: 2,

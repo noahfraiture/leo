@@ -42,11 +42,8 @@ Paths are resolved from the process working directory.
 | `LEO_RECORDER_TIMEOUT_SECS` | `10` | Positive initial-readiness and RTSP I/O timeout. Reconnect delay is one second; Stop allows five seconds before forced termination. |
 | `OPENAI_API_KEY` | none | Required only for explicit provider analysis. |
 | `ANALYSIS_MODEL` | none | Required only for explicit provider analysis; no model is hard-coded. |
-| `OPENAI_BASE_URL` | provider default | Optional request endpoint override; a present value must be nonblank. |
-| `ANALYSIS_ENDPOINT_ID` | none | Stable operator label required with a custom `OPENAI_BASE_URL`; never a URL or secret. Public OpenAI checkpoints use `openai-public`. |
+| `OPENAI_BASE_URL` | provider default | Optional provider endpoint override. |
 | `RUST_LOG` | `info` | Console and daily JSON log filter. |
-
-Startup reads the base URL and endpoint label to validate Analyze availability. Explicit analysis reads them into provider configuration; provider construction uses the raw base URL for requests, while `analysis.json` persists only the endpoint label. Change a custom label whenever endpoint or deployment semantics change.
 
 Logs are written to stderr and `<LEO_DATA_DIR>/logs/leo.jsonl.<date>`. Leo does not log credentials, full RTSP URLs, checklists, image bytes, or model request bodies.
 

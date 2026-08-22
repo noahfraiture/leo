@@ -11,8 +11,7 @@ use std::{
 
 use backend::{
     analysis::{
-        ANALYSIS_SCHEMA_VERSION, AnalysisCheckpoint, AnalysisIdentity, AnalysisResponse,
-        AnalysisWarning, ChecklistProgress, Observation,
+        AnalysisCheckpoint, AnalysisResponse, AnalysisWarning, ChecklistProgress, Observation,
     },
     recording::{RecorderRuntime, RecorderSettings, RecorderStatus, spawn_for_test},
     session::{SessionController, mark_recording_complete},
@@ -293,12 +292,8 @@ fn checkpoint(
     responses: Vec<AnalysisResponse>,
 ) -> AnalysisCheckpoint {
     AnalysisCheckpoint {
-        schema_version: ANALYSIS_SCHEMA_VERSION,
+        schema_version: 2,
         session_id,
-        analysis_identity: AnalysisIdentity {
-            model: "test-model".into(),
-            endpoint_id: "test-endpoint".into(),
-        },
         checklist: "Persisted correct-sequence checklist".into(),
         plan_fingerprint: "0123456789abcdef".into(),
         total_batches,
@@ -962,79 +957,6 @@ fn analyze_renders_every_recording_gap_before_complete_model_results() {
 }
 
 #[test]
-fn analyze_renders_persisted_analysis_identity() {
-    const MODEL: &str = "gpt-analysis-model";
-    const ENDPOINT_ID: &str = "student-analysis-deployment";
-
-    for (session_id, total_batches, responses) in [
-        (Uuid::from_u128(112), 2, Vec::new()),
-        (
-            Uuid::from_u128(113),
-            2,
-            vec![response(
-                "00:00:01.000",
-                "Saved partial observation",
-                "Saved partial summary",
-                "not yet",
-                "One batch remains",
-            )],
-        ),
-        (
-            Uuid::from_u128(114),
-            1,
-            vec![response(
-                "00:00:01.000",
-                "Saved complete observation",
-                "Saved complete summary",
-                "respected",
-                "Analysis complete",
-            )],
-        ),
-    ] {
-        let mut harness = Harness::new();
-        let mut saved = checkpoint(session_id, total_batches, Vec::new(), responses);
-        saved.analysis_identity = AnalysisIdentity {
-            model: MODEL.into(),
-            endpoint_id: ENDPOINT_ID.into(),
-        };
-        prepare_session(&mut harness, session_id, Some(&saved));
-
-        let html = harness.render_at(ready_preview(), "/analyze");
-
-        assert!(
-            opening_tag_before(&html, "section", "Analysis identity")
-                .contains(r#"aria-labelledby="analysis-identity-title""#),
-            "{html}"
-        );
-        assert!(
-            opening_tag_before(&html, "h3", "Analysis identity")
-                .contains(r#"id="analysis-identity-title""#),
-            "{html}"
-        );
-        let identity_start = html
-            .find("Analysis identity")
-            .expect("analysis identity heading should render");
-        let progress_start = html
-            .find("Completed batches")
-            .expect("analysis progress should render");
-        let identity = &html[identity_start..progress_start];
-        assert!(identity.contains("<dl"), "{identity}");
-        assert!(identity.contains("Model"), "{identity}");
-        assert!(identity.contains(MODEL), "{identity}");
-        assert!(identity.contains("Endpoint/deployment ID"), "{identity}");
-        assert!(identity.contains(ENDPOINT_ID), "{identity}");
-        assert!(
-            identity.contains("Pipeline/checkpoint schema version"),
-            "{identity}"
-        );
-        assert!(
-            identity.contains(&format!(">{ANALYSIS_SCHEMA_VERSION}</dd>")),
-            "{identity}"
-        );
-    }
-}
-
-#[test]
 fn analyze_running_state_disables_only_the_analysis_action_not_navigation() {
     let mut harness = Harness::new();
     let session_id = Uuid::from_u128(109);
@@ -1081,13 +1003,6 @@ fn analyze_failed_state_shows_the_session_failure_and_allows_resume() {
     assert!(html.contains("The model request failed safely."), "{html}");
     assert_progress(&html, 1, 2);
     assert!(html.contains("Saved observation"), "{html}");
-    assert!(html.contains("Analysis identity"), "{html}");
-    assert!(html.contains("test-model"), "{html}");
-    assert!(html.contains("test-endpoint"), "{html}");
-    assert!(
-        html.contains(&format!(">{ANALYSIS_SCHEMA_VERSION}</dd>")),
-        "{html}"
-    );
     assert_analysis_action(&html, "Resume", false);
 }
 

@@ -115,10 +115,7 @@ fn row_status(
 
 #[cfg(test)]
 mod tests {
-    use backend::analysis::{
-        ANALYSIS_SCHEMA_VERSION, AnalysisCheckpoint, AnalysisIdentity, AnalysisResponse,
-        AnalysisWarning,
-    };
+    use backend::analysis::{AnalysisCheckpoint, AnalysisResponse, AnalysisWarning};
     use uuid::Uuid;
 
     use super::row_status;
@@ -134,12 +131,8 @@ mod tests {
             checklist_progress: Vec::new(),
         };
         Ok(Some(AnalysisCheckpoint {
-            schema_version: ANALYSIS_SCHEMA_VERSION,
+            schema_version: 2,
             session_id: Uuid::from_u128(1),
-            analysis_identity: AnalysisIdentity {
-                model: "test-model".into(),
-                endpoint_id: "test-endpoint".into(),
-            },
             checklist: "Complete the exercise".into(),
             plan_fingerprint: "0123456789abcdef".into(),
             total_batches,

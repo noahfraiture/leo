@@ -7,8 +7,8 @@ use rig_core::completion::CompletionModel;
 use crate::{recording::list_segments, session::Session};
 
 use super::{
-    agent::{Agent, OpenAiConfiguration},
-    analyzer::{AnalysisCheckpoint, AnalysisIdentity, Analyzer},
+    agent::{Agent, OpenAiAgent},
+    analyzer::{AnalysisCheckpoint, Analyzer},
     error::Error,
 };
 
@@ -27,12 +27,9 @@ pub async fn analyze_session(
     request: AnalyzeSession,
     on_checkpoint: impl FnMut(AnalysisCheckpoint),
 ) -> Result<AnalysisCheckpoint> {
-    let configuration = OpenAiConfiguration::from_env()?;
-    let analysis_identity = configuration.identity().clone();
     analyze_session_with(
         request,
-        analysis_identity,
-        || configuration.into_agent().map_err(Error::from),
+        || OpenAiAgent::from_env().map_err(Error::from),
         on_checkpoint,
     )
     .await
@@ -40,7 +37,6 @@ pub async fn analyze_session(
 
 async fn analyze_session_with<M, F>(
     request: AnalyzeSession,
-    analysis_identity: AnalysisIdentity,
     make_agent: F,
     mut on_checkpoint: impl FnMut(AnalysisCheckpoint),
 ) -> Result<AnalysisCheckpoint>
@@ -86,7 +82,6 @@ where
         segments,
         session,
         checklist,
-        analysis_identity,
         NonZeroUsize::new(5).expect("analysis batch size is non-zero"),
         checkpoint_path,
     )
@@ -122,7 +117,7 @@ mod tests {
     use crate::analysis::{
         AnalysisWarning, Error,
         agent::{Agent, AnalysisResponse, ChecklistProgress, Observation},
-        analyzer::{AnalysisCheckpoint, AnalysisIdentity},
+        analyzer::AnalysisCheckpoint,
     };
 
     use super::{AnalyzeSession, analyze_session_with};
@@ -132,14 +127,12 @@ mod tests {
 
     async fn analyze_with_mock(
         request: AnalyzeSession,
-        analysis_identity: AnalysisIdentity,
         model: MockCompletionModel,
         constructions: &Cell<usize>,
         on_checkpoint: impl FnMut(AnalysisCheckpoint),
     ) -> Result<AnalysisCheckpoint, Error> {
         analyze_session_with(
             request,
-            analysis_identity,
             || {
                 constructions.set(constructions.get() + 1);
                 Ok(Agent::new(model))
@@ -147,13 +140,6 @@ mod tests {
             on_checkpoint,
         )
         .await
-    }
-
-    fn analysis_identity() -> AnalysisIdentity {
-        AnalysisIdentity {
-            model: "safe-model-byte-sentinel".into(),
-            endpoint_id: "safe-endpoint-byte-sentinel".into(),
-        }
     }
 
     fn response(summary: &str) -> AnalysisResponse {
@@ -271,7 +257,6 @@ mod tests {
         let constructions = Cell::new(0);
         let checkpoint = analyze_with_mock(
             request(directory, "Start the exercise"),
-            analysis_identity(),
             model([response("Analysis complete.")]),
             &constructions,
             |_| {},
@@ -299,7 +284,6 @@ mod tests {
 
         let result = analyze_with_mock(
             request(&directory.path().join("missing"), " \n\t "),
-            analysis_identity(),
             MockCompletionModel::default(),
             &constructions,
             |checkpoint| snapshots.push(checkpoint),
@@ -319,7 +303,6 @@ mod tests {
         let constructions = Cell::new(0);
         let missing_result = analyze_with_mock(
             request(&missing, "Start the exercise"),
-            analysis_identity(),
             MockCompletionModel::default(),
             &constructions,
             |_| {},
@@ -336,7 +319,6 @@ mod tests {
             .expect("nonempty marker should be written");
         let nonempty_result = analyze_with_mock(
             request(&nonempty, "Start the exercise"),
-            analysis_identity(),
             MockCompletionModel::default(),
             &constructions,
             |_| {},
@@ -359,7 +341,6 @@ mod tests {
                 .expect("marker symlink should be created");
             let symlinked_result = analyze_with_mock(
                 request(&symlinked, "Start the exercise"),
-                analysis_identity(),
                 MockCompletionModel::default(),
                 &constructions,
                 |_| {},
@@ -378,7 +359,6 @@ mod tests {
                 .expect("session directory symlink should be created");
             let directory_result = analyze_with_mock(
                 request(&directory_link, "Start the exercise"),
-                analysis_identity(),
                 MockCompletionModel::default(),
                 &constructions,
                 |_| {},
@@ -412,7 +392,6 @@ mod tests {
 
         let events_result = analyze_with_mock(
             request(&symlinked_events, "Start the exercise"),
-            analysis_identity(),
             MockCompletionModel::default(),
             &constructions,
             |checkpoint| snapshots.push(checkpoint),
@@ -437,7 +416,6 @@ mod tests {
 
         let checkpoint_result = analyze_with_mock(
             request(&symlinked_checkpoint, "Start the exercise"),
-            analysis_identity(),
             MockCompletionModel::default(),
             &constructions,
             |checkpoint| snapshots.push(checkpoint),
@@ -462,7 +440,6 @@ mod tests {
 
         let result = analyze_with_mock(
             request(&directory, "Start the exercise"),
-            analysis_identity(),
             MockCompletionModel::default(),
             &constructions,
             |checkpoint| snapshots.push(checkpoint),
@@ -476,7 +453,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initial_identity_is_saved_before_first_provider_request() {
+    async fn callback_receives_zero_then_each_saved_response_snapshot() {
         let root = tempfile::tempdir().expect("temporary directory should be created");
         let directory = root.path().join("session");
         write_session(&directory, 6_000);
@@ -487,35 +464,14 @@ mod tests {
             response("First batch complete."),
             response("Analysis complete."),
         ];
-        let identity = analysis_identity();
-        let model = model(expected.clone());
-        let recorded_model = model.clone();
         let constructions = Cell::new(0);
         let mut snapshots = Vec::new();
-        let mut request_counts = Vec::new();
-        let mut initial_disk_identity = None;
-        let checkpoint_path = directory.join("analysis.json");
 
         let checkpoint = analyze_with_mock(
             request(&directory, "  Start the exercise  "),
-            identity.clone(),
-            model,
+            model(expected.clone()),
             &constructions,
-            |checkpoint| {
-                let request_count = recorded_model.request_count();
-                request_counts.push(request_count);
-                if request_count == 0 {
-                    initial_disk_identity = Some(
-                        AnalysisCheckpoint::read(
-                            &checkpoint_path,
-                            Uuid::parse_str(SESSION_ID).unwrap(),
-                        )
-                        .expect("initial checkpoint should already be durable")
-                        .analysis_identity,
-                    );
-                }
-                snapshots.push(checkpoint);
-            },
+            |checkpoint| snapshots.push(checkpoint),
         )
         .await
         .expect("analysis should complete");
@@ -528,9 +484,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0, 1, 2]
         );
-        assert_eq!(request_counts, vec![0, 1, 2]);
-        assert_eq!(initial_disk_identity, Some(identity.clone()));
-        assert_eq!(snapshots[0].analysis_identity, identity);
         assert_eq!(checkpoint.total_batches, 2);
         assert_eq!(checkpoint.checklist, "Start the exercise");
         assert_eq!(checkpoint.responses, expected);
@@ -546,192 +499,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn matching_identity_resumes_at_first_incomplete_batch() {
-        let root = tempfile::tempdir().expect("temporary directory should be created");
-        let directory = root.path().join("session");
-        write_session(&directory, 6_000);
-        mark_complete(&directory);
-        add_segment(&directory, 0);
-        add_segment(&directory, 5_000);
-        let identity = analysis_identity();
-        let first = response("First batch complete.");
-        let interrupted_model = MockCompletionModel::new([
-            MockTurn::text(serde_json::to_string(&first).expect("first response should serialize")),
-            MockTurn::error("stop after the first durable response"),
-        ]);
-        let initial_constructions = Cell::new(0);
-
-        let initial = analyze_with_mock(
-            request(&directory, "Start the exercise"),
-            identity.clone(),
-            interrupted_model,
-            &initial_constructions,
-            |_| {},
-        )
-        .await;
-        assert!(initial.is_err());
-        assert_eq!(initial_constructions.get(), 1);
-        let partial = AnalysisCheckpoint::read(
-            &directory.join("analysis.json"),
-            Uuid::parse_str(SESSION_ID).unwrap(),
-        )
-        .expect("partial checkpoint should be readable");
-        assert_eq!(partial.responses, vec![first.clone()]);
-
-        let second = response("Analysis complete.");
-        let resumed_model = model([second.clone()]);
-        let recorded_model = resumed_model.clone();
-        let resumed_constructions = Cell::new(0);
-        let mut snapshots = Vec::new();
-        let resumed = analyze_with_mock(
-            request(&directory, "Start the exercise"),
-            identity.clone(),
-            resumed_model,
-            &resumed_constructions,
-            |checkpoint| snapshots.push(checkpoint),
-        )
-        .await
-        .expect("matching identity should resume the incomplete batch");
-
-        assert_eq!(resumed_constructions.get(), 1);
-        assert_eq!(recorded_model.request_count(), 1);
-        assert_eq!(
-            snapshots
-                .iter()
-                .map(|checkpoint| checkpoint.responses.len())
-                .collect::<Vec<_>>(),
-            vec![1, 2]
-        );
-        assert_eq!(resumed.analysis_identity, identity);
-        assert_eq!(resumed.responses, vec![first, second]);
-    }
-
-    #[tokio::test]
-    async fn genuine_v2_checkpoint_schema_mismatch_suppresses_side_effects() {
-        let root = tempfile::tempdir().expect("temporary directory should be created");
-        let directory = root.path().join("session");
-        write_session(&directory, 1_000);
-        mark_complete(&directory);
-        add_segment(&directory, 0);
-        let fixture = json!({
-            "schema_version": 2,
-            "session_id": SESSION_ID,
-            "checklist": "Start the exercise",
-            "plan_fingerprint": "v2-plan-fingerprint",
-            "total_batches": 1,
-            "warnings": [],
-            "responses": []
-        });
-        assert!(fixture.get("analysis_identity").is_none());
-        let mut saved_bytes =
-            serde_json::to_vec_pretty(&fixture).expect("v2 fixture should serialize");
-        saved_bytes.push(b'\n');
-        fs::write(directory.join("analysis.json"), &saved_bytes)
-            .expect("v2 fixture should be written");
-        let model = MockCompletionModel::default();
-        let recorded_model = model.clone();
-        let constructions = Cell::new(0);
-        let mut snapshots = Vec::new();
-
-        let result = analyze_with_mock(
-            request(&directory, "Start the exercise"),
-            analysis_identity(),
-            model,
-            &constructions,
-            |checkpoint| snapshots.push(checkpoint),
-        )
-        .await;
-
-        assert!(matches!(
-            result,
-            Err(Error::CheckpointSchema {
-                expected: 3,
-                actual: 2
-            })
-        ));
-        assert_eq!(constructions.get(), 0);
-        assert_eq!(recorded_model.request_count(), 0);
-        assert!(snapshots.is_empty());
-        assert_eq!(
-            fs::read(directory.join("analysis.json")).expect("checkpoint should remain readable"),
-            saved_bytes
-        );
-    }
-
-    #[tokio::test]
-    async fn identity_mismatch_preserves_bytes_and_suppresses_provider() {
-        let root = tempfile::tempdir().expect("temporary directory should be created");
-        let directory = root.path().join("session");
-        write_session(&directory, 6_000);
-        mark_complete(&directory);
-        add_segment(&directory, 0);
-        add_segment(&directory, 5_000);
-        let identity = analysis_identity();
-        let setup_constructions = Cell::new(0);
-        let mut partial = analyze_with_mock(
-            request(&directory, "Start the exercise"),
-            identity.clone(),
-            model([
-                response("First batch complete."),
-                response("Analysis complete."),
-            ]),
-            &setup_constructions,
-            |_| {},
-        )
-        .await
-        .expect("setup analysis should complete");
-        partial.responses.truncate(1);
-        let saved_bytes = persist_checkpoint(&directory, &partial);
-
-        let mismatches = [
-            (
-                "model",
-                AnalysisIdentity {
-                    model: format!(" {}", identity.model),
-                    endpoint_id: identity.endpoint_id.clone(),
-                },
-            ),
-            (
-                "endpoint",
-                AnalysisIdentity {
-                    model: identity.model.clone(),
-                    endpoint_id: format!("{} ", identity.endpoint_id),
-                },
-            ),
-        ];
-        for (field, mismatch) in mismatches {
-            let model = MockCompletionModel::default();
-            let recorded_model = model.clone();
-            let constructions = Cell::new(0);
-            let mut snapshots = Vec::new();
-
-            let result = analyze_with_mock(
-                request(&directory, "Start the exercise"),
-                mismatch,
-                model,
-                &constructions,
-                |checkpoint| snapshots.push(checkpoint),
-            )
-            .await;
-
-            match field {
-                "model" => assert!(matches!(result, Err(Error::CheckpointModel))),
-                "endpoint" => assert!(matches!(result, Err(Error::CheckpointEndpointId))),
-                _ => unreachable!(),
-            }
-            assert_eq!(constructions.get(), 0);
-            assert_eq!(recorded_model.request_count(), 0);
-            assert!(snapshots.is_empty());
-            assert_eq!(
-                fs::read(directory.join("analysis.json"))
-                    .expect("checkpoint should remain readable"),
-                saved_bytes
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn completed_matching_checkpoint_returns_without_agent_construction() {
+    async fn completed_checkpoint_returns_without_agent_construction() {
         let root = tempfile::tempdir().expect("temporary directory should be created");
         let directory = root.path().join("session");
         write_session(&directory, 1_000);
@@ -740,7 +508,6 @@ mod tests {
         let first_constructions = Cell::new(0);
         let completed = analyze_with_mock(
             request(&directory, "Start the exercise"),
-            analysis_identity(),
             model([response("Analysis complete.")]),
             &first_constructions,
             |_| {},
@@ -753,7 +520,6 @@ mod tests {
         let mut snapshots = Vec::new();
         let resumed = analyze_with_mock(
             request(&directory, "Start the exercise"),
-            analysis_identity(),
             MockCompletionModel::default(),
             &resumed_constructions,
             |checkpoint| snapshots.push(checkpoint),
@@ -763,7 +529,6 @@ mod tests {
 
         assert_eq!(resumed_constructions.get(), 0);
         assert_eq!(resumed, completed);
-        assert_eq!(resumed.analysis_identity, analysis_identity());
         assert_eq!(snapshots, vec![completed]);
     }
 
@@ -779,7 +544,6 @@ mod tests {
 
         let resumed = analyze_with_mock(
             request(&directory, &persisted.checklist),
-            analysis_identity(),
             MockCompletionModel::default(),
             &constructions,
             |checkpoint| snapshots.push(checkpoint),
@@ -808,7 +572,6 @@ mod tests {
 
         let result = analyze_with_mock(
             request(&directory, "Start the exercise"),
-            analysis_identity(),
             MockCompletionModel::default(),
             &constructions,
             |checkpoint| snapshots.push(checkpoint),
@@ -839,7 +602,6 @@ mod tests {
 
         let result = analyze_with_mock(
             request(&directory, "Start the exercise"),
-            analysis_identity(),
             model,
             &constructions,
             |checkpoint| {
@@ -878,7 +640,6 @@ mod tests {
 
         let checkpoint = analyze_with_mock(
             request(&directory, "Start the exercise"),
-            analysis_identity(),
             model,
             &constructions,
             |checkpoint| snapshots.push(checkpoint),
