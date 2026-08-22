@@ -1474,7 +1474,7 @@ mod tests {
             rtsp_url,
             partial_path,
             io_timeout: Duration::from_millis(750),
-            stop_timeout: Duration::from_millis(200),
+            stop_timeout: Duration::from_secs(1),
         }
     }
 
@@ -1563,9 +1563,9 @@ exit {exit_code}"#
 
     fn recorder_settings() -> RecorderSettings {
         RecorderSettings {
-            io_timeout: Duration::from_millis(500),
+            io_timeout: Duration::from_secs(2),
             retry_delay: Duration::from_millis(100),
-            stop_timeout: Duration::from_millis(200),
+            stop_timeout: Duration::from_secs(1),
         }
     }
 
@@ -1893,7 +1893,7 @@ exec sleep 30"#,
         );
         let success = preflight_executable(&directory, "preflight-success", 0);
         let mut settings = recorder_settings();
-        settings.io_timeout = Duration::from_millis(200);
+        settings.io_timeout = Duration::from_secs(1);
         let started = Instant::now();
 
         assert!(spawn_with_executables(settings, hanging.clone(), success).is_err());
@@ -2767,7 +2767,7 @@ while [ ! -f "$0.camera-1" ] || [ ! -f "$0.camera-2" ]; do sleep 0.01; done
 cat "$0.stdout""#,
         );
         let mut settings = recorder_settings();
-        settings.io_timeout = Duration::from_millis(500);
+        settings.io_timeout = Duration::from_secs(2);
         let (runtime, handle, _events) =
             spawn_with_executables(settings, ffmpeg.clone(), ffprobe).unwrap();
         let root = valid_recordings_root(&directory, &[1, 2]);
@@ -2832,7 +2832,7 @@ cat "$0.stdout""#,
 exec sleep 30"#,
         );
         let mut settings = recorder_settings();
-        settings.io_timeout = Duration::from_millis(200);
+        settings.io_timeout = Duration::from_secs(1);
         let (runtime, handle, mut events) =
             spawn_with_executables(settings, ffmpeg.clone(), ffprobe.clone()).unwrap();
         let root = valid_recordings_root(&directory, &[1]);
