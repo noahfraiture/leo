@@ -11,10 +11,7 @@ jobs:
   test:
     name: Non-paid tests
     runs-on: macos-15
-    timeout-minutes: 45
-    defaults:
-      run:
-        working-directory: app
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: cachix/install-nix-action@v31

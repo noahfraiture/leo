@@ -25,8 +25,8 @@
 
         "experimental": {
           "configFile": {
-            "/Users/noah/Projects/leo/app/app/tailwind.css": [
-              "/Users/noah/Projects/leo/app/app/**"
+            "/Users/noah/Projects/leo/app/tailwind.css": [
+              "/Users/noah/Projects/leo/app/**"
             ]
           },
           "classRegex": [

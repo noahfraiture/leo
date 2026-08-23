@@ -6,10 +6,10 @@ prepare-camera-video INPUT OUTPUT:
       -movflags +faststart {{quote(OUTPUT)}}
 
 camera-1:
-    nix develop --command cargo run -p camera -- --address 127.0.0.1:8080 --rtsp-address 127.0.0.1:8554 --video camera/fixtures/salon-1.mp4
+    nix develop --command cargo run -p camera --bin camera -- --address 127.0.0.1:8080 --rtsp-address 127.0.0.1:8554 --video camera/fixtures/salon-1.mp4
 
 camera-2:
-    nix develop --command cargo run -p camera -- --address 127.0.0.1:8081 --rtsp-address 127.0.0.1:8555 --video camera/fixtures/salon-2.mp4
+    nix develop --command cargo run -p camera --bin camera -- --address 127.0.0.1:8081 --rtsp-address 127.0.0.1:8555 --video camera/fixtures/salon-2.mp4
 
 vlc:
     nix develop --command vlc rtsp://127.0.0.1:8554/axis-media/media.amp
