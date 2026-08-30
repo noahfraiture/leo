@@ -22,7 +22,7 @@ pub fn spawn_analysis(mut workflow: Signal<Workflow>, request: AnalyzeSession, s
                 "analysis completed"
             ),
             Err(error) => {
-                tracing::error!(%session_id, "analysis failed");
+                tracing::error!(%session_id, error = %error, "analysis failed");
                 workflow
                     .write()
                     .analysis_failed(session_id, error.to_string());
