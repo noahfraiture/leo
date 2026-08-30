@@ -70,14 +70,8 @@ pub enum Error {
         source: io::Error,
     },
 
-    #[error("failed to start FFmpeg")]
-    FfmpegSpawn {
-        #[source]
-        source: io::Error,
-    },
-
-    #[error("failed to wait for FFmpeg")]
-    FfmpegWait {
+    #[error("failed to run FFmpeg")]
+    FfmpegRun {
         #[source]
         source: io::Error,
     },

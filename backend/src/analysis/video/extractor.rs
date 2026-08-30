@@ -8,29 +8,44 @@ use super::error::{Error, Result};
 /// Extracts one video frame at a recording-relative offset as JPEG bytes.
 pub(in crate::analysis) fn extract_jpeg(input: &Path, offset: Duration) -> Result<Vec<u8>> {
     let directory = TempDir::new().map_err(|source| Error::CreateFrameTempDir { source })?;
-    let output = directory.path().join("frame.jpg");
+    let frame = directory.path().join("frame.jpg");
     let offset_ms = offset.as_millis();
 
-    let status = FfmpegCommand::new()
+    let mut command = FfmpegCommand::new();
+    command
+        .hide_banner()
+        .args(["-loglevel", "error"])
         .no_overwrite()
+        .arg("-noaccurate_seek")
         .seek(format!("{offset_ms}ms"))
         .arg("-i")
         .arg(input)
         .map("0:V:0")
-        .frames(1)
+        // Stream through the frame visible at the timestamp, leaving the latest in place.
+        .filter("trim=end_pts=1,setpts=PTS-STARTPTS")
+        .args(["-update", "1"])
         .codec_video("mjpeg")
         .format("image2")
-        .arg(&output)
-        .spawn()
-        .map_err(|source| Error::FfmpegSpawn { source })?
-        .wait()
-        .map_err(|source| Error::FfmpegWait { source })?;
+        .arg(&frame);
+    let output = command
+        .as_inner_mut()
+        .output()
+        .map_err(|source| Error::FfmpegRun { source })?;
 
-    if !status.success() {
-        return Err(Error::FfmpegExit { status });
+    if !output.status.success() {
+        tracing::error!(
+            path = %input.display(),
+            offset_ms = %offset_ms,
+            status = %output.status,
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "FFmpeg frame extraction failed"
+        );
+        return Err(Error::FfmpegExit {
+            status: output.status,
+        });
     }
 
-    read_jpeg(&output)
+    read_jpeg(&frame)
 }
 
 fn read_jpeg(output: &Path) -> Result<Vec<u8>> {
@@ -83,11 +98,22 @@ mod tests {
     fn extracts_fixture_frame_as_jpeg() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../camera/fixtures/default.mp4");
 
-        let jpeg = extract_jpeg(&fixture, Duration::from_millis(1_000))
-            .expect("fixture frame should be extracted");
+        let earlier = extract_jpeg(&fixture, Duration::from_millis(4_800))
+            .expect("earlier fixture frame should be extracted");
+        let final_start = extract_jpeg(&fixture, Duration::from_millis(4_934))
+            .expect("final fixture frame should be extracted");
+        let final_end = extract_jpeg(&fixture, Duration::from_millis(4_999))
+            .expect("final visible fixture frame should be extracted");
 
-        assert!(!jpeg.is_empty());
-        assert!(jpeg.starts_with(&[0xff, 0xd8, 0xff]));
-        assert!(jpeg.ends_with(&[0xff, 0xd9]));
+        assert!(
+            earlier != final_end,
+            "different timestamps need different frames"
+        );
+        assert!(
+            final_start == final_end,
+            "timestamps within the final frame need the same image"
+        );
+        assert!(final_end.starts_with(&[0xff, 0xd8, 0xff]));
+        assert!(final_end.ends_with(&[0xff, 0xd9]));
     }
 }
