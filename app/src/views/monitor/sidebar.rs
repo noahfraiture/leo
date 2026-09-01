@@ -39,6 +39,22 @@ pub fn Sidebar() -> Element {
             })
     });
 
+    if cameras.is_empty() {
+        drop(state);
+        return rsx! {
+            section {
+                class: "flex flex-col gap-3",
+                aria_labelledby: "recording-controls-title",
+                h2 {
+                    id: "recording-controls-title",
+                    class: "text-lg font-semibold",
+                    "Recording"
+                }
+                p { role: "status", "No cameras are configured" }
+            }
+        };
+    }
+
     match &state.session {
         SessionRunState::Idle => {
             let session_root = state.session_root.display().to_string();

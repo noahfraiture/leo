@@ -26,10 +26,13 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    App, Bootstrap, Route,
+    App, Bootstrap, InitialSettings, Route, RuntimeAvailability,
     preview::{PreviewFeed, PreviewState},
     session_task::handle_recorder_event,
-    settings::CameraSettings,
+    settings::{
+        CameraSettings, LogLevel, ResolvedSettings, Settings as ApplicationSettings, SettingsStore,
+    },
+    views::{Settings as SettingsView, SettingsContext, SettingsPageState},
     workflow::Workflow,
 };
 
@@ -39,6 +42,7 @@ const START_UTC_MS: i64 = 1_786_552_800_000;
 struct RenderRootProps {
     workflow: Arc<Mutex<Option<Workflow>>>,
     preview: PreviewState,
+    availability: RuntimeAvailability,
     path: String,
 }
 
@@ -46,6 +50,7 @@ fn render_root(props: RenderRootProps) -> Element {
     let RenderRootProps {
         workflow: initial,
         preview,
+        availability,
         path,
     } = props;
     let workflow = use_signal(move || {
@@ -55,8 +60,15 @@ fn render_root(props: RenderRootProps) -> Element {
             .take()
             .expect("render root should take Workflow once")
     });
+    let settings =
+        use_signal(|| SettingsPageState::new(ApplicationSettings::default(), None, None, None));
     use_context_provider(|| workflow);
     use_context_provider(move || preview);
+    use_context_provider(move || SettingsContext {
+        state: settings,
+        store: None,
+    });
+    use_context_provider(move || availability);
 
     rsx! {
         HistoryProvider {
@@ -64,6 +76,182 @@ fn render_root(props: RenderRootProps) -> Element {
             Router::<Route> {}
         }
     }
+}
+
+#[derive(Clone)]
+struct WorkflowRootProps {
+    workflow: Arc<Mutex<Option<Workflow>>>,
+}
+
+fn render_monitor_sidebar_root(props: WorkflowRootProps) -> Element {
+    let initial = props.workflow;
+    let workflow = use_signal(move || {
+        initial
+            .lock()
+            .expect("render workflow mutex should not be poisoned")
+            .take()
+            .expect("render root should take Workflow once")
+    });
+    use_context_provider(|| workflow);
+    rsx! { crate::views::monitor::Sidebar {} }
+}
+
+#[derive(Clone)]
+struct SettingsRenderRootProps {
+    state: Arc<Mutex<Option<SettingsPageState>>>,
+    store: Option<SettingsStore>,
+}
+
+fn render_settings_root(props: SettingsRenderRootProps) -> Element {
+    let SettingsRenderRootProps { state, store } = props;
+    let state = use_signal(move || {
+        state
+            .lock()
+            .expect("render settings mutex should not be poisoned")
+            .take()
+            .expect("render settings root should take state once")
+    });
+    use_context_provider(move || SettingsContext { state, store });
+    rsx! { SettingsView {} }
+}
+
+#[derive(Clone)]
+struct SettingsRouterRootProps {
+    state: Arc<Mutex<Option<SettingsPageState>>>,
+    store: Option<SettingsStore>,
+    availability: RuntimeAvailability,
+}
+
+fn render_settings_router_root(props: SettingsRouterRootProps) -> Element {
+    let SettingsRouterRootProps {
+        state,
+        store,
+        availability,
+    } = props;
+    let state = use_signal(move || {
+        state
+            .lock()
+            .expect("render settings mutex should not be poisoned")
+            .take()
+            .expect("render settings root should take state once")
+    });
+    use_context_provider(move || SettingsContext { state, store });
+    use_context_provider(move || availability);
+    rsx! {
+        HistoryProvider {
+            history: move |_| Rc::new(MemoryHistory::with_initial_path("/settings")) as Rc<dyn History>,
+            Router::<Route> {}
+        }
+    }
+}
+
+fn render_settings(state: SettingsPageState, store: Option<SettingsStore>) -> String {
+    let props = SettingsRenderRootProps {
+        state: Arc::new(Mutex::new(Some(state))),
+        store,
+    };
+    let mut dom = VirtualDom::new_with_props(render_settings_root, props);
+    dom.rebuild(&mut NoOpMutations);
+    dioxus_ssr::render(&dom)
+}
+
+fn render_settings_route(
+    state: SettingsPageState,
+    store: Option<SettingsStore>,
+    availability: RuntimeAvailability,
+) -> String {
+    let props = SettingsRouterRootProps {
+        state: Arc::new(Mutex::new(Some(state))),
+        store,
+        availability,
+    };
+    let mut dom = VirtualDom::new_with_props(render_settings_router_root, props);
+    dom.rebuild(&mut NoOpMutations);
+    dioxus_ssr::render(&dom)
+}
+
+fn render_unconfigured(route: Route) -> String {
+    render_setup(route, None)
+}
+
+fn render_setup(route: Route, load_error: Option<String>) -> String {
+    let temporary = tempfile::tempdir().expect("temporary settings root should be created");
+    let store = SettingsStore::new(
+        temporary.path().join("config/settings.json"),
+        temporary.path().join("data"),
+    )
+    .expect("render settings store should be valid");
+    render_app(
+        Bootstrap::SetupRequired,
+        InitialSettings {
+            store: Some(store),
+            draft: ApplicationSettings::default(),
+            saved: None,
+            active: None,
+            load_error,
+            initial_route: route,
+        },
+    )
+}
+
+fn render_loaded_failure(
+    route: Route,
+    message: &str,
+    store: SettingsStore,
+    resolved: ResolvedSettings,
+) -> String {
+    render_app(
+        Bootstrap::Failed {
+            message: message.into(),
+        },
+        InitialSettings {
+            store: Some(store),
+            draft: resolved.settings.clone(),
+            saved: Some(resolved.clone()),
+            active: Some(resolved),
+            load_error: None,
+            initial_route: route,
+        },
+    )
+}
+
+fn render_app(bootstrap: Bootstrap, initial_settings: InitialSettings) -> String {
+    let mut dom = VirtualDom::new(App)
+        .with_root_context(bootstrap)
+        .with_root_context(initial_settings);
+    dom.rebuild(&mut NoOpMutations);
+    dioxus_ssr::render(&dom)
+}
+
+fn settings_snapshot(
+    root: &Path,
+    name: &str,
+    model: &str,
+    log_level: LogLevel,
+    camera_count: u32,
+) -> (SettingsStore, ResolvedSettings) {
+    let store = SettingsStore::new(
+        root.join(format!("{name}-settings.json")),
+        root.join(format!("{name}-default-data")),
+    )
+    .expect("render settings store should be valid");
+    let mut settings = ApplicationSettings::default();
+    settings.data_root = Some(root.join(format!("{name}-data")));
+    settings.openai.api_key = format!("{name}-secret-key");
+    settings.openai.model = model.into();
+    settings.openai.base_url = Some(format!("https://{name}.provider.example/v1"));
+    settings.log_level = log_level;
+    for _ in 0..camera_count {
+        let id = settings
+            .add_camera()
+            .expect("render settings camera should be added");
+        settings.cameras.last_mut().unwrap().rtsp_url =
+            format!("rtsp://{name}-camera-{id}.example/stream");
+    }
+    let resolved = store
+        .resolve(settings)
+        .expect("render settings should resolve");
+    (store, resolved)
 }
 
 struct Harness {
@@ -142,12 +330,30 @@ impl Harness {
     }
 
     fn render_at(mut self, preview: PreviewState, path: &str) -> String {
+        let camera_count = self.workflow().cameras.len();
         let props = RenderRootProps {
             workflow: Arc::new(Mutex::new(self.workflow.take())),
             preview,
+            availability: RuntimeAvailability::Ready { camera_count },
             path: path.into(),
         };
         let mut dom = VirtualDom::new_with_props(render_root, props);
+        dom.rebuild(&mut NoOpMutations);
+        let html = dioxus_ssr::render(&dom);
+        drop(dom);
+        self.runtime
+            .take()
+            .expect("render runtime should be retained")
+            .shutdown()
+            .expect("render runtime should shut down");
+        html
+    }
+
+    fn render_monitor_sidebar(mut self) -> String {
+        let props = WorkflowRootProps {
+            workflow: Arc::new(Mutex::new(self.workflow.take())),
+        };
+        let mut dom = VirtualDom::new_with_props(render_monitor_sidebar_root, props);
         dom.rebuild(&mut NoOpMutations);
         let html = dioxus_ssr::render(&dom);
         drop(dom);
@@ -166,6 +372,15 @@ impl Drop for Harness {
             let _ = runtime.shutdown();
         }
     }
+}
+
+fn render_ready_with_cameras(route: Route, cameras: Vec<CameraSettings>) -> String {
+    let preview = if cameras.is_empty() {
+        PreviewState::NoCameras
+    } else {
+        ready_preview()
+    };
+    Harness::with_cameras(cameras).render_at(preview, &route.to_string())
 }
 
 fn camera_settings() -> Vec<CameraSettings> {
@@ -374,6 +589,20 @@ fn opening_tag_with_marker<'a>(html: &'a str, element: &str, marker: &str) -> &'
     &html[start..end]
 }
 
+fn section_with_heading<'a>(html: &'a str, heading: &str) -> &'a str {
+    let heading_index = html
+        .find(&format!(">{heading}<"))
+        .unwrap_or_else(|| panic!("expected heading {heading:?} in {html}"));
+    let start = html[..heading_index]
+        .rfind("<section")
+        .unwrap_or_else(|| panic!("expected section before {heading:?} in {html}"));
+    let end = html[heading_index..]
+        .find("</section>")
+        .map(|offset| heading_index + offset + "</section>".len())
+        .expect("diagnostic section should end");
+    &html[start..end]
+}
+
 fn assert_analysis_action(html: &str, label: &str, disabled: bool) {
     let button = opening_tag_with_marker(html, "button", r#"id="analysis-action""#);
     assert_eq!(
@@ -440,8 +669,306 @@ fn assert_stable_previews(html: &str) {
 }
 
 fn assert_no_fake_claims(html: &str) {
-    for fake in ["LIVE", "14:42:18", "CAM 04", "Camera options", "Settings"] {
+    for fake in ["LIVE", "14:42:18", "CAM 04", "Camera options"] {
         assert!(!html.contains(fake), "found fake claim {fake:?} in {html}");
+    }
+}
+
+#[test]
+fn missing_settings_render_the_shell_and_open_settings() {
+    let html = render_unconfigured(Route::Settings {});
+    assert!(html.contains("Settings"));
+    assert!(html.contains("Application settings"));
+    assert!(html.contains("Configure Leo, save, then restart"));
+    assert!(!html.contains("Start session"));
+}
+
+#[test]
+fn unavailable_monitor_renders_guidance_without_workflow_context() {
+    let html = render_unconfigured(Route::Monitor {});
+    assert!(html.contains("Monitor is unavailable"));
+    assert!(html.contains("Settings"));
+}
+
+#[test]
+fn invalid_settings_render_the_shell_and_recovery_form() {
+    let message = "Application settings could not be loaded. Check the settings file and configured data directories.";
+    let html = render_setup(Route::Settings {}, Some(message.into()));
+
+    assert!(html.contains("Application settings"), "{html}");
+    assert!(html.contains(message), "{html}");
+    assert!(html.contains("Save settings"), "{html}");
+    assert!(!html.contains("Start session"), "{html}");
+}
+
+#[test]
+fn zero_camera_runtime_hides_start_and_keeps_analyze_available() {
+    let html = render_ready_with_cameras(Route::Monitor {}, Vec::new());
+    assert!(html.contains("No cameras are configured"));
+    assert!(!html.contains("Start session"));
+    let analyze = render_ready_with_cameras(Route::Analyze {}, Vec::new());
+    assert!(analyze.contains("Completed sessions"));
+}
+
+#[test]
+fn primary_navigation_wraps_and_links_all_routes() {
+    let html = Harness::new().render(ready_preview());
+    let navigation = opening_tag_with_marker(&html, "nav", r#"id="navbutton""#);
+
+    assert!(navigation.contains("flex-wrap"), "{navigation}");
+    for label in ["Monitor", "Analyze", "Settings"] {
+        assert!(
+            opening_tag_before(&html, "a", label).contains("href="),
+            "{html}"
+        );
+    }
+}
+
+#[test]
+fn monitor_sidebar_with_no_cameras_never_renders_start() {
+    let html = Harness::with_cameras(Vec::new()).render_monitor_sidebar();
+
+    assert!(html.contains("No cameras are configured"), "{html}");
+    assert!(!html.contains("Start session"), "{html}");
+}
+
+#[test]
+fn ready_settings_route_does_not_require_operational_contexts() {
+    let state = SettingsPageState::new(ApplicationSettings::default(), None, None, None);
+
+    let html = render_settings_route(state, None, RuntimeAvailability::Ready { camera_count: 2 });
+
+    assert!(html.contains("Application settings"), "{html}");
+    assert!(html.contains("Settings"), "{html}");
+}
+
+#[test]
+fn loaded_runtime_failure_keeps_settings_and_saved_active_snapshots() {
+    let temporary = tempfile::tempdir().expect("temporary settings root should be created");
+    let (store, resolved) = settings_snapshot(
+        temporary.path(),
+        "loaded",
+        "loaded-model",
+        LogLevel::Info,
+        1,
+    );
+    let monitor = render_loaded_failure(
+        Route::Monitor {},
+        "Recorder preflight failed.",
+        store.clone(),
+        resolved.clone(),
+    );
+    let analyze = render_loaded_failure(
+        Route::Analyze {},
+        "Recorder preflight failed.",
+        store.clone(),
+        resolved.clone(),
+    );
+
+    for (html, route_name) in [(&monitor, "Monitor"), (&analyze, "Analyze")] {
+        assert!(
+            html.contains(&format!("{route_name} is unavailable")),
+            "{html}"
+        );
+        assert!(html.contains("Recorder preflight failed."), "{html}");
+        assert!(html.contains("Settings"), "{html}");
+        assert!(!html.contains("loaded-secret-key"), "{html}");
+        assert!(!html.contains("rtsp://"), "{html}");
+    }
+
+    let settings = render_loaded_failure(
+        Route::Settings {},
+        "Recorder preflight failed.",
+        store,
+        resolved,
+    );
+    assert!(settings.contains("Application settings"), "{settings}");
+    assert!(settings.contains("Saved on disk"), "{settings}");
+    assert!(settings.contains("Active at startup"), "{settings}");
+    assert!(settings.contains("loaded-model"), "{settings}");
+}
+
+#[test]
+fn settings_form_renders_all_sections_and_diagnostics() {
+    let temporary = tempfile::tempdir().expect("temporary settings root should be created");
+    let store = SettingsStore::new(
+        temporary.path().join("config/settings.json"),
+        temporary.path().join("default-data"),
+    )
+    .expect("render settings store should be valid");
+    let settings_path = store.settings_path.display().to_string();
+    let default_data_root = store.default_data_root.display().to_string();
+    let mut settings = ApplicationSettings::default();
+    settings
+        .add_camera()
+        .expect("render settings camera should be added");
+    settings.cameras[0].rtsp_url = "rtsp://render-camera.example/stream".into();
+    settings.openai.api_key = "render-secret-key".into();
+    let state = SettingsPageState::new(settings, None, None, None);
+
+    let html = render_settings(state, Some(store));
+
+    assert!(html.contains("Application settings"), "{html}");
+    assert!(html.contains("Cameras"), "{html}");
+    assert!(html.contains("Storage"), "{html}");
+    assert!(html.contains("Recording"), "{html}");
+    assert!(html.contains("Analysis provider"), "{html}");
+    assert!(html.contains("Diagnostics"), "{html}");
+    assert!(html.contains("type=\"password\""), "{html}");
+    assert!(html.contains("webkitdirectory"), "{html}");
+    assert!(html.contains("Save settings"), "{html}");
+    assert!(html.contains(&settings_path), "{html}");
+    assert!(html.contains(&default_data_root), "{html}");
+    assert!(!html.contains("Move up"), "{html}");
+    assert!(!html.contains("Move down"), "{html}");
+    assert_eq!(html.matches("render-secret-key").count(), 1, "{html}");
+    assert_eq!(
+        html.matches("rtsp://render-camera.example/stream").count(),
+        1,
+        "{html}"
+    );
+    assert!(
+        opening_tag_with_marker(&html, "input", r#"id="settings-openai-key""#)
+            .contains("render-secret-key"),
+        "{html}"
+    );
+    assert!(
+        opening_tag_with_marker(&html, "input", r#"id="camera-1-rtsp-url""#)
+            .contains("rtsp://render-camera.example/stream"),
+        "{html}"
+    );
+}
+
+#[test]
+fn settings_form_field_errors_have_accessible_descriptions() {
+    let mut state = SettingsPageState::new(ApplicationSettings::default(), None, None, None);
+    state
+        .add_camera()
+        .expect("render settings camera should be added");
+    state.draft.cameras[0].rtsp_url = "http://wrong".into();
+    state.field_errors = match state.submission() {
+        Err(errors) => errors,
+        Ok(_) => panic!("invalid render settings should have field errors"),
+    };
+
+    let html = render_settings(state, None);
+
+    let input = opening_tag_with_marker(&html, "input", r#"id="camera-1-rtsp-url""#);
+    assert!(input.contains(r#"aria-invalid="true""#), "{input}");
+    assert!(
+        input.contains(r#"aria-describedby="camera-1-rtsp-url-error""#),
+        "{input}"
+    );
+    assert!(html.contains(r#"id="camera-1-rtsp-url-error""#), "{html}");
+    assert!(html.contains("Enter a valid RTSP URL."), "{html}");
+}
+
+#[test]
+fn settings_camera_list_marks_every_camera_with_an_error() {
+    let mut state = SettingsPageState::new(ApplicationSettings::default(), None, None, None);
+    for _ in 0..3 {
+        let id = state
+            .add_camera()
+            .expect("render settings camera should be added");
+        state.draft.cameras[usize::try_from(id - 1).unwrap()].rtsp_url =
+            format!("rtsp://camera-{id}.example/stream");
+    }
+    state.draft.cameras[1].name.clear();
+    state.draft.cameras[2].rtsp_url = "http://wrong".into();
+    state.selected_camera_id = Some(1);
+    state.field_errors = match state.submission() {
+        Err(errors) => errors,
+        Ok(_) => panic!("invalid render settings should have field errors"),
+    };
+
+    let html = render_settings(state, None);
+
+    assert_eq!(html.matches("Needs attention").count(), 2, "{html}");
+    for (camera_id, expected) in [(1, false), (2, true), (3, true)] {
+        let marker = format!("Camera ID {camera_id}");
+        let marker_index = html
+            .find(&marker)
+            .unwrap_or_else(|| panic!("expected {marker:?} in {html}"));
+        let button_start = html[..marker_index]
+            .rfind("<button")
+            .expect("camera marker should be inside a button");
+        let button_end = html[marker_index..]
+            .find("</button>")
+            .map(|offset| marker_index + offset)
+            .expect("camera button should end");
+        assert_eq!(
+            html[button_start..button_end].contains("Needs attention"),
+            expected,
+            "unexpected camera error marker for ID {camera_id}: {html}"
+        );
+    }
+}
+
+#[test]
+fn settings_diagnostics_distinguish_draft_saved_and_active_snapshots() {
+    let temporary = tempfile::tempdir().expect("temporary settings root should be created");
+    let (draft_store, draft) =
+        settings_snapshot(temporary.path(), "draft", "draft-model", LogLevel::Debug, 1);
+    let (_, saved) = settings_snapshot(temporary.path(), "saved", "saved-model", LogLevel::Warn, 2);
+    let (_, active) = settings_snapshot(
+        temporary.path(),
+        "active",
+        "active-model",
+        LogLevel::Trace,
+        3,
+    );
+    let state = SettingsPageState::new(
+        draft.settings.clone(),
+        Some(saved.clone()),
+        Some(active.clone()),
+        None,
+    );
+
+    let html = render_settings(state, Some(draft_store));
+
+    for (heading, resolved, model, log_level, camera_ids) in [
+        ("Draft", &draft, "draft-model", "debug", "1"),
+        ("Saved on disk", &saved, "saved-model", "warn", "1, 2"),
+        (
+            "Active at startup",
+            &active,
+            "active-model",
+            "trace",
+            "1, 2, 3",
+        ),
+    ] {
+        let summary = section_with_heading(&html, heading);
+        for path in [
+            &resolved.settings_path,
+            &resolved.data_root,
+            &resolved.sessions_root,
+            &resolved.logs_root,
+        ] {
+            assert!(summary.contains(&path.display().to_string()), "{summary}");
+        }
+        assert!(summary.contains(model), "{summary}");
+        assert!(
+            summary.contains(resolved.settings.openai.base_url.as_deref().unwrap()),
+            "{summary}"
+        );
+        assert!(summary.contains("Configured"), "{summary}");
+        assert!(summary.contains(log_level), "{summary}");
+        assert!(summary.contains(camera_ids), "{summary}");
+        assert!(summary.contains("10 seconds"), "{summary}");
+        assert!(!summary.contains("secret-key"), "{summary}");
+        assert!(!summary.contains("rtsp://"), "{summary}");
+    }
+    assert_eq!(html.matches("draft-secret-key").count(), 1, "{html}");
+    for hidden in [
+        "saved-secret-key",
+        "active-secret-key",
+        "rtsp://saved-camera-1.example/stream",
+        "rtsp://active-camera-1.example/stream",
+    ] {
+        assert!(
+            !html.contains(hidden),
+            "found protected value {hidden:?} in {html}"
+        );
     }
 }
 
@@ -1106,29 +1633,4 @@ fn shared_workflow_message_renders_once_above_routed_content() {
         alert < monitor,
         "shared alert must precede routed content: {html}"
     );
-}
-
-#[test]
-fn invalid_startup_renders_one_blocking_alert_without_session_controls() {
-    let mut dom = VirtualDom::new(App).with_root_context(Bootstrap::Unavailable {
-        message: "Recorder preflight failed".into(),
-    });
-    dom.rebuild(&mut NoOpMutations);
-
-    let html = dioxus_ssr::render(&dom);
-
-    assert_eq!(html.matches(r#"role="alert""#).count(), 1, "{html}");
-    assert!(html.contains("Leo is unavailable"), "{html}");
-    assert!(html.contains("Recorder preflight failed"), "{html}");
-    for guidance in [
-        "configuration",
-        "data",
-        "logging",
-        "executable",
-        "restart Leo",
-    ] {
-        assert!(html.contains(guidance), "missing {guidance:?} in {html}");
-    }
-    assert!(!html.contains("Start session"), "{html}");
-    assert!(!html.contains("Settings"), "{html}");
 }

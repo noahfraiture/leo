@@ -1,16 +1,23 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    rc::Rc,
+    sync::{Arc, Mutex},
+};
 
 use backend::recording::{RecorderEvent, RecorderHandle, RecorderRuntime};
 use dioxus::{
     desktop::{Config, tao::event::Event},
+    history::{History, MemoryHistory},
     prelude::*,
+    router::components::HistoryProvider,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use logging::LogGuard;
 use preview::{Bridge, CameraSource, PreviewState, bridge};
-use settings::{LoadOutcome, LogLevel, ResolvedSettings, SettingsStore};
-use views::{Analyze, Layout, Monitor};
+use settings::{
+    LoadOutcome, LogLevel, ResolvedSettings, Settings as ApplicationSettings, SettingsStore,
+};
+use views::{Analyze, Layout, Monitor, Settings, SettingsContext, SettingsPageState};
 use workflow::Workflow;
 
 mod analysis_task;
@@ -35,6 +42,9 @@ enum Route {
 
         #[route("/analyze")]
         Analyze {},
+
+        #[route("/settings")]
+        Settings {},
 }
 
 const FAVICON: Asset = asset!("/assets/favicon.ico");
@@ -48,6 +58,14 @@ struct RecorderBootstrap {
 
 #[derive(Clone)]
 struct InitialWorkflow(Arc<Mutex<Option<Workflow>>>);
+
+/// Describes which operational routes can use their concrete runtime contexts.
+#[derive(Clone, PartialEq)]
+pub enum RuntimeAvailability {
+    Ready { camera_count: usize },
+    SetupRequired,
+    Failed { message: String },
+}
 
 #[cfg(test)]
 fn test_openai_config() -> backend::analysis::OpenAiConfig {
@@ -69,7 +87,7 @@ fn initialize_workflow(
         config.openai.clone(),
     )
     .map(|workflow| InitialWorkflow(Arc::new(Mutex::new(Some(workflow)))))
-    .map_err(|error| format!("Session workflow is unavailable: {error}"))
+    .map_err(|_| "Session workflow is unavailable.".into())
 }
 
 fn take_initial_workflow(initial: &InitialWorkflow) -> Option<Workflow> {
@@ -88,6 +106,7 @@ fn take_recorder_events(recorder: &RecorderBootstrap) -> Option<UnboundedReceive
         .take()
 }
 
+/// Operational startup result kept separate from the always-available shell.
 #[derive(Clone)]
 enum Bootstrap {
     Ready {
@@ -96,15 +115,21 @@ enum Bootstrap {
         recorder: RecorderBootstrap,
         workflow: InitialWorkflow,
     },
-    Unavailable {
+    SetupRequired,
+    Failed {
         message: String,
     },
 }
 
-fn unavailable(level: LogLevel, message: String) -> Bootstrap {
-    let _ = logging::init_stderr(level);
-    tracing::error!(reason = %message, "application runtime unavailable");
-    Bootstrap::Unavailable { message }
+/// Settings snapshots and route used to initialize the shell once.
+#[derive(Clone)]
+struct InitialSettings {
+    store: Option<SettingsStore>,
+    draft: ApplicationSettings,
+    saved: Option<ResolvedSettings>,
+    active: Option<ResolvedSettings>,
+    load_error: Option<String>,
+    initial_route: Route,
 }
 
 /// Validates startup dependencies and launches the desktop operator app.
@@ -124,47 +149,83 @@ fn launch_with_store_result(store: Result<SettingsStore, settings::Error>) {
     let mut preview_owner: Option<Bridge> = None;
     let mut log_owner: Option<LogGuard> = None;
 
-    let bootstrap = match store {
-        Err(error) => unavailable(
-            LogLevel::Info,
-            format!("Application settings are unavailable: {error}"),
-        ),
+    let (bootstrap, initial_settings) = match store {
+        Err(_error) => {
+            let message = "Application settings storage is unavailable.".to_string();
+            let _ = logging::init_stderr(LogLevel::Info);
+            tracing::error!("application settings storage is unavailable");
+            (
+                Bootstrap::Failed {
+                    message: message.clone(),
+                },
+                InitialSettings {
+                    store: None,
+                    draft: ApplicationSettings::default(),
+                    saved: None,
+                    active: None,
+                    load_error: Some(message),
+                    initial_route: Route::Settings {},
+                },
+            )
+        }
         Ok(store) => match store.load() {
-            Ok(LoadOutcome::Missing(_)) => unavailable(
-                LogLevel::Info,
-                "Application settings have not been saved yet.".into(),
-            ),
-            Err(error) => unavailable(
-                LogLevel::Info,
-                format!("Application settings are unavailable: {error}"),
-            ),
+            Ok(LoadOutcome::Missing(resolved)) => {
+                let _ = logging::init_stderr(LogLevel::Info);
+                tracing::info!("application settings setup is required");
+                (
+                    Bootstrap::SetupRequired,
+                    InitialSettings {
+                        store: Some(store),
+                        draft: resolved.settings,
+                        saved: None,
+                        active: None,
+                        load_error: None,
+                        initial_route: Route::Settings {},
+                    },
+                )
+            }
+            Err(_error) => {
+                let message = "Application settings could not be loaded. Check the settings file and configured data directories.".to_string();
+                let _ = logging::init_stderr(LogLevel::Info);
+                tracing::error!("application settings could not be loaded");
+                (
+                    Bootstrap::SetupRequired,
+                    InitialSettings {
+                        store: Some(store),
+                        draft: ApplicationSettings::default(),
+                        saved: None,
+                        active: None,
+                        load_error: Some(message),
+                        initial_route: Route::Settings {},
+                    },
+                )
+            }
             Ok(LoadOutcome::Loaded(config)) => {
-                match logging::init(&config.logs_root, config.log_level) {
-                    Err(error) => unavailable(
-                        config.log_level,
-                        format!("Application logging is unavailable: {error}"),
-                    ),
+                let initial_settings = InitialSettings {
+                    store: Some(store),
+                    draft: config.settings.clone(),
+                    saved: Some(config.clone()),
+                    active: Some(config.clone()),
+                    load_error: None,
+                    initial_route: Route::Monitor {},
+                };
+                let bootstrap = match logging::init(&config.logs_root, config.log_level) {
+                    Err(_error) => {
+                        let _ = logging::init_stderr(config.log_level);
+                        tracing::error!("application logging initialization failed");
+                        Bootstrap::Failed {
+                            message: "Application logging is unavailable.".into(),
+                        }
+                    }
                     Ok(log_guard) => {
                         log_owner = Some(log_guard);
-                        let camera_ids = config
-                            .settings
-                            .cameras
-                            .iter()
-                            .map(|camera| camera.id)
-                            .collect::<Vec<_>>();
-                        tracing::info!(
-                            camera_count = config.settings.cameras.len(),
-                            camera_ids = ?camera_ids,
-                            data_root = %config.data_root.display(),
-                            sessions_root = %config.sessions_root.display(),
-                            "startup configuration loaded"
-                        );
+                        tracing::info!("startup configuration loaded");
 
                         match RecorderRuntime::spawn(config.recorder_settings) {
                             Err(error) => {
                                 tracing::error!(error = %error, "recorder preflight failed");
-                                Bootstrap::Unavailable {
-                                    message: format!("Recorder preflight failed: {error}"),
+                                Bootstrap::Failed {
+                                    message: "Recorder preflight failed.".into(),
                                 }
                             }
                             Ok((runtime, handle, events)) => {
@@ -176,7 +237,7 @@ fn launch_with_store_result(store: Result<SettingsStore, settings::Error>) {
                                 match initialize_workflow(&config, &recorder) {
                                     Err(message) => {
                                         tracing::error!("session workflow initialization failed");
-                                        Bootstrap::Unavailable { message }
+                                        Bootstrap::Failed { message }
                                     }
                                     Ok(workflow) => {
                                         let sources = config
@@ -195,25 +256,15 @@ fn launch_with_store_result(store: Result<SettingsStore, settings::Error>) {
                                             );
                                             (PreviewState::NoCameras, None)
                                         } else {
-                                            tracing::info!(
-                                                camera_count = sources.len(),
-                                                camera_ids = ?camera_ids,
-                                                "preview startup requested"
-                                            );
+                                            tracing::info!("preview startup requested");
                                             match bridge::start(sources) {
                                                 Ok((state, bridge)) => {
-                                                    tracing::info!(
-                                                        camera_count = config.settings.cameras.len(),
-                                                        camera_ids = ?camera_ids,
-                                                        "preview ready"
-                                                    );
+                                                    tracing::info!("preview ready");
                                                     (state, Some(bridge))
                                                 }
                                                 Err(error) => {
                                                     tracing::warn!(
                                                         error = %error,
-                                                        camera_count = config.settings.cameras.len(),
-                                                        camera_ids = ?camera_ids,
                                                         "preview unavailable"
                                                     );
                                                     (
@@ -238,7 +289,8 @@ fn launch_with_store_result(store: Result<SettingsStore, settings::Error>) {
                             }
                         }
                     }
-                }
+                };
+                (bootstrap, initial_settings)
             }
         },
     };
@@ -280,9 +332,10 @@ fn launch_with_store_result(store: Result<SettingsStore, settings::Error>) {
             .with_context(preview.clone())
             .with_context(recorder.clone())
             .with_context(workflow.clone()),
-        Bootstrap::Unavailable { .. } => launcher,
+        Bootstrap::SetupRequired | Bootstrap::Failed { .. } => launcher,
     };
     launcher
+        .with_context(initial_settings)
         .with_context(bootstrap)
         .with_cfg(desktop)
         .launch(App);
@@ -291,23 +344,39 @@ fn launch_with_store_result(store: Result<SettingsStore, settings::Error>) {
 #[component]
 fn App() -> Element {
     let bootstrap = use_context::<Bootstrap>();
-    let body = match bootstrap {
-        Bootstrap::Ready { .. } => rsx! { ReadyApp {} },
-        Bootstrap::Unavailable { message } => rsx! {
-            main {
-                class: "p-4",
-                div {
-                    class: "alert alert-error",
-                    role: "alert",
-                    div {
-                        p { "Leo is unavailable: {message}" }
-                        p {
-                            "Check the camera configuration, data and logging directories, and recorder executable, then restart Leo."
-                        }
-                    }
-                }
-            }
+    let InitialSettings {
+        store,
+        draft,
+        saved,
+        active,
+        load_error,
+        initial_route,
+    } = use_context::<InitialSettings>();
+    let settings = use_hook(move || {
+        Signal::new_in_scope(
+            SettingsPageState::new(draft, saved, active, load_error),
+            ScopeId::ROOT,
+        )
+    });
+    use_context_provider(move || SettingsContext {
+        state: settings,
+        store,
+    });
+    let availability = match &bootstrap {
+        Bootstrap::Ready { config, .. } => RuntimeAvailability::Ready {
+            camera_count: config.settings.cameras.len(),
         },
+        Bootstrap::SetupRequired => RuntimeAvailability::SetupRequired,
+        Bootstrap::Failed { message } => RuntimeAvailability::Failed {
+            message: message.clone(),
+        },
+    };
+    use_context_provider(move || availability);
+    let body = match bootstrap {
+        Bootstrap::Ready { .. } => rsx! { ReadyApp { initial_route } },
+        Bootstrap::SetupRequired | Bootstrap::Failed { .. } => {
+            rsx! { ShellRouter { initial_route } }
+        }
     };
 
     rsx! {
@@ -318,7 +387,7 @@ fn App() -> Element {
 }
 
 #[component]
-fn ReadyApp() -> Element {
+fn ReadyApp(initial_route: Route) -> Element {
     let initial_workflow = use_context::<InitialWorkflow>();
     let recorder = use_context::<RecorderBootstrap>();
     let event_recorder = recorder.clone();
@@ -367,8 +436,21 @@ fn ReadyApp() -> Element {
     };
 
     rsx! {
-        Router::<Route> {}
+        ShellRouter { initial_route }
         {desktop_e2e}
+    }
+}
+
+#[component]
+fn ShellRouter(initial_route: Route) -> Element {
+    let initial_path = initial_route.to_string();
+    rsx! {
+        HistoryProvider {
+            history: move |_| {
+                Rc::new(MemoryHistory::with_initial_path(initial_path.clone())) as Rc<dyn History>
+            },
+            Router::<Route> {}
+        }
     }
 }
 
