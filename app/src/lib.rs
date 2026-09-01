@@ -1,6 +1,9 @@
 use std::sync::{Arc, Mutex};
 
-use backend::recording::{RecorderEvent, RecorderHandle, RecorderRuntime};
+use backend::{
+    analysis::OpenAiConfig,
+    recording::{RecorderEvent, RecorderHandle, RecorderRuntime},
+};
 use dioxus::{
     desktop::{Config, tao::event::Event},
     prelude::*,
@@ -49,30 +52,44 @@ struct RecorderBootstrap {
 #[derive(Clone)]
 struct InitialWorkflow(Arc<Mutex<Option<Workflow>>>);
 
-const MODEL_CONFIG_ERROR: &str = "Analysis requires OPENAI_API_KEY and ANALYSIS_MODEL.";
-
-fn model_config_error(openai_api_key: bool, analysis_model: bool) -> Option<String> {
-    (!openai_api_key || !analysis_model).then(|| MODEL_CONFIG_ERROR.to_owned())
+fn openai_config(
+    api_key: Option<String>,
+    model: Option<String>,
+    base_url: Option<String>,
+) -> Option<OpenAiConfig> {
+    let api_key = api_key.filter(|value| !value.trim().is_empty())?;
+    let model = model.filter(|value| !value.trim().is_empty())?;
+    Some(OpenAiConfig {
+        api_key,
+        model,
+        base_url,
+    })
 }
 
-fn configuration_value_is_present(value: Option<&str>) -> bool {
-    value.is_some_and(|value| !value.trim().is_empty())
+#[cfg(test)]
+fn test_openai_config() -> OpenAiConfig {
+    openai_config(
+        Some("test-api-key".into()),
+        Some("test-model".into()),
+        Some("http://provider.example/v1".into()),
+    )
+    .expect("test provider configuration should be valid")
 }
 
 fn initialize_workflow(
     config: &StartupConfig,
     recorder: &RecorderBootstrap,
 ) -> Result<InitialWorkflow, String> {
-    let openai_api_key = std::env::var("OPENAI_API_KEY").ok();
-    let analysis_model = std::env::var("ANALYSIS_MODEL").ok();
+    let openai = openai_config(
+        std::env::var("OPENAI_API_KEY").ok(),
+        std::env::var("ANALYSIS_MODEL").ok(),
+        std::env::var("OPENAI_BASE_URL").ok(),
+    );
     Workflow::new(
         config.cameras.clone(),
         config.sessions_root.clone(),
         recorder.handle.clone(),
-        model_config_error(
-            configuration_value_is_present(openai_api_key.as_deref()),
-            configuration_value_is_present(analysis_model.as_deref()),
-        ),
+        openai,
     )
     .map(|workflow| InitialWorkflow(Arc::new(Mutex::new(Some(workflow)))))
     .map_err(|error| format!("Session workflow is unavailable: {error}"))
@@ -349,10 +366,7 @@ mod tests {
         session::SessionController,
     };
 
-    use super::{
-        RecorderBootstrap, configuration_value_is_present, initialize_workflow, model_config_error,
-        take_recorder_events,
-    };
+    use super::{RecorderBootstrap, initialize_workflow, openai_config, take_recorder_events};
     use crate::{
         camera_config::{CameraConfig, StartupConfig},
         session_task::handle_recorder_event,
@@ -405,20 +419,16 @@ mod tests {
 
     #[test]
     fn model_configuration_availability_is_sanitized_without_environment_mutation() {
-        let unavailable = Some("Analysis requires OPENAI_API_KEY and ANALYSIS_MODEL.".to_owned());
-
-        assert_eq!(model_config_error(false, false), unavailable);
-        assert_eq!(model_config_error(false, true), unavailable);
-        assert_eq!(model_config_error(true, false), unavailable);
-        assert_eq!(model_config_error(true, true), None);
+        assert!(openai_config(None, None, None).is_none());
+        assert!(openai_config(None, Some("model".into()), None).is_none());
+        assert!(openai_config(Some("key".into()), None, None).is_none());
+        assert!(openai_config(Some("key".into()), Some("model".into()), None).is_some());
     }
 
     #[test]
     fn model_configuration_requires_non_blank_values() {
-        assert!(!configuration_value_is_present(None));
-        assert!(!configuration_value_is_present(Some("")));
-        assert!(!configuration_value_is_present(Some("  \t")));
-        assert!(configuration_value_is_present(Some("configured")));
+        assert!(openai_config(Some("".into()), Some("model".into()), None).is_none());
+        assert!(openai_config(Some("key".into()), Some("  \t".into()), None).is_none());
     }
 
     #[test]
@@ -465,7 +475,7 @@ mod tests {
             camera_configs(),
             temporary.path().join("sessions"),
             recorder.handle.clone(),
-            None,
+            Some(crate::test_openai_config()),
         )
         .expect("workflow should initialize");
         let request = workflow

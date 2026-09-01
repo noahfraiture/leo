@@ -7,7 +7,7 @@ use rig_core::completion::CompletionModel;
 use crate::{recording::list_segments, session::Session};
 
 use super::{
-    agent::{Agent, OpenAiAgent},
+    agent::{Agent, OpenAiAgent, OpenAiConfig},
     analyzer::{AnalysisCheckpoint, Analyzer},
     error::Error,
 };
@@ -20,6 +20,7 @@ pub struct AnalyzeSession {
     pub directory: PathBuf,
     /// Correct exercise sequence supplied to every model request.
     pub checklist: String,
+    pub openai: OpenAiConfig,
 }
 
 /// Analyzes or resumes a completed local session and emits each durable checkpoint snapshot.
@@ -29,7 +30,7 @@ pub async fn analyze_session(
 ) -> Result<AnalysisCheckpoint> {
     analyze_session_with(
         request,
-        || OpenAiAgent::from_env().map_err(Error::from),
+        |config| OpenAiAgent::from_config(config).map_err(Error::from),
         on_checkpoint,
     )
     .await
@@ -42,11 +43,12 @@ async fn analyze_session_with<M, F>(
 ) -> Result<AnalysisCheckpoint>
 where
     M: CompletionModel,
-    F: FnOnce() -> Result<Agent<M>>,
+    F: FnOnce(OpenAiConfig) -> Result<Agent<M>>,
 {
     let AnalyzeSession {
         directory,
         checklist,
+        openai,
     } = request;
     if checklist.trim().is_empty() {
         return Err(Error::EmptyChecklist);
@@ -93,7 +95,7 @@ where
         return Ok(checkpoint);
     }
 
-    let agent = make_agent()?;
+    let agent = make_agent(openai)?;
     while checkpoint.responses.len() < checkpoint.total_batches {
         analyzer.analyze_next(&agent).await?;
         checkpoint = analyzer.checkpoint().clone();
@@ -115,7 +117,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::analysis::{
-        AnalysisWarning, Error,
+        AnalysisWarning, Error, OpenAiConfig,
         agent::{Agent, AnalysisResponse, ChecklistProgress, Observation},
         analyzer::AnalysisCheckpoint,
     };
@@ -133,7 +135,7 @@ mod tests {
     ) -> Result<AnalysisCheckpoint, Error> {
         analyze_session_with(
             request,
-            || {
+            |_| {
                 constructions.set(constructions.get() + 1);
                 Ok(Agent::new(model))
             },
@@ -247,6 +249,11 @@ mod tests {
         AnalyzeSession {
             directory: directory.to_owned(),
             checklist: checklist.into(),
+            openai: OpenAiConfig {
+                api_key: "test-key".into(),
+                model: "test-model".into(),
+                base_url: None,
+            },
         }
     }
 

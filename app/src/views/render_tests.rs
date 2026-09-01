@@ -94,7 +94,7 @@ impl Harness {
             camera_configs(),
             temporary.path().join("sessions"),
             recorder,
-            None,
+            Some(crate::test_openai_config()),
         )
         .expect("render Workflow should initialize");
 

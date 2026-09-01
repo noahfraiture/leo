@@ -488,7 +488,7 @@ mod tests {
                 camera_configs(),
                 self.session_root(),
                 self.recorder.clone(),
-                None,
+                Some(crate::test_openai_config()),
             )
             .expect("workflow should initialize")
         }

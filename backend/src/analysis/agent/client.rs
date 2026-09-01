@@ -1,4 +1,4 @@
-use rig_core::client::{CompletionClient, ProviderClient, required_env_var};
+use rig_core::client::{CompletionClient, ProviderClientError};
 use rig_core::completion::{AssistantContent, CompletionModel, Message};
 use rig_core::providers::openai;
 use serde::{Deserialize, Serialize};
@@ -49,25 +49,31 @@ pub struct Agent<M: CompletionModel> {
 /// OpenAI Responses specialization used by the application analysis pipeline.
 pub type OpenAiAgent = Agent<openai::responses_api::ResponsesCompletionModel>;
 
-impl OpenAiAgent {
-    /// Builds the model from `OPENAI_API_KEY`, `ANALYSIS_MODEL`, and optional `OPENAI_BASE_URL`.
-    pub fn from_env() -> Result<Self> {
-        let api_key = required_env_var("OPENAI_API_KEY")?;
-        let model = required_env_var("ANALYSIS_MODEL")?;
-        if !configuration_value_is_present(&api_key) {
-            return Err(Error::BlankConfiguration("OPENAI_API_KEY"));
-        }
-        if !configuration_value_is_present(&model) {
-            return Err(Error::BlankConfiguration("ANALYSIS_MODEL"));
-        }
-        let client = openai::Client::from_env()?;
-
-        Ok(Self::new(client.completion_model(model)))
-    }
+/// Explicit OpenAI configuration captured before an analysis starts.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OpenAiConfig {
+    pub api_key: String,
+    pub model: String,
+    pub base_url: Option<String>,
 }
 
-fn configuration_value_is_present(value: &str) -> bool {
-    !value.trim().is_empty()
+impl OpenAiAgent {
+    /// Builds one model from an explicit application-owned configuration.
+    pub fn from_config(config: OpenAiConfig) -> Result<Self> {
+        if config.api_key.trim().is_empty() {
+            return Err(Error::BlankConfiguration("OpenAI API key"));
+        }
+        if config.model.trim().is_empty() {
+            return Err(Error::BlankConfiguration("OpenAI model"));
+        }
+
+        let mut builder = openai::Client::builder().api_key(config.api_key);
+        if let Some(base_url) = config.base_url {
+            builder = builder.base_url(base_url);
+        }
+        let client = builder.build().map_err(ProviderClientError::from)?;
+        Ok(Self::new(client.completion_model(config.model)))
+    }
 }
 
 impl<M: CompletionModel> Agent<M> {
@@ -108,15 +114,28 @@ mod tests {
     use rig_core::test_utils::{MockCompletionModel, MockTurn};
 
     use super::{
-        Agent, AnalysisResponse, ChecklistProgress, Error, Message, Observation,
-        configuration_value_is_present,
+        Agent, AnalysisResponse, ChecklistProgress, Error, Message, Observation, OpenAiAgent,
+        OpenAiConfig,
     };
 
+    fn openai_config(api_key: &str, model: &str) -> OpenAiConfig {
+        OpenAiConfig {
+            api_key: api_key.into(),
+            model: model.into(),
+            base_url: None,
+        }
+    }
+
     #[test]
-    fn provider_configuration_rejects_blank_values() {
-        assert!(!configuration_value_is_present(""));
-        assert!(!configuration_value_is_present("  \t"));
-        assert!(configuration_value_is_present("configured"));
+    fn explicit_provider_configuration_rejects_blank_values() {
+        assert!(matches!(
+            OpenAiAgent::from_config(openai_config("", "model")),
+            Err(Error::BlankConfiguration("OpenAI API key"))
+        ));
+        assert!(matches!(
+            OpenAiAgent::from_config(openai_config("key", "  ")),
+            Err(Error::BlankConfiguration("OpenAI model"))
+        ));
     }
 
     #[test]

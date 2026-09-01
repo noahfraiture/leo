@@ -5,7 +5,7 @@ use std::{
 };
 
 use backend::{
-    analysis::{AnalysisCheckpoint, AnalyzeSession},
+    analysis::{AnalysisCheckpoint, AnalyzeSession, OpenAiConfig},
     recording::{RecorderEvent, RecorderHandle, RecorderStatus, RecordingCamera},
     session::{OperatorAction, SessionCamera, SessionController, StoredSession, list_sessions},
 };
@@ -13,6 +13,8 @@ use uuid::Uuid;
 
 use super::Error;
 use crate::camera_config::CameraConfig;
+
+const MODEL_CONFIG_ERROR: &str = "Analysis requires OPENAI_API_KEY and ANALYSIS_MODEL.";
 
 /// One camera's operator-facing configuration, sampling participation, and recorder health.
 pub struct CameraState {
@@ -81,6 +83,7 @@ pub struct Workflow {
     pub model_config_error: Option<String>,
     pub message: Option<String>,
     pub session_root: PathBuf,
+    openai: Option<OpenAiConfig>,
     recorder: RecorderHandle,
 }
 
@@ -90,7 +93,7 @@ impl Workflow {
         cameras: Vec<CameraConfig>,
         session_root: PathBuf,
         recorder: RecorderHandle,
-        model_config_error: Option<String>,
+        openai: Option<OpenAiConfig>,
     ) -> Result<Self, Error> {
         let selected_camera_id = cameras.first().map(|camera| camera.id);
         let cameras = cameras
@@ -109,9 +112,10 @@ impl Workflow {
             selected_session_id: None,
             running_analysis_id: None,
             analysis_error: None,
-            model_config_error,
+            model_config_error: openai.is_none().then(|| MODEL_CONFIG_ERROR.to_owned()),
             message: None,
             session_root,
+            openai,
             recorder,
         };
         workflow.refresh_sessions()?;
@@ -164,6 +168,10 @@ impl Workflow {
         if self.model_config_error.is_some() {
             return Err(Error::ModelConfigurationUnavailable);
         }
+        let openai = self
+            .openai
+            .clone()
+            .ok_or(Error::ModelConfigurationUnavailable)?;
         let checklist = persisted_checklist.unwrap_or_else(|| checklist.trim().to_owned());
         if checklist.trim().is_empty() {
             return Err(Error::EmptyChecklist);
@@ -174,6 +182,7 @@ impl Workflow {
         Ok(AnalyzeSession {
             directory,
             checklist,
+            openai,
         })
     }
 
@@ -604,7 +613,7 @@ mod tests {
                 camera_configs(),
                 temporary.path().join("sessions"),
                 recorder,
-                Some("model configuration unavailable".into()),
+                Some(crate::test_openai_config()),
             )
             .expect("workflow should initialize");
 
@@ -820,10 +829,7 @@ mod tests {
         assert_eq!(workflow.selected_session_id, None);
         assert_eq!(workflow.running_analysis_id, None);
         assert_eq!(workflow.analysis_error, None);
-        assert_eq!(
-            workflow.model_config_error.as_deref(),
-            Some("model configuration unavailable")
-        );
+        assert_eq!(workflow.model_config_error, None);
         assert_eq!(workflow.message, None);
 
         harness.shutdown();
@@ -1599,6 +1605,21 @@ mod tests {
         assert_eq!(request.checklist, "Persisted checklist\n");
         assert_eq!(saved_checkpoint(&harness.workflow, session_id), &persisted);
         assert_eq!(harness.workflow.running_analysis_id, Some(session_id));
+        harness.shutdown();
+    }
+
+    #[test]
+    fn analysis_request_owns_the_startup_provider_configuration() {
+        let mut harness = Harness::new();
+        let session_id = Uuid::from_u128(38);
+        prepare_analysis_session(&mut harness, session_id, None);
+
+        let request = harness
+            .workflow
+            .begin_analysis("Complete the exercise".into())
+            .expect("analysis should begin");
+
+        assert!(request.openai == crate::test_openai_config());
         harness.shutdown();
     }
 

@@ -3,5 +3,7 @@
 mod client;
 mod error;
 
-pub use client::{Agent, AnalysisResponse, ChecklistProgress, Observation, OpenAiAgent};
+pub use client::{
+    Agent, AnalysisResponse, ChecklistProgress, Observation, OpenAiAgent, OpenAiConfig,
+};
 pub use error::Error;

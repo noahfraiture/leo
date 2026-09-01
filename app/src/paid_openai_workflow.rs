@@ -8,7 +8,7 @@ use std::{
 };
 
 use backend::{
-    analysis::{AnalysisCheckpoint, AnalyzeSession, analyze_session},
+    analysis::{AnalysisCheckpoint, AnalyzeSession, OpenAiConfig, analyze_session},
     recording::{RecorderRuntime, RecorderSettings},
     session::mark_recording_complete,
 };
@@ -25,6 +25,7 @@ async fn paid_openai_analyzes_one_local_application_session() {
         Ok("1"),
         "paid test requires explicit approval and LEO_RUN_PAID_OPENAI_TEST=1"
     );
+    let openai = openai_config_from_environment();
 
     let root = paid_evaluation_root();
     let sessions_root = root.join("sessions");
@@ -47,7 +48,7 @@ async fn paid_openai_analyzes_one_local_application_session() {
         stop_timeout: Duration::from_secs(5),
     })
     .expect("paid test requires ffmpeg and ffprobe");
-    let mut workflow = Workflow::new(camera_configs(), sessions_root, handle, None)
+    let mut workflow = Workflow::new(camera_configs(), sessions_root, handle, Some(openai))
         .expect("workflow should initialize");
     workflow
         .refresh_sessions()
@@ -95,6 +96,7 @@ async fn paid_openai_evaluates_controlled_visual_payloads() {
         std::env::var_os("OPENAI_BASE_URL").is_none(),
         "controlled evaluation must use OpenAI directly"
     );
+    let openai = openai_config_from_environment();
 
     let root = paid_evaluation_root();
     fs::create_dir_all(&root).expect("paid evaluation root should be created");
@@ -119,6 +121,7 @@ async fn paid_openai_evaluates_controlled_visual_payloads() {
 
     run_paid_evaluation(
         &root,
+        &openai,
         "horizontal-sequence",
         &[("Horizontal view", horizontal.as_path())],
         11_000,
@@ -132,6 +135,7 @@ async fn paid_openai_evaluates_controlled_visual_payloads() {
     .await;
     run_paid_evaluation(
         &root,
+        &openai,
         "negative-control",
         &[("Horizontal view", horizontal.as_path())],
         11_000,
@@ -142,6 +146,7 @@ async fn paid_openai_evaluates_controlled_visual_payloads() {
     .await;
     run_paid_evaluation(
         &root,
+        &openai,
         "two-camera-pairing",
         &[
             ("Horizontal view", horizontal.as_path()),
@@ -156,8 +161,10 @@ async fn paid_openai_evaluates_controlled_visual_payloads() {
     .await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_paid_evaluation(
     root: &Path,
+    openai: &OpenAiConfig,
     name: &str,
     fixtures: &[(&str, &Path)],
     duration_ms: u64,
@@ -179,6 +186,7 @@ async fn run_paid_evaluation(
         AnalyzeSession {
             directory,
             checklist: checklist.into(),
+            openai: openai.clone(),
         },
         |_| {},
     )
@@ -200,6 +208,14 @@ async fn run_paid_evaluation(
         "PAID_EVAL_CASE={name}\n{}",
         serde_json::to_string_pretty(&checkpoint).expect("checkpoint should serialize")
     );
+}
+
+fn openai_config_from_environment() -> OpenAiConfig {
+    OpenAiConfig {
+        api_key: std::env::var("OPENAI_API_KEY").expect("paid test requires OPENAI_API_KEY"),
+        model: std::env::var("ANALYSIS_MODEL").expect("paid test requires ANALYSIS_MODEL"),
+        base_url: std::env::var("OPENAI_BASE_URL").ok(),
+    }
 }
 
 fn paid_evaluation_root() -> PathBuf {

@@ -89,7 +89,7 @@ mod tests {
                 .collect(),
             temporary.path().join("sessions"),
             recorder,
-            None,
+            Some(crate::test_openai_config()),
         )
         .expect("workflow should initialize");
         (temporary, runtime, workflow)

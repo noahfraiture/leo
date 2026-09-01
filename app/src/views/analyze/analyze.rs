@@ -374,7 +374,7 @@ mod tests {
             }],
             session_root,
             recorder,
-            None,
+            Some(crate::test_openai_config()),
         )
         .expect("workflow should load the completed session");
         let selected_id = workflow
