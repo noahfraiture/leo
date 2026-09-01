@@ -1,5 +1,6 @@
 use std::{
     fs,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -83,6 +84,10 @@ pub struct Workflow {
     pub model_config_error: Option<String>,
     pub message: Option<String>,
     pub session_root: PathBuf,
+    /// Active startup frame-set count copied into each analysis request.
+    pub analysis_frame_sets_per_prompt: NonZeroUsize,
+    /// Active startup overlap copied into each analysis request.
+    pub analysis_overlap_frame_sets: usize,
     openai: Option<OpenAiConfig>,
     recorder: RecorderHandle,
 }
@@ -94,6 +99,8 @@ impl Workflow {
         session_root: PathBuf,
         recorder: RecorderHandle,
         openai: Option<OpenAiConfig>,
+        analysis_frame_sets_per_prompt: NonZeroUsize,
+        analysis_overlap_frame_sets: usize,
     ) -> Result<Self, Error> {
         let selected_camera_id = cameras.first().map(|camera| camera.id);
         let cameras = cameras
@@ -115,6 +122,8 @@ impl Workflow {
             model_config_error: openai.is_none().then(|| MODEL_CONFIG_ERROR.to_owned()),
             message: None,
             session_root,
+            analysis_frame_sets_per_prompt,
+            analysis_overlap_frame_sets,
             openai,
             recorder,
         };
@@ -182,6 +191,8 @@ impl Workflow {
         Ok(AnalyzeSession {
             directory,
             checklist,
+            frame_sets_per_prompt: self.analysis_frame_sets_per_prompt,
+            overlap_frame_sets: self.analysis_overlap_frame_sets,
             openai,
         })
     }
@@ -565,6 +576,7 @@ fn create_dir(path: &Path) -> Result<(), Error> {
 mod tests {
     use std::{
         fs,
+        num::NonZeroUsize,
         os::unix::fs::PermissionsExt,
         path::{Path, PathBuf},
         time::Duration,
@@ -601,6 +613,15 @@ mod tests {
         }
 
         fn with(cameras: Vec<CameraSettings>, openai: Option<OpenAiConfig>) -> Self {
+            Self::with_batching(cameras, openai, NonZeroUsize::new(5).unwrap(), 0)
+        }
+
+        fn with_batching(
+            cameras: Vec<CameraSettings>,
+            openai: Option<OpenAiConfig>,
+            frame_sets_per_prompt: NonZeroUsize,
+            overlap_frame_sets: usize,
+        ) -> Self {
             let temporary = tempfile::tempdir().expect("temporary root should be created");
             let executable = temporary.path().join("successful-preflight");
             fs::write(&executable, "#!/bin/sh\nexit 0\n")
@@ -617,9 +638,15 @@ mod tests {
                 executable,
             )
             .expect("test recorder runtime should start");
-            let workflow =
-                Workflow::new(cameras, temporary.path().join("sessions"), recorder, openai)
-                    .expect("workflow should initialize");
+            let workflow = Workflow::new(
+                cameras,
+                temporary.path().join("sessions"),
+                recorder,
+                openai,
+                frame_sets_per_prompt,
+                overlap_frame_sets,
+            )
+            .expect("workflow should initialize");
 
             Self {
                 _temporary: temporary,
@@ -1626,13 +1653,18 @@ mod tests {
     }
 
     #[test]
-    fn analysis_request_owns_the_startup_provider_configuration() {
+    fn analysis_request_owns_the_startup_provider_and_batching_configuration() {
         let config = OpenAiConfig {
             api_key: "active-key".into(),
             model: "active-model".into(),
             base_url: Some("http://127.0.0.1:9000/v1".into()),
         };
-        let mut harness = Harness::with(camera_settings(), Some(config.clone()));
+        let mut harness = Harness::with_batching(
+            camera_settings(),
+            Some(config.clone()),
+            NonZeroUsize::new(7).unwrap(),
+            2,
+        );
         let session_id = Uuid::from_u128(38);
         prepare_analysis_session(&mut harness, session_id, None);
 
@@ -1642,6 +1674,8 @@ mod tests {
             .expect("analysis should begin");
 
         assert!(request.openai == config);
+        assert_eq!(request.frame_sets_per_prompt.get(), 7);
+        assert_eq!(request.overlap_frame_sets, 2);
         harness.shutdown();
     }
 

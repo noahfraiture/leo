@@ -33,7 +33,7 @@ pub fn spawn_analysis(mut workflow: Signal<Workflow>, request: AnalyzeSession, s
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::{cell::RefCell, fs, os::unix::fs::PermissionsExt, time::Duration};
+    use std::{cell::RefCell, fs, num::NonZeroUsize, os::unix::fs::PermissionsExt, time::Duration};
 
     use backend::{
         analysis::{
@@ -90,6 +90,8 @@ mod tests {
             temporary.path().join("sessions"),
             recorder,
             Some(crate::test_openai_config()),
+            NonZeroUsize::new(5).unwrap(),
+            0,
         )
         .expect("workflow should initialize");
         (temporary, runtime, workflow)

@@ -585,14 +585,31 @@ fn RecordingSettingsSection() -> Element {
 fn ProviderSettingsSection() -> Element {
     let SettingsContext { mut state, .. } = use_context::<SettingsContext>();
     let mut reveal_key = use_signal(|| false);
-    let (api_key, model, base_url, base_url_error) = {
+    let (
+        api_key,
+        model,
+        base_url,
+        frame_sets,
+        overlap,
+        base_url_error,
+        frame_sets_error,
+        overlap_error,
+    ) = {
         let page = state.read();
         (
             page.draft.openai.api_key.clone(),
             page.draft.openai.model.clone(),
             page.draft.openai.base_url.clone(),
+            page.draft.analysis_frame_sets_per_prompt.clone(),
+            page.draft.analysis_overlap_frame_sets.clone(),
             page.field_errors
                 .get(&SettingsField::OpenAiBaseUrl)
+                .cloned(),
+            page.field_errors
+                .get(&SettingsField::AnalysisFrameSetsPerPrompt)
+                .cloned(),
+            page.field_errors
+                .get(&SettingsField::AnalysisOverlapFrameSets)
                 .cloned(),
         )
     };
@@ -616,7 +633,71 @@ fn ProviderSettingsSection() -> Element {
                 "A blank API key or model disables Analyze."
             }
 
-            div { class: "mt-3 flex flex-col gap-1",
+            div { class: "mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2",
+                div { class: "flex flex-col gap-1",
+                    label {
+                        class: "text-sm font-medium",
+                        r#for: "settings-analysis-frame-sets",
+                        "Frame sets per prompt"
+                    }
+                    input {
+                        id: "settings-analysis-frame-sets",
+                        class: "input input-bordered w-full",
+                        r#type: "number",
+                        min: "1",
+                        step: "1",
+                        value: frame_sets,
+                        aria_invalid: frame_sets_error.as_ref().map(|_| "true"),
+                        aria_describedby: frame_sets_error
+                            .as_ref()
+                            .map(|_| "settings-analysis-frame-sets-error"),
+                        oninput: move |event| {
+                            state.write().draft.analysis_frame_sets_per_prompt = event.value();
+                        },
+                    }
+                    if let Some(ref error) = frame_sets_error {
+                        p {
+                            id: "settings-analysis-frame-sets-error",
+                            class: "text-error text-sm",
+                            "{error}"
+                        }
+                    }
+                }
+
+                div { class: "flex flex-col gap-1",
+                    label {
+                        class: "text-sm font-medium",
+                        r#for: "settings-analysis-overlap",
+                        "Overlapping frame sets"
+                    }
+                    input {
+                        id: "settings-analysis-overlap",
+                        class: "input input-bordered w-full",
+                        r#type: "number",
+                        min: "0",
+                        step: "1",
+                        value: overlap,
+                        aria_invalid: overlap_error.as_ref().map(|_| "true"),
+                        aria_describedby: overlap_error
+                            .as_ref()
+                            .map(|_| "settings-analysis-overlap-error"),
+                        oninput: move |event| {
+                            state.write().draft.analysis_overlap_frame_sets = event.value();
+                        },
+                    }
+                    if let Some(ref error) = overlap_error {
+                        p {
+                            id: "settings-analysis-overlap-error",
+                            class: "text-error text-sm",
+                            "{error}"
+                        }
+                    }
+                }
+            }
+            p { class: "mt-2 text-sm", "Each frame set can contain one image per camera." }
+            p { class: "mt-1 text-sm", "Overlap repeats images and may increase provider cost." }
+
+            div { class: "mt-4 flex flex-col gap-1",
                 label {
                     class: "text-sm font-medium",
                     r#for: "settings-openai-key",
@@ -794,6 +875,10 @@ fn DiagnosticsSettingsSection() -> Element {
                     dd { "{camera_ids}" }
                     dt { class: "font-medium", "Recorder timeout" }
                     dd { "{page.draft.recorder_timeout_secs} seconds" }
+                    dt { class: "font-medium", "Frame sets per prompt" }
+                    dd { "{page.draft.analysis_frame_sets_per_prompt}" }
+                    dt { class: "font-medium", "Overlapping frame sets" }
+                    dd { "{page.draft.analysis_overlap_frame_sets}" }
                     dt { class: "font-medium", "Provider model" }
                     dd { class: "break-all", "{model}" }
                     dt { class: "font-medium", "Provider base URL" }
@@ -886,6 +971,10 @@ fn ResolvedSettingsSummary(
                 dd { "{camera_ids}" }
                 dt { class: "font-medium", "Recorder timeout" }
                 dd { "{settings.recorder_timeout_secs} seconds" }
+                dt { class: "font-medium", "Frame sets per prompt" }
+                dd { "{settings.analysis_frame_sets_per_prompt}" }
+                dt { class: "font-medium", "Overlapping frame sets" }
+                dd { "{settings.analysis_overlap_frame_sets}" }
                 dt { class: "font-medium", "Provider model" }
                 dd { class: "break-all", "{model}" }
                 dt { class: "font-medium", "Provider base URL" }

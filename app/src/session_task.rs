@@ -415,6 +415,7 @@ mod tests {
     use std::{
         cell::{Cell, RefCell},
         fs,
+        num::NonZeroUsize,
         os::unix::fs::PermissionsExt,
         path::PathBuf,
         rc::Rc,
@@ -489,6 +490,8 @@ mod tests {
                 self.session_root(),
                 self.recorder.clone(),
                 Some(crate::test_openai_config()),
+                NonZeroUsize::new(5).unwrap(),
+                0,
             )
             .expect("workflow should initialize")
         }

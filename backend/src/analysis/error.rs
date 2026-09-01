@@ -22,6 +22,9 @@ pub enum Error {
     #[error("analysis plan contains no analyzable frame sets")]
     NoAnalyzableFrames,
 
+    #[error("analysis overlap must be smaller than frame sets per batch")]
+    InvalidBatchOverlap,
+
     #[error("analysis checklist must not be empty")]
     EmptyChecklist,
 

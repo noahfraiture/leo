@@ -262,7 +262,7 @@ fn desktop_settings_file_is_strict_private_and_complete() {
     assert!(bytes.ends_with(b"\n"), "settings should end with a newline");
     let settings: Value = serde_json::from_slice(&bytes).expect("parse desktop settings");
     let expected = json!({
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "nextCameraId": 3,
         "cameras": [
             {
@@ -282,6 +282,8 @@ fn desktop_settings_file_is_strict_private_and_complete() {
         ],
         "dataRoot": data_root,
         "recorderTimeoutSecs": 10,
+        "analysisFrameSetsPerPrompt": 5,
+        "analysisOverlapFrameSets": 0,
         "openai": {
             "apiKey": "local-e2e-key",
             "model": "local-e2e-model",
@@ -387,11 +389,13 @@ fn write_desktop_settings(
         })
         .collect::<Vec<_>>();
     let settings = json!({
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "nextCameraId": 3,
         "cameras": cameras,
         "dataRoot": data_root,
         "recorderTimeoutSecs": 10,
+        "analysisFrameSetsPerPrompt": 5,
+        "analysisOverlapFrameSets": 0,
         "openai": {
             "apiKey": api_key,
             "model": model,

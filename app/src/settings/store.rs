@@ -1,6 +1,7 @@
 use std::{
     fs::{self, File},
     io::{self, Write},
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -21,6 +22,8 @@ pub struct ResolvedSettings {
     pub sessions_root: PathBuf,
     pub logs_root: PathBuf,
     pub recorder_settings: RecorderSettings,
+    pub analysis_frame_sets_per_prompt: NonZeroUsize,
+    pub analysis_overlap_frame_sets: usize,
     pub openai: Option<OpenAiConfig>,
     pub log_level: LogLevel,
 }
@@ -104,6 +107,13 @@ impl SettingsStore {
         };
         let openai = settings.openai_config();
         let log_level = settings.log_level;
+        let analysis_frame_sets_per_prompt = NonZeroUsize::new(
+            usize::try_from(settings.analysis_frame_sets_per_prompt)
+                .expect("validated analysis frame-set count should fit usize"),
+        )
+        .expect("validated analysis frame-set count should be nonzero");
+        let analysis_overlap_frame_sets = usize::try_from(settings.analysis_overlap_frame_sets)
+            .expect("validated analysis overlap should fit usize");
         Ok(ResolvedSettings {
             settings,
             settings_path: self.settings_path.clone(),
@@ -111,6 +121,8 @@ impl SettingsStore {
             sessions_root,
             logs_root,
             recorder_settings,
+            analysis_frame_sets_per_prompt,
+            analysis_overlap_frame_sets,
             openai,
             log_level,
         })
@@ -347,6 +359,8 @@ mod tests {
         });
         settings.data_root = Some(data_root);
         settings.recorder_timeout_secs = 23;
+        settings.analysis_frame_sets_per_prompt = 7;
+        settings.analysis_overlap_frame_sets = 2;
         settings.openai.api_key = "test-secret-key".into();
         settings.openai.model = "test-model".into();
         settings.openai.base_url = Some("https://provider.example/v1".into());
@@ -435,6 +449,8 @@ mod tests {
             resolved.recorder_settings.stop_timeout,
             Duration::from_secs(5)
         );
+        assert_eq!(resolved.analysis_frame_sets_per_prompt.get(), 7);
+        assert_eq!(resolved.analysis_overlap_frame_sets, 2);
         assert!(resolved.openai == settings.openai_config());
         assert_eq!(resolved.log_level, LogLevel::Trace);
     }

@@ -10,7 +10,7 @@ use url::Url;
 
 use super::{ValidationError, ValidationErrors};
 
-pub const SETTINGS_SCHEMA_VERSION: u32 = 1;
+pub const SETTINGS_SCHEMA_VERSION: u32 = 2;
 
 /// Persisted application configuration edited before runtime services start.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,6 +22,10 @@ pub struct Settings {
     pub cameras: Vec<CameraSettings>,
     pub data_root: Option<PathBuf>,
     pub recorder_timeout_secs: u64,
+    /// Synchronized frame sets sent in each analysis request.
+    pub analysis_frame_sets_per_prompt: u64,
+    /// Frame sets repeated between adjacent analysis requests.
+    pub analysis_overlap_frame_sets: u64,
     pub openai: OpenAiSettings,
     pub log_level: LogLevel,
 }
@@ -80,6 +84,8 @@ impl Default for Settings {
             cameras: Vec::new(),
             data_root: None,
             recorder_timeout_secs: 10,
+            analysis_frame_sets_per_prompt: 5,
+            analysis_overlap_frame_sets: 0,
             openai: OpenAiSettings {
                 api_key: String::new(),
                 model: String::new(),
@@ -176,6 +182,16 @@ impl Settings {
         {
             errors.push(ValidationError::InvalidRecorderTimeout);
         }
+        if self.analysis_frame_sets_per_prompt == 0
+            || usize::try_from(self.analysis_frame_sets_per_prompt).is_err()
+        {
+            errors.push(ValidationError::InvalidAnalysisFrameSetsPerPrompt);
+        }
+        if usize::try_from(self.analysis_overlap_frame_sets).is_err()
+            || self.analysis_overlap_frame_sets >= self.analysis_frame_sets_per_prompt
+        {
+            errors.push(ValidationError::InvalidAnalysisOverlapFrameSets);
+        }
         if let Some(path) = &self.data_root
             && !path.is_absolute()
         {
@@ -217,11 +233,28 @@ mod tests {
     #[test]
     fn defaults_are_an_unconfigured_valid_draft() {
         let settings = Settings::default();
-        assert_eq!(settings.schema_version, SETTINGS_SCHEMA_VERSION);
+        assert_eq!(SETTINGS_SCHEMA_VERSION, 2);
+        assert_eq!(settings.schema_version, 2);
         assert_eq!(settings.next_camera_id, 1);
         assert!(settings.cameras.is_empty());
         assert_eq!(settings.log_level, LogLevel::Info);
+        let value = serde_json::to_value(&settings).unwrap();
+        assert_eq!(value["analysisFrameSetsPerPrompt"], 5);
+        assert_eq!(value["analysisOverlapFrameSets"], 0);
         settings.validate().unwrap();
+    }
+
+    #[test]
+    fn schema_v2_requires_analysis_batching_fields() {
+        let value = serde_json::to_value(Settings::default()).unwrap();
+        for field in ["analysisFrameSetsPerPrompt", "analysisOverlapFrameSets"] {
+            let mut missing = value.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<Settings>(missing).is_err(),
+                "{field} should be required"
+            );
+        }
     }
 
     #[test]
@@ -300,6 +333,8 @@ mod tests {
             ],
             data_root: Some(PathBuf::from("relative/data")),
             recorder_timeout_secs: 0,
+            analysis_frame_sets_per_prompt: 0,
+            analysis_overlap_frame_sets: 1,
             openai: OpenAiSettings {
                 api_key: String::new(),
                 model: String::new(),
@@ -349,6 +384,16 @@ mod tests {
                 .contains(&ValidationError::InvalidSamplingCadence { camera_id: 1 })
         );
         assert!(errors.0.contains(&ValidationError::InvalidRecorderTimeout));
+        assert!(
+            errors
+                .0
+                .contains(&ValidationError::InvalidAnalysisFrameSetsPerPrompt)
+        );
+        assert!(
+            errors
+                .0
+                .contains(&ValidationError::InvalidAnalysisOverlapFrameSets)
+        );
         assert!(errors.0.contains(&ValidationError::DataRootNotAbsolute {
             path: PathBuf::from("relative/data"),
         }));
@@ -400,6 +445,50 @@ mod tests {
                 .0
                 .contains(&ValidationError::InvalidRecorderTimeout)
         );
+    }
+
+    #[test]
+    fn overlap_must_be_smaller_than_frame_sets_per_prompt() {
+        let settings = Settings {
+            analysis_frame_sets_per_prompt: 5,
+            analysis_overlap_frame_sets: 5,
+            ..Settings::default()
+        };
+
+        assert_eq!(
+            settings.validate().unwrap_err().0,
+            vec![ValidationError::InvalidAnalysisOverlapFrameSets]
+        );
+    }
+
+    #[cfg(target_pointer_width = "32")]
+    #[test]
+    fn analysis_batching_values_must_fit_usize() {
+        let too_large = u64::from(u32::MAX) + 1;
+        for settings in [
+            Settings {
+                analysis_frame_sets_per_prompt: too_large,
+                ..Settings::default()
+            },
+            Settings {
+                analysis_overlap_frame_sets: too_large,
+                ..Settings::default()
+            },
+        ] {
+            assert!(settings.validate().is_err());
+        }
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn analysis_batching_has_no_arbitrary_maximum() {
+        Settings {
+            analysis_frame_sets_per_prompt: u64::MAX,
+            analysis_overlap_frame_sets: u64::MAX - 1,
+            ..Settings::default()
+        }
+        .validate()
+        .unwrap();
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 use std::{
     fs,
+    num::NonZeroUsize,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     rc::Rc,
@@ -287,6 +288,8 @@ impl Harness {
             temporary.path().join("sessions"),
             recorder,
             Some(crate::test_openai_config()),
+            NonZeroUsize::new(5).unwrap(),
+            0,
         )
         .expect("render Workflow should initialize");
 
@@ -840,6 +843,61 @@ fn settings_form_renders_all_sections_and_diagnostics() {
 }
 
 #[test]
+fn settings_form_renders_analysis_batching_controls_and_help() {
+    let state = SettingsPageState::new(ApplicationSettings::default(), None, None, None);
+
+    let html = render_settings(state, None);
+
+    let frame_sets =
+        opening_tag_with_marker(&html, "input", r#"id="settings-analysis-frame-sets""#);
+    assert!(frame_sets.contains(r#"type="number""#), "{frame_sets}");
+    assert!(frame_sets.contains(r#"min="1""#), "{frame_sets}");
+    assert!(frame_sets.contains(r#"step="1""#), "{frame_sets}");
+    assert!(frame_sets.contains(r#"value="5""#), "{frame_sets}");
+
+    let overlap = opening_tag_with_marker(&html, "input", r#"id="settings-analysis-overlap""#);
+    assert!(overlap.contains(r#"type="number""#), "{overlap}");
+    assert!(overlap.contains(r#"min="0""#), "{overlap}");
+    assert!(overlap.contains(r#"step="1""#), "{overlap}");
+    assert!(overlap.contains(r#"value="0""#), "{overlap}");
+    assert!(
+        html.contains("Each frame set can contain one image per camera."),
+        "{html}"
+    );
+    assert!(
+        html.contains("Overlap repeats images and may increase provider cost."),
+        "{html}"
+    );
+}
+
+#[test]
+fn settings_overlap_error_is_accessibly_described() {
+    let mut state = SettingsPageState::new(ApplicationSettings::default(), None, None, None);
+    state.draft.analysis_overlap_frame_sets = "5".into();
+    state.field_errors = match state.submission() {
+        Err(errors) => errors,
+        Ok(_) => panic!("invalid overlap should have a field error"),
+    };
+
+    let html = render_settings(state, None);
+
+    let overlap = opening_tag_with_marker(&html, "input", r#"id="settings-analysis-overlap""#);
+    assert!(overlap.contains(r#"aria-invalid="true""#), "{overlap}");
+    assert!(
+        overlap.contains(r#"aria-describedby="settings-analysis-overlap-error""#),
+        "{overlap}"
+    );
+    assert!(
+        html.contains(r#"id="settings-analysis-overlap-error""#),
+        "{html}"
+    );
+    assert!(
+        html.contains("smaller than frame sets per prompt"),
+        "{html}"
+    );
+}
+
+#[test]
 fn settings_form_field_errors_have_accessible_descriptions() {
     let mut state = SettingsPageState::new(ApplicationSettings::default(), None, None, None);
     state
@@ -969,6 +1027,48 @@ fn settings_diagnostics_distinguish_draft_saved_and_active_snapshots() {
             !html.contains(hidden),
             "found protected value {hidden:?} in {html}"
         );
+    }
+}
+
+#[test]
+fn settings_diagnostics_include_draft_saved_and_active_batching_values() {
+    let temporary = tempfile::tempdir().expect("temporary settings root should be created");
+    let store = SettingsStore::new(
+        temporary.path().join("settings.json"),
+        temporary.path().join("default-data"),
+    )
+    .expect("render settings store should be valid");
+    let resolved = |frame_sets, overlap| {
+        store
+            .resolve(ApplicationSettings {
+                analysis_frame_sets_per_prompt: frame_sets,
+                analysis_overlap_frame_sets: overlap,
+                ..ApplicationSettings::default()
+            })
+            .expect("batching settings should resolve")
+    };
+    let draft = resolved(71, 11);
+    let saved = resolved(72, 12);
+    let active = resolved(73, 13);
+    let state = SettingsPageState::new(
+        draft.settings,
+        Some(saved.clone()),
+        Some(active.clone()),
+        None,
+    );
+
+    let html = render_settings(state, Some(store));
+
+    for (heading, frame_sets, overlap) in [
+        ("Draft", 71, 11),
+        ("Saved on disk", 72, 12),
+        ("Active at startup", 73, 13),
+    ] {
+        let summary = section_with_heading(&html, heading);
+        assert!(summary.contains("Frame sets per prompt"), "{summary}");
+        assert!(summary.contains("Overlapping frame sets"), "{summary}");
+        assert!(summary.contains(&format!(">{frame_sets}<")), "{summary}");
+        assert!(summary.contains(&format!(">{overlap}<")), "{summary}");
     }
 }
 

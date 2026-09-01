@@ -85,6 +85,8 @@ fn initialize_workflow(
         config.sessions_root.clone(),
         recorder.handle.clone(),
         config.openai.clone(),
+        config.analysis_frame_sets_per_prompt,
+        config.analysis_overlap_frame_sets,
     )
     .map(|workflow| InitialWorkflow(Arc::new(Mutex::new(Some(workflow)))))
     .map_err(|_| "Session workflow is unavailable.".into())
@@ -468,6 +470,7 @@ fn ShellRouter(initial_route: Route) -> Element {
 mod tests {
     use std::{
         fs,
+        num::NonZeroUsize,
         os::unix::fs::PermissionsExt,
         sync::{Arc, Mutex},
         time::Duration,
@@ -478,7 +481,9 @@ mod tests {
         session::SessionController,
     };
 
-    use super::{RecorderBootstrap, initialize_workflow, take_recorder_events};
+    use super::{
+        RecorderBootstrap, initialize_workflow, take_initial_workflow, take_recorder_events,
+    };
     use crate::{
         session_task::handle_recorder_event,
         settings::{CameraSettings, Settings, SettingsStore},
@@ -565,6 +570,30 @@ mod tests {
     }
 
     #[test]
+    fn workflow_bootstrap_copies_active_analysis_batching_settings() {
+        let (temporary, runtime, recorder) = test_recorder();
+        let store = SettingsStore::new(
+            temporary.path().join("config/settings.json"),
+            temporary.path().join("data"),
+        )
+        .expect("test settings paths should be valid");
+        let config = store
+            .resolve(Settings {
+                analysis_frame_sets_per_prompt: 7,
+                analysis_overlap_frame_sets: 2,
+                ..Settings::default()
+            })
+            .expect("test settings should resolve");
+
+        let initial = initialize_workflow(&config, &recorder).expect("workflow should initialize");
+        let workflow = take_initial_workflow(&initial).expect("workflow should be retained");
+
+        assert_eq!(workflow.analysis_frame_sets_per_prompt.get(), 7);
+        assert_eq!(workflow.analysis_overlap_frame_sets, 2);
+        runtime.shutdown().expect("runtime should shut down");
+    }
+
+    #[test]
     fn root_event_dispatch_updates_reconnecting_and_claims_one_fatal_cleanup() {
         let (temporary, runtime, recorder) = test_recorder();
         let mut workflow = Workflow::new(
@@ -572,6 +601,8 @@ mod tests {
             temporary.path().join("sessions"),
             recorder.handle.clone(),
             Some(crate::test_openai_config()),
+            NonZeroUsize::new(5).unwrap(),
+            0,
         )
         .expect("workflow should initialize");
         let request = workflow

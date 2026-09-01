@@ -1,6 +1,7 @@
 use std::{
     io::Write,
     num::NonZeroUsize,
+    ops::Range,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -35,6 +36,7 @@ pub struct Analyzer {
     checklist: String,
     frame_sets: Vec<FrameSet>,
     frame_sets_per_batch: NonZeroUsize,
+    overlap_frame_sets: usize,
     progress_path: PathBuf,
     checkpoint: AnalysisCheckpoint,
 }
@@ -46,6 +48,7 @@ impl Analyzer {
         session: Session,
         checklist: String,
         frame_sets_per_batch: NonZeroUsize,
+        overlap_frame_sets: usize,
         progress_path: PathBuf,
     ) -> Result<Self> {
         let session_id = session.id;
@@ -56,6 +59,7 @@ impl Analyzer {
             session,
             checklist,
             frame_sets_per_batch,
+            overlap_frame_sets,
             progress_path,
         )
         .inspect_err(|_| tracing::error!(session_id = %session_id, "analysis planning failed"))
@@ -66,8 +70,12 @@ impl Analyzer {
         session: Session,
         checklist: String,
         frame_sets_per_batch: NonZeroUsize,
+        overlap_frame_sets: usize,
         progress_path: PathBuf,
     ) -> Result<Self> {
+        if overlap_frame_sets >= frame_sets_per_batch.get() {
+            return Err(Error::InvalidBatchOverlap);
+        }
         let mut schedules = Vec::new();
         for camera in &session.cameras {
             let schedule = SamplingSchedule::from_session(&session, camera.id)?;
@@ -86,8 +94,14 @@ impl Analyzer {
         if frame_sets.is_empty() {
             return Err(Error::NoAnalyzableFrames);
         }
-        let plan_fingerprint = plan_fingerprint(&frame_sets, frame_sets_per_batch)?;
-        let total_batches = frame_sets.chunks(frame_sets_per_batch.get()).count();
+        let plan_fingerprint =
+            plan_fingerprint(&frame_sets, frame_sets_per_batch, overlap_frame_sets)?;
+        let stride = frame_sets_per_batch.get() - overlap_frame_sets;
+        let total_batches = frame_sets
+            .len()
+            .saturating_sub(frame_sets_per_batch.get())
+            .div_ceil(stride)
+            + 1;
         tracing::info!(session_id = %session.id, total_batches, "analysis plan ready");
         let (checkpoint, is_new) = load_or_new(
             &progress_path,
@@ -123,6 +137,7 @@ impl Analyzer {
             checklist,
             frame_sets,
             frame_sets_per_batch,
+            overlap_frame_sets,
             progress_path,
             checkpoint,
         })
@@ -151,10 +166,8 @@ impl Analyzer {
             "analysis batch started"
         );
 
-        let batch_size = self.frame_sets_per_batch.get();
-        let start = index * batch_size;
-        let end = (start + batch_size).min(self.frame_sets.len());
-        let prompt = match self.materialize_prompt(&self.frame_sets[start..end]).await {
+        let range = self.batch_range(index);
+        let prompt = match self.materialize_prompt(&self.frame_sets[range]).await {
             Ok(prompt) => prompt,
             Err(error) => {
                 tracing::error!(
@@ -185,6 +198,16 @@ impl Analyzer {
     /// Returns the complete checkpoint state most recently saved to disk.
     pub fn checkpoint(&self) -> &AnalysisCheckpoint {
         &self.checkpoint
+    }
+
+    fn batch_range(&self, index: usize) -> Range<usize> {
+        debug_assert!(index < self.checkpoint.total_batches);
+        let stride = self.frame_sets_per_batch.get() - self.overlap_frame_sets;
+        let start = index * stride;
+        start
+            ..start
+                .saturating_add(self.frame_sets_per_batch.get())
+                .min(self.frame_sets.len())
     }
 
     async fn submit_prompt<M: CompletionModel>(
@@ -314,13 +337,24 @@ fn save_checkpoint(checkpoint: &AnalysisCheckpoint, path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn plan_fingerprint(frame_sets: &[FrameSet], frame_sets_per_batch: NonZeroUsize) -> Result<String> {
+fn plan_fingerprint(
+    frame_sets: &[FrameSet],
+    frame_sets_per_batch: NonZeroUsize,
+    overlap_frame_sets: usize,
+) -> Result<String> {
     let mut hash = Sha256::new();
-    hash.update(b"leo-analysis-plan-v2\0");
+    hash.update(b"leo-analysis-plan-v3\0");
     hash.update(
         u64::try_from(frame_sets_per_batch.get())
             .map_err(|_| Error::PlanValueOverflow {
                 field: "batch size",
+            })?
+            .to_le_bytes(),
+    );
+    hash.update(
+        u64::try_from(overlap_frame_sets)
+            .map_err(|_| Error::PlanValueOverflow {
+                field: "batch overlap",
             })?
             .to_le_bytes(),
     );
@@ -514,6 +548,7 @@ mod tests {
             session(vec![camera(1, true, 2)]),
             "Start the exercise".into(),
             NonZeroUsize::new(frame_sets_per_batch).unwrap(),
+            0,
             checkpoint,
         )
         .await
@@ -622,6 +657,7 @@ mod tests {
             session(vec![camera(1, true, 2)]),
             "Start the exercise".into(),
             NonZeroUsize::new(2).unwrap(),
+            0,
             extraction_checkpoint.clone(),
         )
         .await
@@ -773,6 +809,7 @@ mod tests {
             exercise,
             "Start the exercise".into(),
             NonZeroUsize::new(2).unwrap(),
+            0,
             checkpoint.clone(),
         )
         .await
@@ -839,6 +876,7 @@ mod tests {
             first_session,
             "Start the exercise".into(),
             NonZeroUsize::new(2).unwrap(),
+            0,
             checkpoint.clone(),
         )
         .await
@@ -859,6 +897,7 @@ mod tests {
             resumed_session,
             "Start the exercise".into(),
             NonZeroUsize::new(2).unwrap(),
+            0,
             checkpoint,
         )
         .await
@@ -911,7 +950,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_rejects_changed_checklist_plan_or_warnings() {
+    async fn resume_rejects_changed_checklist_plan_batching_or_warnings() {
         let directory = tempfile::tempdir().expect("temporary directory should be created");
         let checkpoint = directory.path().join("analysis.json");
         let exercise = || session(vec![camera(1, true, 2), camera(2, false, 1)]);
@@ -920,6 +959,7 @@ mod tests {
             exercise(),
             "Start the exercise".into(),
             NonZeroUsize::new(2).unwrap(),
+            0,
             checkpoint.clone(),
         )
         .await
@@ -930,6 +970,7 @@ mod tests {
             exercise(),
             "Use a different checklist".into(),
             NonZeroUsize::new(2).unwrap(),
+            0,
             checkpoint.clone(),
         )
         .await;
@@ -943,6 +984,7 @@ mod tests {
             exercise(),
             "Start the exercise".into(),
             NonZeroUsize::new(2).unwrap(),
+            0,
             checkpoint.clone(),
         )
         .await;
@@ -951,11 +993,40 @@ mod tests {
             Err(super::Error::CheckpointPlanFingerprint)
         ));
 
+        let changed_batch_size = Analyzer::resume(
+            vec![covering_segment(1)],
+            exercise(),
+            "Start the exercise".into(),
+            NonZeroUsize::new(3).unwrap(),
+            0,
+            checkpoint.clone(),
+        )
+        .await;
+        assert!(matches!(
+            changed_batch_size,
+            Err(super::Error::CheckpointPlanFingerprint)
+        ));
+
+        let changed_overlap = Analyzer::resume(
+            vec![covering_segment(1)],
+            exercise(),
+            "Start the exercise".into(),
+            NonZeroUsize::new(2).unwrap(),
+            1,
+            checkpoint.clone(),
+        )
+        .await;
+        assert!(matches!(
+            changed_overlap,
+            Err(super::Error::CheckpointPlanFingerprint)
+        ));
+
         let changed_warnings = Analyzer::resume(
             vec![covering_segment(1), covering_segment(2)],
             exercise(),
             "Start the exercise".into(),
             NonZeroUsize::new(2).unwrap(),
+            0,
             checkpoint,
         )
         .await;
@@ -970,11 +1041,13 @@ mod tests {
         let first = plan_fingerprint(
             &fingerprint_plan(PathBuf::from("/first/location/segment.mkv")),
             NonZeroUsize::new(5).unwrap(),
+            0,
         )
         .expect("first plan should be fingerprinted");
         let second = plan_fingerprint(
             &fingerprint_plan(PathBuf::from("/different/location/segment.mkv")),
             NonZeroUsize::new(5).unwrap(),
+            0,
         )
         .expect("second plan should be fingerprinted");
 
@@ -986,17 +1059,54 @@ mod tests {
         let fingerprint = plan_fingerprint(
             &fingerprint_plan(PathBuf::from("/excluded/from/fingerprint.mkv")),
             NonZeroUsize::new(5).unwrap(),
+            0,
         )
         .expect("golden plan should be fingerprinted");
 
         assert_eq!(
             fingerprint,
-            "2e61898616fe0b02dda021e2bc83131bd38ec7e2fb1681f051934ee9a3ef288a"
+            "a3d35b83f408534773b83f3acb173d660dfd9ec20af1c5dd94e0dea4e0528a29"
+        );
+    }
+
+    #[test]
+    fn fingerprint_changes_when_only_overlap_changes() {
+        let frame_sets = fingerprint_plan(PathBuf::from("/excluded/from/fingerprint.mkv"));
+        let without_overlap =
+            plan_fingerprint(&frame_sets, NonZeroUsize::new(5).unwrap(), 0).unwrap();
+        let with_overlap = plan_fingerprint(&frame_sets, NonZeroUsize::new(5).unwrap(), 2).unwrap();
+
+        assert_ne!(without_overlap, with_overlap);
+    }
+
+    #[tokio::test]
+    async fn resume_plans_overlapping_batches_with_one_final_partial_batch() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        let mut exercise = session(vec![camera(1, true, 1)]);
+        exercise.end_offset = Duration::from_secs(10);
+        let analyzer = Analyzer::resume(
+            vec![segment(1, 0, 10_000, fixture_path())],
+            exercise,
+            "Start the exercise".into(),
+            NonZeroUsize::new(5).unwrap(),
+            2,
+            directory.path().join("analysis.json"),
+        )
+        .await
+        .expect("overlapping analysis plan should start");
+
+        assert_eq!(analyzer.frame_sets.len(), 10);
+        assert_eq!(analyzer.checkpoint.total_batches, 3);
+        assert_eq!(
+            (0..analyzer.checkpoint.total_batches)
+                .map(|index| analyzer.batch_range(index))
+                .collect::<Vec<_>>(),
+            vec![0..5, 3..8, 6..10]
         );
     }
 
     #[tokio::test]
-    async fn resume_rebuilds_the_canonical_plan_and_fixed_batches() {
+    async fn resume_rebuilds_the_canonical_plan_and_zero_overlap_batches() {
         let directory = tempfile::tempdir().expect("temporary directory should be created");
         let checkpoint = directory.path().join("analysis.json");
         let analyzer = Analyzer::resume(
@@ -1004,6 +1114,7 @@ mod tests {
             session(vec![camera(1, true, 2), camera(2, false, 1)]),
             "Start the exercise".into(),
             NonZeroUsize::new(2).unwrap(),
+            0,
             checkpoint.clone(),
         )
         .await
@@ -1026,14 +1137,32 @@ mod tests {
             }]
         );
         assert_eq!(analyzer.frame_sets_per_batch.get(), 2);
-        assert_eq!(analyzer.frame_sets.chunks(2).count(), 2);
         assert_eq!(analyzer.checkpoint.total_batches, 2);
+        assert_eq!(analyzer.batch_range(0), 0..2);
+        assert_eq!(analyzer.batch_range(1), 2..3);
         assert_eq!(analyzer.next_batch_index(), 0);
         assert_eq!(
             AnalysisCheckpoint::read(&checkpoint, Uuid::from_u128(1))
                 .expect("initial checkpoint should be readable"),
             analyzer.checkpoint
         );
+    }
+
+    #[tokio::test]
+    async fn resume_rejects_overlap_equal_to_batch_size() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+
+        let result = Analyzer::resume(
+            vec![covering_segment(1)],
+            session(vec![camera(1, true, 1)]),
+            "Start the exercise".into(),
+            NonZeroUsize::new(2).unwrap(),
+            2,
+            directory.path().join("analysis.json"),
+        )
+        .await;
+
+        assert!(matches!(result, Err(super::Error::InvalidBatchOverlap)));
     }
 
     #[tokio::test]
@@ -1045,6 +1174,7 @@ mod tests {
             session(vec![camera(1, true, 1)]),
             "Start the exercise".into(),
             NonZeroUsize::new(2).unwrap(),
+            0,
             directory.path().join("analysis.json"),
         )
         .await;

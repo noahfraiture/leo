@@ -20,6 +20,10 @@ pub struct AnalyzeSession {
     pub directory: PathBuf,
     /// Correct exercise sequence supplied to every model request.
     pub checklist: String,
+    /// Synchronized frame sets sent in each model request.
+    pub frame_sets_per_prompt: NonZeroUsize,
+    /// Frame sets repeated between adjacent model requests.
+    pub overlap_frame_sets: usize,
     pub openai: OpenAiConfig,
 }
 
@@ -48,6 +52,8 @@ where
     let AnalyzeSession {
         directory,
         checklist,
+        frame_sets_per_prompt,
+        overlap_frame_sets,
         openai,
     } = request;
     if checklist.trim().is_empty() {
@@ -84,7 +90,8 @@ where
         segments,
         session,
         checklist,
-        NonZeroUsize::new(5).expect("analysis batch size is non-zero"),
+        frame_sets_per_prompt,
+        overlap_frame_sets,
         checkpoint_path,
     )
     .await?;
@@ -106,7 +113,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, fs, path::Path};
+    use std::{cell::Cell, fs, num::NonZeroUsize, path::Path};
 
     use rig_core::{
         completion::Message,
@@ -249,6 +256,8 @@ mod tests {
         AnalyzeSession {
             directory: directory.to_owned(),
             checklist: checklist.into(),
+            frame_sets_per_prompt: NonZeroUsize::new(5).unwrap(),
+            overlap_frame_sets: 0,
             openai: OpenAiConfig {
                 api_key: "test-key".into(),
                 model: "test-model".into(),

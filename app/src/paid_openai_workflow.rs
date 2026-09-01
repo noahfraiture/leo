@@ -2,6 +2,7 @@
 
 use std::{
     fs,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     process::Command,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -48,8 +49,15 @@ async fn paid_openai_analyzes_one_local_application_session() {
         stop_timeout: Duration::from_secs(5),
     })
     .expect("paid test requires ffmpeg and ffprobe");
-    let mut workflow = Workflow::new(camera_settings(), sessions_root, handle, Some(openai))
-        .expect("workflow should initialize");
+    let mut workflow = Workflow::new(
+        camera_settings(),
+        sessions_root,
+        handle,
+        Some(openai),
+        NonZeroUsize::new(5).unwrap(),
+        0,
+    )
+    .expect("workflow should initialize");
     workflow
         .refresh_sessions()
         .expect("session should be discovered");
@@ -186,6 +194,8 @@ async fn run_paid_evaluation(
         AnalyzeSession {
             directory,
             checklist: checklist.into(),
+            frame_sets_per_prompt: NonZeroUsize::new(5).unwrap(),
+            overlap_frame_sets: 0,
             openai: openai.clone(),
         },
         |_| {},

@@ -108,6 +108,10 @@ pub enum ValidationError {
     InvalidSamplingCadence { camera_id: u32 },
     #[error("recorder timeout must be positive and fit runtime limits")]
     InvalidRecorderTimeout,
+    #[error("analysis frame sets per prompt must be positive and fit runtime limits")]
+    InvalidAnalysisFrameSetsPerPrompt,
+    #[error("analysis overlap must fit runtime limits and be smaller than frame sets per prompt")]
+    InvalidAnalysisOverlapFrameSets,
     #[error("custom data root must be absolute: {path}")]
     DataRootNotAbsolute { path: PathBuf },
     #[error("OpenAI base URL must be an absolute HTTP or HTTPS URL")]

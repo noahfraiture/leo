@@ -22,6 +22,8 @@ pub struct SettingsDraft {
     pub cameras: Vec<CameraDraft>,
     pub data_root: Option<PathBuf>,
     pub recorder_timeout_secs: String,
+    pub analysis_frame_sets_per_prompt: String,
+    pub analysis_overlap_frame_sets: String,
     pub openai: OpenAiDraft,
     pub log_level: LogLevel,
 }
@@ -52,6 +54,8 @@ pub enum SettingsField {
     CameraSampleEvery(u32),
     DataRoot,
     RecorderTimeout,
+    AnalysisFrameSetsPerPrompt,
+    AnalysisOverlapFrameSets,
     OpenAiBaseUrl,
     General,
 }
@@ -187,12 +191,38 @@ impl SettingsPageState {
                 );
                 0
             });
+        let analysis_frame_sets_per_prompt = self
+            .draft
+            .analysis_frame_sets_per_prompt
+            .parse::<u64>()
+            .ok()
+            .filter(|frame_sets| *frame_sets > 0)
+            .unwrap_or_else(|| {
+                errors.insert(
+                    SettingsField::AnalysisFrameSetsPerPrompt,
+                    "Enter a positive whole number within runtime limits.".into(),
+                );
+                0
+            });
+        let analysis_overlap_frame_sets = self
+            .draft
+            .analysis_overlap_frame_sets
+            .parse::<u64>()
+            .unwrap_or_else(|_| {
+                errors.insert(
+                    SettingsField::AnalysisOverlapFrameSets,
+                    "Enter a nonnegative whole number.".into(),
+                );
+                0
+            });
         let settings = Settings {
             schema_version: self.draft.schema_version,
             next_camera_id: self.draft.next_camera_id,
             cameras,
             data_root: self.draft.data_root.clone(),
             recorder_timeout_secs,
+            analysis_frame_sets_per_prompt,
+            analysis_overlap_frame_sets,
             openai: OpenAiSettings {
                 api_key: self.draft.openai.api_key.clone(),
                 model: self.draft.openai.model.clone(),
@@ -227,6 +257,14 @@ impl SettingsPageState {
                     ValidationError::InvalidOpenAiBaseUrl => (
                         SettingsField::OpenAiBaseUrl,
                         "Enter an absolute HTTP or HTTPS URL.",
+                    ),
+                    ValidationError::InvalidAnalysisFrameSetsPerPrompt => (
+                        SettingsField::AnalysisFrameSetsPerPrompt,
+                        "Enter a positive whole number within runtime limits.",
+                    ),
+                    ValidationError::InvalidAnalysisOverlapFrameSets => (
+                        SettingsField::AnalysisOverlapFrameSets,
+                        "Enter a nonnegative whole number within runtime limits and smaller than frame sets per prompt.",
                     ),
                     ValidationError::UnsupportedSchemaVersion { .. }
                     | ValidationError::InvalidNextCameraId
@@ -278,6 +316,8 @@ impl From<Settings> for SettingsDraft {
                 .collect(),
             data_root: settings.data_root,
             recorder_timeout_secs: settings.recorder_timeout_secs.to_string(),
+            analysis_frame_sets_per_prompt: settings.analysis_frame_sets_per_prompt.to_string(),
+            analysis_overlap_frame_sets: settings.analysis_overlap_frame_sets.to_string(),
             openai: OpenAiDraft {
                 api_key: settings.openai.api_key,
                 model: settings.openai.model,
@@ -290,7 +330,7 @@ impl From<Settings> for SettingsDraft {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{num::NonZeroUsize, time::Duration};
 
     use backend::recording::RecorderSettings;
 
@@ -315,6 +355,8 @@ mod tests {
                 retry_delay: Duration::from_secs(1),
                 stop_timeout: Duration::from_secs(5),
             },
+            analysis_frame_sets_per_prompt: NonZeroUsize::new(5).unwrap(),
+            analysis_overlap_frame_sets: 0,
         }
     }
 
@@ -396,5 +438,53 @@ mod tests {
         };
         assert!(errors.contains_key(&SettingsField::CameraRtspUrl(1)));
         assert!(errors.contains_key(&SettingsField::RecorderTimeout));
+    }
+
+    #[test]
+    fn draft_round_trips_analysis_batching_fields() {
+        let settings = Settings {
+            analysis_frame_sets_per_prompt: 7,
+            analysis_overlap_frame_sets: 2,
+            ..Settings::default()
+        };
+        let mut state = SettingsPageState::new(settings, None, None, None);
+
+        assert_eq!(state.draft.analysis_frame_sets_per_prompt, "7");
+        assert_eq!(state.draft.analysis_overlap_frame_sets, "2");
+
+        state.draft.analysis_frame_sets_per_prompt = "9".into();
+        state.draft.analysis_overlap_frame_sets = "3".into();
+        let submitted = state.submission().expect("batching draft should be valid");
+        assert_eq!(submitted.analysis_frame_sets_per_prompt, 9);
+        assert_eq!(submitted.analysis_overlap_frame_sets, 3);
+    }
+
+    #[test]
+    fn draft_maps_analysis_batching_errors_to_their_fields() {
+        let mut state = SettingsPageState::new(Settings::default(), None, None, None);
+        state.draft.analysis_frame_sets_per_prompt.clear();
+        state.draft.analysis_overlap_frame_sets = "-1".into();
+
+        let errors = match state.submission() {
+            Err(errors) => errors,
+            Ok(_) => panic!("invalid batching draft should fail"),
+        };
+        assert!(errors.contains_key(&SettingsField::AnalysisFrameSetsPerPrompt));
+        assert!(errors.contains_key(&SettingsField::AnalysisOverlapFrameSets));
+
+        state.draft.analysis_frame_sets_per_prompt = "5".into();
+        state.draft.analysis_overlap_frame_sets = "5".into();
+        let errors = match state.submission() {
+            Err(errors) => errors,
+            Ok(_) => panic!("overlapping batching draft should fail"),
+        };
+        assert_eq!(
+            errors
+                .get(&SettingsField::AnalysisOverlapFrameSets)
+                .map(String::as_str),
+            Some(
+                "Enter a nonnegative whole number within runtime limits and smaller than frame sets per prompt."
+            )
+        );
     }
 }

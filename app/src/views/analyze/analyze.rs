@@ -314,7 +314,7 @@ fn AnalysisAction(
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
+    use std::{fs, num::NonZeroUsize, os::unix::fs::PermissionsExt, time::Duration};
 
     use backend::{
         recording::{RecorderSettings, spawn_for_test},
@@ -375,6 +375,8 @@ mod tests {
             session_root,
             recorder,
             Some(crate::test_openai_config()),
+            NonZeroUsize::new(5).unwrap(),
+            0,
         )
         .expect("workflow should load the completed session");
         let selected_id = workflow
