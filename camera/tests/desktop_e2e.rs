@@ -2,10 +2,13 @@
 
 use std::{
     env,
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream, UdpSocket},
-    os::unix::process::CommandExt,
+    os::unix::{
+        fs::{OpenOptionsExt, PermissionsExt},
+        process::CommandExt,
+    },
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{Arc, Mutex},
@@ -39,17 +42,27 @@ unsafe extern "C" {
 #[ignore = "requires a macOS GUI session, MediaMTX, FFmpeg, and FFprobe"]
 fn desktop_operator_flow_records_two_cameras_and_analyzes() {
     let real_openai = env::var("LEO_E2E_REAL_OPENAI").as_deref() == Ok("1");
-    if real_openai {
+    let real_provider = if real_openai {
+        assert_eq!(
+            env::var("LEO_E2E_REAL_OPENAI").as_deref(),
+            Ok("1"),
+            "real OpenAI E2E requires LEO_E2E_REAL_OPENAI=1"
+        );
         assert_eq!(
             env::var("LEO_RUN_PAID_OPENAI_TEST").as_deref(),
             Ok("1"),
             "real OpenAI E2E requires LEO_RUN_PAID_OPENAI_TEST=1"
         );
-        require_environment("OPENAI_API_KEY");
-        require_environment("ANALYSIS_MODEL");
-    }
+        Some((
+            required_environment("OPENAI_API_KEY"),
+            required_environment("ANALYSIS_MODEL"),
+        ))
+    } else {
+        None
+    };
 
     assert_preview_ports_available();
+    let settings_directory = tempfile::tempdir().expect("create desktop E2E settings directory");
     let temporary = if real_openai {
         None
     } else {
@@ -64,46 +77,58 @@ fn desktop_operator_flow_records_two_cameras_and_analyzes() {
     }
     let logs = root.join("process-logs");
     fs::create_dir(&logs).expect("create process log directory");
+    let data_root = root.join("data");
+    fs::create_dir(&data_root).expect("create E2E data root");
 
     let (camera_1_rtsp, mut camera_1) = start_camera("camera 1", &fixture("salon-1.mp4"), &logs);
     let (camera_2_rtsp, mut camera_2) = start_camera("camera 2", &fixture("salon-2.mp4"), &logs);
 
-    let config_path = root.join("cameras.json");
-    fs::write(
-        &config_path,
-        serde_json::to_vec_pretty(&json!([
-            {
-                "id": 1,
-                "name": "Salon 1",
-                "rtspUrl": format!("rtsp://{camera_1_rtsp}/axis-media/media.amp"),
-                "enabled": true,
-                "sampleEveryMs": 1_000
-            },
-            {
-                "id": 2,
-                "name": "Salon 2",
-                "rtspUrl": format!("rtsp://{camera_2_rtsp}/axis-media/media.amp"),
-                "enabled": true,
-                "sampleEveryMs": 1_000
-            }
-        ]))
-        .expect("serialize desktop E2E camera configuration"),
-    )
-    .expect("write desktop E2E camera configuration");
-
     let mock_openai = (!real_openai).then(MockOpenAi::start);
-    let data_root = root.join("data");
+    let mock_base_url = mock_openai
+        .as_ref()
+        .map(|mock| format!("http://{}/v1", mock.address));
+    let settings_path = if let Some((api_key, model)) = &real_provider {
+        write_desktop_settings(
+            settings_directory.path(),
+            &data_root,
+            [camera_1_rtsp, camera_2_rtsp],
+            api_key,
+            model,
+            None,
+        )
+    } else {
+        write_desktop_settings(
+            settings_directory.path(),
+            &data_root,
+            [camera_1_rtsp, camera_2_rtsp],
+            "local-e2e-key",
+            "local-e2e-model",
+            Some(
+                mock_base_url
+                    .as_deref()
+                    .expect("mock mode should have a provider URL"),
+            ),
+        )
+    };
+    drop(real_provider);
     let driver_ready = root.join("driver-ready");
     let driver_result = root.join("driver-result");
     let mut app = Command::new(env!("CARGO_BIN_EXE_desktop-e2e-app"));
-    app.current_dir(workspace_root())
-        .env("LEO_CAMERA_CONFIG", &config_path)
-        .env("LEO_DATA_DIR", &data_root)
-        .env("LEO_RECORDER_TIMEOUT_SECS", "10")
+    app.arg(&settings_path)
         .env("LEO_DESKTOP_E2E_READY", &driver_ready)
-        .env("LEO_DESKTOP_E2E_RESULT", &driver_result)
-        .env("RUST_LOG", "info");
-    if let Some(mock) = &mock_openai {
+        .env("LEO_DESKTOP_E2E_RESULT", &driver_result);
+    for variable in [
+        "LEO_CAMERA_CONFIG",
+        "LEO_DATA_DIR",
+        "LEO_RECORDER_TIMEOUT_SECS",
+        "RUST_LOG",
+        "OPENAI_API_KEY",
+        "ANALYSIS_MODEL",
+        "OPENAI_BASE_URL",
+    ] {
+        app.env_remove(variable);
+    }
+    if mock_openai.is_some() {
         for variable in [
             "HTTP_PROXY",
             "HTTPS_PROXY",
@@ -114,13 +139,7 @@ fn desktop_operator_flow_records_two_cameras_and_analyzes() {
         ] {
             app.env_remove(variable);
         }
-        app.env("OPENAI_API_KEY", "local-e2e-key")
-            .env("ANALYSIS_MODEL", "local-e2e-model")
-            .env("OPENAI_BASE_URL", format!("http://{}/v1", mock.address))
-            .env("NO_PROXY", "*")
-            .env("no_proxy", "*");
-    } else {
-        app.env_remove("OPENAI_BASE_URL");
+        app.env("NO_PROXY", "*").env("no_proxy", "*");
     }
     let mut app = ProcessGuard::spawn("desktop app", &mut app, &logs);
 
@@ -219,6 +238,78 @@ fn desktop_operator_flow_records_two_cameras_and_analyzes() {
 }
 
 #[test]
+fn desktop_settings_file_is_strict_private_and_complete() {
+    let settings_directory = tempfile::tempdir().expect("create settings directory");
+    let data_directory = tempfile::tempdir().expect("create data directory");
+    let data_root = data_directory.path().join("data");
+    fs::create_dir(&data_root).expect("create data root");
+    let camera_addresses = [
+        "127.0.0.1:8554".parse().expect("parse camera 1 address"),
+        "127.0.0.1:8555".parse().expect("parse camera 2 address"),
+    ];
+    let mock_base_url = "http://127.0.0.1:3000/v1";
+
+    let path = write_desktop_settings(
+        settings_directory.path(),
+        &data_root,
+        camera_addresses,
+        "local-e2e-key",
+        "local-e2e-model",
+        Some(mock_base_url),
+    );
+
+    let bytes = fs::read(&path).expect("read desktop settings");
+    assert!(bytes.ends_with(b"\n"), "settings should end with a newline");
+    let settings: Value = serde_json::from_slice(&bytes).expect("parse desktop settings");
+    let expected = json!({
+        "schemaVersion": 1,
+        "nextCameraId": 3,
+        "cameras": [
+            {
+                "id": 1,
+                "name": "Salon 1",
+                "rtspUrl": format!("rtsp://{}/axis-media/media.amp", camera_addresses[0]),
+                "initiallyIncludedInAnalysis": true,
+                "sampleEveryMs": 1_000
+            },
+            {
+                "id": 2,
+                "name": "Salon 2",
+                "rtspUrl": format!("rtsp://{}/axis-media/media.amp", camera_addresses[1]),
+                "initiallyIncludedInAnalysis": true,
+                "sampleEveryMs": 1_000
+            }
+        ],
+        "dataRoot": data_root,
+        "recorderTimeoutSecs": 10,
+        "openai": {
+            "apiKey": "local-e2e-key",
+            "model": "local-e2e-model",
+            "baseUrl": mock_base_url
+        },
+        "logLevel": "info"
+    });
+    assert!(
+        settings == expected,
+        "settings should match the complete strict E2E schema"
+    );
+    assert!(
+        settings
+            .get("dataRoot")
+            .and_then(Value::as_str)
+            .is_some_and(|path| Path::new(path).is_absolute() && Path::new(path) == data_root),
+        "settings should contain the absolute E2E data root"
+    );
+
+    let mode = fs::metadata(path)
+        .expect("read settings metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert!(mode == 0o600, "settings should have mode 0o600");
+}
+
+#[test]
 fn process_group_probe_detects_a_live_descendant_after_the_leader_exits() {
     let temporary = tempfile::tempdir().expect("create process group test root");
     let mut command = Command::new("sh");
@@ -265,11 +356,67 @@ fn request_diagnostics_redact_every_image_url() {
     assert!(diagnostics.contains("<redacted image>"));
 }
 
-fn require_environment(name: &str) {
+fn write_desktop_settings(
+    directory: &Path,
+    data_root: &Path,
+    camera_addresses: [SocketAddr; 2],
+    api_key: &str,
+    model: &str,
+    base_url: Option<&str>,
+) -> PathBuf {
     assert!(
-        env::var(name).is_ok_and(|value| !value.trim().is_empty()),
-        "real OpenAI E2E requires {name}"
+        directory.is_absolute(),
+        "settings directory must be absolute"
     );
+    assert!(
+        data_root.is_absolute() && data_root.is_dir(),
+        "data root must be an existing absolute directory"
+    );
+    let cameras = camera_addresses
+        .into_iter()
+        .enumerate()
+        .map(|(index, address)| {
+            let id = index + 1;
+            json!({
+                "id": id,
+                "name": format!("Salon {id}"),
+                "rtspUrl": format!("rtsp://{address}/axis-media/media.amp"),
+                "initiallyIncludedInAnalysis": true,
+                "sampleEveryMs": 1_000
+            })
+        })
+        .collect::<Vec<_>>();
+    let settings = json!({
+        "schemaVersion": 1,
+        "nextCameraId": 3,
+        "cameras": cameras,
+        "dataRoot": data_root,
+        "recorderTimeoutSecs": 10,
+        "openai": {
+            "apiKey": api_key,
+            "model": model,
+            "baseUrl": base_url
+        },
+        "logLevel": "info"
+    });
+    let path = directory.join("settings.json");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .expect("create private desktop settings");
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+        .expect("set private desktop settings permissions");
+    serde_json::to_writer_pretty(&mut file, &settings).expect("serialize desktop settings");
+    file.write_all(b"\n").expect("finish desktop settings");
+    path
+}
+
+fn required_environment(name: &str) -> String {
+    let value = env::var(name).unwrap_or_else(|_| panic!("real OpenAI E2E requires {name}"));
+    assert!(!value.trim().is_empty(), "real OpenAI E2E requires {name}");
+    value
 }
 
 fn fixture(name: &str) -> PathBuf {
@@ -288,9 +435,13 @@ fn workspace_root() -> PathBuf {
 }
 
 fn real_openai_root() -> PathBuf {
-    let root = env::var_os("LEO_E2E_OUTPUT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
+    let root = match env::var_os("LEO_E2E_OUTPUT_DIR") {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            assert!(path.is_absolute(), "LEO_E2E_OUTPUT_DIR must be absolute");
+            path
+        }
+        None => {
             let utc_ms = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("system clock should follow Unix epoch")
@@ -298,7 +449,8 @@ fn real_openai_root() -> PathBuf {
             workspace_root()
                 .join("target/desktop-e2e-real")
                 .join(utc_ms.to_string())
-        });
+        }
+    };
     assert!(
         !root.exists(),
         "real OpenAI E2E output already exists: {}",

@@ -2,7 +2,10 @@
 
 use std::{fs, path::PathBuf};
 
+use backend::analysis::OpenAiConfig;
 use dioxus::{desktop::DesktopContext, prelude::*};
+
+use crate::settings::ResolvedSettings;
 
 const DRIVER_SCRIPT: &str = r#"
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -102,6 +105,7 @@ const input = (element, value) => {
 #[component]
 pub fn DesktopE2eDriver() -> Element {
     let desktop = consume_context::<DesktopContext>();
+    let resolved = consume_context::<ResolvedSettings>();
     use_hook(move || {
         let ready_path = environment_path("LEO_DESKTOP_E2E_READY")?;
         let result_path = environment_path("LEO_DESKTOP_E2E_RESULT")?;
@@ -109,11 +113,10 @@ pub fn DesktopE2eDriver() -> Element {
             tracing::error!(path = %ready_path.display(), %error, "desktop E2E ready handshake failed");
         }
 
-        let base_url = std::env::var("OPENAI_BASE_URL").ok();
+        let openai = resolved.openai.as_ref();
+        let base_url = openai.and_then(|config| config.base_url.as_deref());
         let real_openai = std::env::var("LEO_E2E_REAL_OPENAI").ok();
         let paid_openai = std::env::var("LEO_RUN_PAID_OPENAI_TEST").ok();
-        let api_key = std::env::var("OPENAI_API_KEY").ok();
-        let model = std::env::var("ANALYSIS_MODEL").ok();
         let proxy_configured = [
             "HTTP_PROXY",
             "HTTPS_PROXY",
@@ -127,17 +130,9 @@ pub fn DesktopE2eDriver() -> Element {
         let no_proxy = std::env::var("NO_PROXY")
             .ok()
             .or_else(|| std::env::var("no_proxy").ok());
-        if !provider_configuration_is_safe(
-            base_url.as_deref(),
-            real_openai.as_deref(),
-            paid_openai.as_deref(),
-            api_key.as_deref(),
-            model.as_deref(),
-        ) || !loopback_proxy_is_bypassed(
-            base_url.as_deref(),
-            proxy_configured,
-            no_proxy.as_deref(),
-        ) {
+        if !provider_configuration_is_safe(openai, real_openai.as_deref(), paid_openai.as_deref())
+            || !loopback_proxy_is_bypassed(base_url, proxy_configured, no_proxy.as_deref())
+        {
             if let Err(error) = fs::write(
                 &result_path,
                 b"error: desktop E2E provider safety gate rejected configuration\n",
@@ -169,13 +164,17 @@ fn environment_path(name: &str) -> Option<PathBuf> {
 }
 
 fn provider_configuration_is_safe(
-    base_url: Option<&str>,
+    openai: Option<&OpenAiConfig>,
     real_openai: Option<&str>,
     paid_openai: Option<&str>,
-    api_key: Option<&str>,
-    model: Option<&str>,
 ) -> bool {
-    if let Some(base_url) = base_url {
+    let Some(openai) = openai else {
+        return false;
+    };
+    if openai.api_key.trim().is_empty() || openai.model.trim().is_empty() {
+        return false;
+    }
+    if let Some(base_url) = openai.base_url.as_deref() {
         return url::Url::parse(base_url).is_ok_and(|url| {
             matches!(url.scheme(), "http" | "https")
                 && match url.host() {
@@ -186,10 +185,7 @@ fn provider_configuration_is_safe(
         });
     }
 
-    real_openai == Some("1")
-        && paid_openai == Some("1")
-        && api_key.is_some_and(|value| !value.trim().is_empty())
-        && model.is_some_and(|value| !value.trim().is_empty())
+    real_openai == Some("1") && paid_openai == Some("1")
 }
 
 fn loopback_proxy_is_bypassed(
@@ -204,52 +200,90 @@ fn loopback_proxy_is_bypassed(
 
 #[cfg(test)]
 mod tests {
+    use backend::analysis::OpenAiConfig;
+
     use super::{loopback_proxy_is_bypassed, provider_configuration_is_safe};
 
+    fn openai_config(api_key: &str, model: &str, base_url: Option<&str>) -> OpenAiConfig {
+        OpenAiConfig {
+            api_key: api_key.into(),
+            model: model.into(),
+            base_url: base_url.map(str::to_owned),
+        }
+    }
+
     #[test]
-    fn provider_configuration_requires_loopback_or_both_paid_gates() {
+    fn active_provider_configuration_requires_loopback_or_both_paid_gates() {
         assert!(provider_configuration_is_safe(
-            Some("http://127.0.0.1:3000/v1"),
-            None,
-            None,
+            Some(&openai_config(
+                "key",
+                "model",
+                Some("http://127.42.0.1:3000/v1"),
+            )),
             None,
             None,
         ));
         assert!(provider_configuration_is_safe(
-            Some("http://[::1]:3000/v1"),
-            None,
-            None,
+            Some(&openai_config("key", "model", Some("http://[::1]:3000/v1"))),
             None,
             None,
         ));
         assert!(provider_configuration_is_safe(
-            None,
+            Some(&openai_config("key", "model", None)),
             Some("1"),
             Some("1"),
-            Some("key"),
-            Some("model"),
         ));
 
         for configuration in [
-            (None, None, None, None, None),
-            (Some("https://api.openai.com/v1"), None, None, None, None),
-            (Some("http://localhost:3000/v1"), None, None, None, None),
-            (None, Some("1"), None, Some("key"), Some("model")),
-            (None, Some("1"), Some("1"), Some(" "), Some("model")),
+            (None, None, None),
             (
-                Some("https://api.openai.com/v1"),
+                Some(openai_config(
+                    "key",
+                    "model",
+                    Some("https://api.openai.com/v1"),
+                )),
+                None,
+                None,
+            ),
+            (
+                Some(openai_config(
+                    "key",
+                    "model",
+                    Some("http://localhost:3000/v1"),
+                )),
+                None,
+                None,
+            ),
+            (Some(openai_config("key", "model", None)), Some("1"), None),
+            (
+                Some(openai_config(" ", "model", None)),
                 Some("1"),
                 Some("1"),
-                Some("key"),
-                Some("model"),
+            ),
+            (Some(openai_config("key", " ", None)), Some("1"), Some("1")),
+            (
+                Some(openai_config(
+                    "key",
+                    "model",
+                    Some("https://api.openai.com/v1"),
+                )),
+                Some("1"),
+                Some("1"),
+            ),
+            (
+                Some(openai_config(
+                    " ",
+                    "model",
+                    Some("http://127.0.0.1:3000/v1"),
+                )),
+                None,
+                None,
             ),
         ] {
             assert!(!provider_configuration_is_safe(
-                configuration.0,
+                configuration.0.as_ref(),
                 configuration.1,
                 configuration.2,
-                configuration.3,
-                configuration.4,
             ));
         }
     }

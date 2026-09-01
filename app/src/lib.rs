@@ -140,6 +140,16 @@ pub fn launch() {
     }
 }
 
+#[cfg(feature = "desktop-e2e")]
+#[doc(hidden)]
+pub fn launch_desktop_e2e(settings_path: std::path::PathBuf) {
+    let default_data_root = settings_path
+        .parent()
+        .expect("E2E settings path should have a parent")
+        .join("default-data");
+    launch_with_store(SettingsStore::new(settings_path, default_data_root).unwrap());
+}
+
 fn launch_with_store(store: SettingsStore) {
     launch_with_store_result(Ok(store));
 }
