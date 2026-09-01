@@ -5,6 +5,8 @@ use std::{io, path::PathBuf};
 pub enum Error {
     #[error("a session can only start while the workflow is idle")]
     StartUnavailable,
+    #[error("no cameras are configured; add a camera in Settings before starting a session")]
+    NoCamerasConfigured,
     #[error("a session can only stop while the workflow is active")]
     StopUnavailable,
     #[error("analysis is already running")]

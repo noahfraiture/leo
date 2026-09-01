@@ -59,6 +59,19 @@ pub enum LogLevel {
     Trace,
 }
 
+impl LogLevel {
+    /// Returns the tracing filter directive for this persisted level.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "debug",
+            Self::Trace => "trace",
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -209,6 +222,19 @@ mod tests {
         assert!(settings.cameras.is_empty());
         assert_eq!(settings.log_level, LogLevel::Info);
         settings.validate().unwrap();
+    }
+
+    #[test]
+    fn log_levels_project_to_filter_directives() {
+        for (level, expected) in [
+            (LogLevel::Error, "error"),
+            (LogLevel::Warn, "warn"),
+            (LogLevel::Info, "info"),
+            (LogLevel::Debug, "debug"),
+            (LogLevel::Trace, "trace"),
+        ] {
+            assert_eq!(level.as_str(), expected);
+        }
     }
 
     #[test]

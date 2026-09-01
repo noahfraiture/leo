@@ -38,7 +38,7 @@ use super::{
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// One camera source supervised by the host recorder.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RecordingCamera {
     /// Stable camera ID used by recorder events and the output directory name.
     pub id: u32,

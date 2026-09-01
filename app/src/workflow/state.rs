@@ -12,13 +12,13 @@ use backend::{
 use uuid::Uuid;
 
 use super::Error;
-use crate::camera_config::CameraConfig;
+use crate::settings::CameraSettings;
 
-const MODEL_CONFIG_ERROR: &str = "Analysis requires OPENAI_API_KEY and ANALYSIS_MODEL.";
+const MODEL_CONFIG_ERROR: &str = "Analysis requires an OpenAI API key and model in Settings.";
 
 /// One camera's operator-facing configuration, sampling participation, and recorder health.
 pub struct CameraState {
-    pub config: CameraConfig,
+    pub config: CameraSettings,
     pub participating: bool,
     pub recorder_status: RecorderStatus,
 }
@@ -90,7 +90,7 @@ pub struct Workflow {
 impl Workflow {
     /// Builds initial camera state and discovers completed sessions from disk.
     pub fn new(
-        cameras: Vec<CameraConfig>,
+        cameras: Vec<CameraSettings>,
         session_root: PathBuf,
         recorder: RecorderHandle,
         openai: Option<OpenAiConfig>,
@@ -99,7 +99,7 @@ impl Workflow {
         let cameras = cameras
             .into_iter()
             .map(|config| CameraState {
-                participating: config.enabled,
+                participating: config.initially_included_in_analysis,
                 config,
                 recorder_status: RecorderStatus::Stopped,
             })
@@ -218,6 +218,9 @@ impl Workflow {
         }
         if self.running_analysis_id.is_some() {
             return Err(Error::AnalysisRunning);
+        }
+        if self.cameras.is_empty() {
+            return Err(Error::NoCamerasConfigured);
         }
 
         create_dir_all(&self.session_root)?;
@@ -570,6 +573,7 @@ mod tests {
     use backend::{
         analysis::{
             AnalysisCheckpoint, AnalysisResponse, AnalysisWarning, ChecklistProgress, Observation,
+            OpenAiConfig,
         },
         recording::{
             RecorderEvent, RecorderRuntime, RecorderSettings, RecorderStatus, spawn_for_test,
@@ -581,7 +585,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{Error, SessionRunState, Workflow};
-    use crate::camera_config::CameraConfig;
+    use crate::settings::CameraSettings;
 
     const START_UTC_MS: i64 = 1_786_552_800_000;
 
@@ -593,6 +597,10 @@ mod tests {
 
     impl Harness {
         fn new() -> Self {
+            Self::with(camera_settings(), Some(crate::test_openai_config()))
+        }
+
+        fn with(cameras: Vec<CameraSettings>, openai: Option<OpenAiConfig>) -> Self {
             let temporary = tempfile::tempdir().expect("temporary root should be created");
             let executable = temporary.path().join("successful-preflight");
             fs::write(&executable, "#!/bin/sh\nexit 0\n")
@@ -609,13 +617,9 @@ mod tests {
                 executable,
             )
             .expect("test recorder runtime should start");
-            let workflow = Workflow::new(
-                camera_configs(),
-                temporary.path().join("sessions"),
-                recorder,
-                Some(crate::test_openai_config()),
-            )
-            .expect("workflow should initialize");
+            let workflow =
+                Workflow::new(cameras, temporary.path().join("sessions"), recorder, openai)
+                    .expect("workflow should initialize");
 
             Self {
                 _temporary: temporary,
@@ -641,20 +645,20 @@ mod tests {
         }
     }
 
-    fn camera_configs() -> Vec<CameraConfig> {
+    fn camera_settings() -> Vec<CameraSettings> {
         vec![
-            CameraConfig {
+            CameraSettings {
                 id: 1,
                 name: "Salon 1".into(),
                 rtsp_url: "rtsp://camera-one.example/live".into(),
-                enabled: true,
+                initially_included_in_analysis: true,
                 sample_every_ms: 1_000,
             },
-            CameraConfig {
+            CameraSettings {
                 id: 2,
                 name: "Salon 2".into(),
                 rtsp_url: "rtsp://camera-two.example/live".into(),
-                enabled: false,
+                initially_included_in_analysis: false,
                 sample_every_ms: 2_000,
             },
         ]
@@ -931,6 +935,19 @@ mod tests {
                 .all(|camera| camera.recorder_status == RecorderStatus::Starting)
         );
 
+        harness.shutdown();
+    }
+
+    #[test]
+    fn empty_camera_start_is_rejected_before_creating_storage() {
+        let mut harness = Harness::with(Vec::new(), None);
+        let root = harness.workflow.session_root.clone();
+
+        assert!(matches!(
+            harness.workflow.begin_start(123),
+            Err(Error::NoCamerasConfigured)
+        ));
+        assert!(!root.exists());
         harness.shutdown();
     }
 
@@ -1610,7 +1627,12 @@ mod tests {
 
     #[test]
     fn analysis_request_owns_the_startup_provider_configuration() {
-        let mut harness = Harness::new();
+        let config = OpenAiConfig {
+            api_key: "active-key".into(),
+            model: "active-model".into(),
+            base_url: Some("http://127.0.0.1:9000/v1".into()),
+        };
+        let mut harness = Harness::with(camera_settings(), Some(config.clone()));
         let session_id = Uuid::from_u128(38);
         prepare_analysis_session(&mut harness, session_id, None);
 
@@ -1619,7 +1641,7 @@ mod tests {
             .begin_analysis("Complete the exercise".into())
             .expect("analysis should begin");
 
-        assert!(request.openai == crate::test_openai_config());
+        assert!(request.openai == config);
         harness.shutdown();
     }
 

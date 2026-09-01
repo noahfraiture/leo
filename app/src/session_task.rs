@@ -442,7 +442,7 @@ mod tests {
         spawn_start_session, spawn_stop_session, start_is_current,
     };
     use crate::{
-        camera_config::CameraConfig,
+        settings::CameraSettings,
         workflow::{Error, FaultSessionRequest, SessionRunState, Workflow},
     };
 
@@ -485,7 +485,7 @@ mod tests {
 
         fn workflow(&self) -> Workflow {
             Workflow::new(
-                camera_configs(),
+                camera_settings(),
                 self.session_root(),
                 self.recorder.clone(),
                 Some(crate::test_openai_config()),
@@ -510,20 +510,20 @@ mod tests {
         }
     }
 
-    fn camera_configs() -> Vec<CameraConfig> {
+    fn camera_settings() -> Vec<CameraSettings> {
         vec![
-            CameraConfig {
+            CameraSettings {
                 id: 1,
                 name: "Salon 1".into(),
                 rtsp_url: "rtsp://camera-one.example/live".into(),
-                enabled: true,
+                initially_included_in_analysis: true,
                 sample_every_ms: 1_000,
             },
-            CameraConfig {
+            CameraSettings {
                 id: 2,
                 name: "Salon 2".into(),
                 rtsp_url: "rtsp://camera-two.example/live".into(),
-                enabled: false,
+                initially_included_in_analysis: false,
                 sample_every_ms: 2_000,
             },
         ]

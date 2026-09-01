@@ -10,6 +10,9 @@ pub fn Monitor() -> Element {
     let mut workflow = use_context::<Signal<Workflow>>();
 
     match use_context::<PreviewState>() {
+        PreviewState::NoCameras => rsx! {
+            p { class: "p-2", "No cameras are configured" }
+        },
         PreviewState::Unavailable { message } => {
             let cameras = {
                 let state = workflow.read();

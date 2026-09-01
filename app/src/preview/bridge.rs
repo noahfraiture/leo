@@ -84,6 +84,7 @@ pub struct PreviewFeed {
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) enum PreviewState {
+    NoCameras,
     Ready {
         feeds: Vec<PreviewFeed>,
         script_url: String,

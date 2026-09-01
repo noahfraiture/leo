@@ -27,9 +27,9 @@ use uuid::Uuid;
 
 use crate::{
     App, Bootstrap, Route,
-    camera_config::CameraConfig,
     preview::{PreviewFeed, PreviewState},
     session_task::handle_recorder_event,
+    settings::CameraSettings,
     workflow::Workflow,
 };
 
@@ -74,6 +74,10 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        Self::with_cameras(camera_settings())
+    }
+
+    fn with_cameras(cameras: Vec<CameraSettings>) -> Self {
         let temporary = tempfile::tempdir().expect("temporary render root should be created");
         let executable = temporary.path().join("successful-preflight");
         fs::write(&executable, "#!/bin/sh\nexit 0\n")
@@ -91,7 +95,7 @@ impl Harness {
         )
         .expect("test recorder runtime should start");
         let workflow = Workflow::new(
-            camera_configs(),
+            cameras,
             temporary.path().join("sessions"),
             recorder,
             Some(crate::test_openai_config()),
@@ -164,20 +168,20 @@ impl Drop for Harness {
     }
 }
 
-fn camera_configs() -> Vec<CameraConfig> {
+fn camera_settings() -> Vec<CameraSettings> {
     vec![
-        CameraConfig {
+        CameraSettings {
             id: 17,
             name: "Salon 1".into(),
             rtsp_url: "rtsp://camera-one.example/live".into(),
-            enabled: true,
+            initially_included_in_analysis: true,
             sample_every_ms: 1_000,
         },
-        CameraConfig {
+        CameraSettings {
             id: 42,
             name: "Salon 2".into(),
             rtsp_url: "rtsp://camera-two.example/live".into(),
-            enabled: false,
+            initially_included_in_analysis: false,
             sample_every_ms: 2_000,
         },
     ]
@@ -470,6 +474,13 @@ fn idle_renders_start_selection_cadence_root_and_no_fake_claims() {
     );
     assert_stable_previews(&html);
     assert_no_fake_claims(&html);
+}
+
+#[test]
+fn no_cameras_renders_configuration_guidance() {
+    let html = Harness::with_cameras(Vec::new()).render(PreviewState::NoCameras);
+
+    assert!(html.contains("No cameras are configured"), "{html}");
 }
 
 #[test]
@@ -786,13 +797,13 @@ fn analyze_disables_new_analysis_when_model_configuration_is_missing() {
     let session_id = Uuid::from_u128(104);
     prepare_session(&mut harness, session_id, None);
     harness.workflow_mut().model_config_error =
-        Some("Analysis requires OPENAI_API_KEY and ANALYSIS_MODEL.".into());
+        Some("Analysis requires an OpenAI API key and model in Settings.".into());
 
     let html = harness.render_at(ready_preview(), "/analyze");
 
     assert_row_status(&html, session_id, "Not started");
     assert!(
-        html.contains("Analysis requires OPENAI_API_KEY and ANALYSIS_MODEL."),
+        html.contains("Analysis requires an OpenAI API key and model in Settings."),
         "{html}"
     );
     assert_analysis_action(&html, "Analyze", true);

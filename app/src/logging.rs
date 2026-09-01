@@ -6,6 +6,8 @@ use tracing_appender::{
 };
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
+use crate::settings::LogLevel;
+
 /// Keeps the nonblocking JSON writer alive until process shutdown.
 pub struct LogGuard {
     _worker: WorkerGuard,
@@ -21,30 +23,45 @@ pub enum Error {
 }
 
 /// Installs compact console output and daily JSON logging in `directory`.
-pub fn init(directory: &Path) -> Result<LogGuard, Error> {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let (subscriber, guard) = build_subscriber(directory, filter)?;
+pub fn init(directory: &Path, level: LogLevel) -> Result<LogGuard, Error> {
+    let (subscriber, guard) = build_subscriber(directory, level)?;
     subscriber.try_init()?;
 
     Ok(guard)
 }
 
-fn build_subscriber(
-    directory: &Path,
-    filter: EnvFilter,
-) -> Result<(impl tracing::Subscriber + Send + Sync, LogGuard), Error> {
-    let filter = filter.add_directive(
+/// Installs compact stderr logging without a file appender.
+pub fn init_stderr(level: LogLevel) -> Result<(), Error> {
+    tracing_subscriber::registry()
+        .with(filter(level))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .compact()
+                .with_writer(std::io::stderr),
+        )
+        .try_init()?;
+    Ok(())
+}
+
+fn filter(level: LogLevel) -> EnvFilter {
+    EnvFilter::new(level.as_str()).add_directive(
         "rig::completions=off"
             .parse()
             .expect("provider payload filter should be valid"),
-    );
+    )
+}
+
+fn build_subscriber(
+    directory: &Path,
+    level: LogLevel,
+) -> Result<(impl tracing::Subscriber + Send + Sync, LogGuard), Error> {
     let appender = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
         .filename_prefix("leo.jsonl")
         .build(directory)?;
     let (writer, worker) = tracing_appender::non_blocking(appender);
     let subscriber = tracing_subscriber::registry()
-        .with(filter)
+        .with(filter(level))
         .with(
             tracing_subscriber::fmt::layer()
                 .compact()
@@ -64,16 +81,14 @@ fn build_subscriber(
 mod tests {
     use std::fs;
 
-    use serde_json::Value;
-    use tracing_subscriber::EnvFilter;
-
     use super::build_subscriber;
+    use crate::settings::LogLevel;
+    use serde_json::Value;
 
     #[test]
     fn writes_structured_events_to_daily_json_log() {
         let directory = tempfile::tempdir().unwrap();
-        let (subscriber, guard) =
-            build_subscriber(directory.path(), EnvFilter::new("info")).unwrap();
+        let (subscriber, guard) = build_subscriber(directory.path(), LogLevel::Info).unwrap();
 
         tracing::subscriber::with_default(subscriber, || {
             tracing::info!(camera_id = 41, camera_count = 2, "preview ready");
@@ -105,10 +120,32 @@ mod tests {
     }
 
     #[test]
+    fn warn_level_omits_info_and_retains_warning() {
+        let directory = tempfile::tempdir().unwrap();
+        let (subscriber, guard) = build_subscriber(directory.path(), LogLevel::Warn).unwrap();
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("filtered info event");
+            tracing::warn!("retained warning event");
+        });
+        drop(guard);
+
+        let path = fs::read_dir(directory.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let contents = fs::read_to_string(path).unwrap();
+
+        assert!(!contents.contains("filtered info event"));
+        assert!(contents.contains("retained warning event"));
+    }
+
+    #[test]
     fn never_writes_provider_payloads_when_trace_is_enabled() {
         let directory = tempfile::tempdir().unwrap();
-        let (subscriber, guard) =
-            build_subscriber(directory.path(), EnvFilter::new("trace")).unwrap();
+        let (subscriber, guard) = build_subscriber(directory.path(), LogLevel::Trace).unwrap();
 
         tracing::subscriber::with_default(subscriber, || {
             tracing::trace!(

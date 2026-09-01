@@ -48,7 +48,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::spawn_analysis;
-    use crate::{camera_config::CameraConfig, workflow::Workflow};
+    use crate::{settings::CameraSettings, workflow::Workflow};
 
     struct Presentation {
         completed: usize,
@@ -79,11 +79,11 @@ mod tests {
         let workflow = Workflow::new(
             [1_u32, 2]
                 .into_iter()
-                .map(|id| CameraConfig {
+                .map(|id| CameraSettings {
                     id,
                     name: format!("Salon {id}"),
                     rtsp_url: format!("rtsp://camera-{id}.example/live"),
-                    enabled: true,
+                    initially_included_in_analysis: true,
                     sample_every_ms: 1_000,
                 })
                 .collect(),

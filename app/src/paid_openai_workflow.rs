@@ -15,7 +15,7 @@ use backend::{
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::{camera_config::CameraConfig, workflow::Workflow};
+use crate::{settings::CameraSettings, workflow::Workflow};
 
 #[tokio::test]
 #[ignore = "costs money; requires explicit approval and LEO_RUN_PAID_OPENAI_TEST=1"]
@@ -48,7 +48,7 @@ async fn paid_openai_analyzes_one_local_application_session() {
         stop_timeout: Duration::from_secs(5),
     })
     .expect("paid test requires ffmpeg and ffprobe");
-    let mut workflow = Workflow::new(camera_configs(), sessions_root, handle, Some(openai))
+    let mut workflow = Workflow::new(camera_settings(), sessions_root, handle, Some(openai))
         .expect("workflow should initialize");
     workflow
         .refresh_sessions()
@@ -329,14 +329,14 @@ fn create_evaluation_session(
     directory
 }
 
-fn camera_configs() -> Vec<CameraConfig> {
+fn camera_settings() -> Vec<CameraSettings> {
     [1_u32, 2]
         .into_iter()
-        .map(|id| CameraConfig {
+        .map(|id| CameraSettings {
             id,
             name: format!("Salon {id}"),
             rtsp_url: format!("rtsp://127.0.0.1:855{}/axis-media/media.amp", id + 3),
-            enabled: id == 1,
+            initially_included_in_analysis: id == 1,
             sample_every_ms: 1_000,
         })
         .collect()

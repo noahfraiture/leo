@@ -324,7 +324,7 @@ mod tests {
 
     use super::prepare_analysis_action;
     use crate::{
-        camera_config::CameraConfig,
+        settings::CameraSettings,
         workflow::{Error, Workflow},
     };
 
@@ -365,11 +365,11 @@ mod tests {
         drop(controller);
         mark_recording_complete(&directory).expect("session should be marked complete");
         let mut workflow = Workflow::new(
-            vec![CameraConfig {
+            vec![CameraSettings {
                 id: 1,
                 name: "Salon 1".into(),
                 rtsp_url: "rtsp://camera-one.example/live".into(),
-                enabled: true,
+                initially_included_in_analysis: true,
                 sample_every_ms: 1_000,
             }],
             session_root,

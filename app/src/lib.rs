@@ -1,23 +1,19 @@
 use std::sync::{Arc, Mutex};
 
-use backend::{
-    analysis::OpenAiConfig,
-    recording::{RecorderEvent, RecorderHandle, RecorderRuntime},
-};
+use backend::recording::{RecorderEvent, RecorderHandle, RecorderRuntime};
 use dioxus::{
     desktop::{Config, tao::event::Event},
     prelude::*,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use camera_config::{StartupConfig, load_startup_config};
 use logging::LogGuard;
 use preview::{Bridge, CameraSource, PreviewState, bridge};
+use settings::{LoadOutcome, LogLevel, ResolvedSettings, SettingsStore};
 use views::{Analyze, Layout, Monitor};
 use workflow::Workflow;
 
 mod analysis_task;
-mod camera_config;
 mod components;
 #[cfg(feature = "desktop-e2e")]
 mod desktop_e2e;
@@ -53,44 +49,24 @@ struct RecorderBootstrap {
 #[derive(Clone)]
 struct InitialWorkflow(Arc<Mutex<Option<Workflow>>>);
 
-fn openai_config(
-    api_key: Option<String>,
-    model: Option<String>,
-    base_url: Option<String>,
-) -> Option<OpenAiConfig> {
-    let api_key = api_key.filter(|value| !value.trim().is_empty())?;
-    let model = model.filter(|value| !value.trim().is_empty())?;
-    Some(OpenAiConfig {
-        api_key,
-        model,
-        base_url,
-    })
-}
-
 #[cfg(test)]
-fn test_openai_config() -> OpenAiConfig {
-    openai_config(
-        Some("test-api-key".into()),
-        Some("test-model".into()),
-        Some("http://provider.example/v1".into()),
-    )
-    .expect("test provider configuration should be valid")
+fn test_openai_config() -> backend::analysis::OpenAiConfig {
+    backend::analysis::OpenAiConfig {
+        api_key: "test-api-key".into(),
+        model: "test-model".into(),
+        base_url: Some("http://provider.example/v1".into()),
+    }
 }
 
 fn initialize_workflow(
-    config: &StartupConfig,
+    config: &ResolvedSettings,
     recorder: &RecorderBootstrap,
 ) -> Result<InitialWorkflow, String> {
-    let openai = openai_config(
-        std::env::var("OPENAI_API_KEY").ok(),
-        std::env::var("ANALYSIS_MODEL").ok(),
-        std::env::var("OPENAI_BASE_URL").ok(),
-    );
     Workflow::new(
-        config.cameras.clone(),
+        config.settings.cameras.clone(),
         config.sessions_root.clone(),
         recorder.handle.clone(),
-        openai,
+        config.openai.clone(),
     )
     .map(|workflow| InitialWorkflow(Arc::new(Mutex::new(Some(workflow)))))
     .map_err(|error| format!("Session workflow is unavailable: {error}"))
@@ -115,7 +91,7 @@ fn take_recorder_events(recorder: &RecorderBootstrap) -> Option<UnboundedReceive
 #[derive(Clone)]
 enum Bootstrap {
     Ready {
-        config: Box<StartupConfig>,
+        config: Box<ResolvedSettings>,
         preview: PreviewState,
         recorder: RecorderBootstrap,
         workflow: InitialWorkflow,
@@ -125,96 +101,139 @@ enum Bootstrap {
     },
 }
 
+fn unavailable(level: LogLevel, message: String) -> Bootstrap {
+    let _ = logging::init_stderr(level);
+    tracing::error!(reason = %message, "application runtime unavailable");
+    Bootstrap::Unavailable { message }
+}
+
 /// Validates startup dependencies and launches the desktop operator app.
 pub fn launch() {
+    match SettingsStore::platform() {
+        Ok(store) => launch_with_store(store),
+        Err(error) => launch_with_store_result(Err(error)),
+    }
+}
+
+fn launch_with_store(store: SettingsStore) {
+    launch_with_store_result(Ok(store));
+}
+
+fn launch_with_store_result(store: Result<SettingsStore, settings::Error>) {
     let mut recorder_owner: Option<RecorderRuntime> = None;
     let mut preview_owner: Option<Bridge> = None;
     let mut log_owner: Option<LogGuard> = None;
 
-    let bootstrap = match load_startup_config() {
-        Err(error) => Bootstrap::Unavailable {
-            message: format!("Startup configuration is unavailable: {error}"),
-        },
-        Ok(config) => match logging::init(&config.logs_root) {
-            Err(error) => Bootstrap::Unavailable {
-                message: format!("Application logging is unavailable: {error}"),
-            },
-            Ok(log_guard) => {
-                log_owner = Some(log_guard);
-                let camera_ids = config
-                    .cameras
-                    .iter()
-                    .map(|camera| camera.id)
-                    .collect::<Vec<_>>();
-                tracing::info!(
-                    camera_count = config.cameras.len(),
-                    camera_ids = ?camera_ids,
-                    data_root = %config.data_root.display(),
-                    sessions_root = %config.sessions_root.display(),
-                    "startup configuration loaded"
-                );
+    let bootstrap = match store {
+        Err(error) => unavailable(
+            LogLevel::Info,
+            format!("Application settings are unavailable: {error}"),
+        ),
+        Ok(store) => match store.load() {
+            Ok(LoadOutcome::Missing(_)) => unavailable(
+                LogLevel::Info,
+                "Application settings have not been saved yet.".into(),
+            ),
+            Err(error) => unavailable(
+                LogLevel::Info,
+                format!("Application settings are unavailable: {error}"),
+            ),
+            Ok(LoadOutcome::Loaded(config)) => {
+                match logging::init(&config.logs_root, config.log_level) {
+                    Err(error) => unavailable(
+                        config.log_level,
+                        format!("Application logging is unavailable: {error}"),
+                    ),
+                    Ok(log_guard) => {
+                        log_owner = Some(log_guard);
+                        let camera_ids = config
+                            .settings
+                            .cameras
+                            .iter()
+                            .map(|camera| camera.id)
+                            .collect::<Vec<_>>();
+                        tracing::info!(
+                            camera_count = config.settings.cameras.len(),
+                            camera_ids = ?camera_ids,
+                            data_root = %config.data_root.display(),
+                            sessions_root = %config.sessions_root.display(),
+                            "startup configuration loaded"
+                        );
 
-                match RecorderRuntime::spawn(config.recorder_settings) {
-                    Err(error) => {
-                        tracing::error!(error = %error, "recorder preflight failed");
-                        Bootstrap::Unavailable {
-                            message: format!("Recorder preflight failed: {error}"),
-                        }
-                    }
-                    Ok((runtime, handle, events)) => {
-                        recorder_owner = Some(runtime);
-                        let recorder = RecorderBootstrap {
-                            handle,
-                            events: Arc::new(Mutex::new(Some(events))),
-                        };
-                        match initialize_workflow(&config, &recorder) {
-                            Err(message) => {
-                                tracing::error!("session workflow initialization failed");
-                                Bootstrap::Unavailable { message }
+                        match RecorderRuntime::spawn(config.recorder_settings) {
+                            Err(error) => {
+                                tracing::error!(error = %error, "recorder preflight failed");
+                                Bootstrap::Unavailable {
+                                    message: format!("Recorder preflight failed: {error}"),
+                                }
                             }
-                            Ok(workflow) => {
-                                let sources = config
-                                    .cameras
-                                    .iter()
-                                    .map(|camera| CameraSource {
-                                        id: camera.id,
-                                        name: camera.name.clone(),
-                                        rtsp_url: camera.rtsp_url.clone(),
-                                    })
-                                    .collect::<Vec<_>>();
-                                tracing::info!(
-                                    camera_count = sources.len(),
-                                    camera_ids = ?camera_ids,
-                                    "preview startup requested"
-                                );
-                                let preview = match bridge::start(sources) {
-                                    Ok((state, bridge)) => {
-                                        preview_owner = Some(bridge);
-                                        tracing::info!(
-                                            camera_count = config.cameras.len(),
-                                            camera_ids = ?camera_ids,
-                                            "preview ready"
-                                        );
-                                        state
+                            Ok((runtime, handle, events)) => {
+                                recorder_owner = Some(runtime);
+                                let recorder = RecorderBootstrap {
+                                    handle,
+                                    events: Arc::new(Mutex::new(Some(events))),
+                                };
+                                match initialize_workflow(&config, &recorder) {
+                                    Err(message) => {
+                                        tracing::error!("session workflow initialization failed");
+                                        Bootstrap::Unavailable { message }
                                     }
-                                    Err(error) => {
-                                        tracing::warn!(
-                                            error = %error,
-                                            camera_count = config.cameras.len(),
-                                            camera_ids = ?camera_ids,
-                                            "preview unavailable"
-                                        );
-                                        PreviewState::Unavailable {
-                                            message: error.to_string(),
+                                    Ok(workflow) => {
+                                        let sources = config
+                                            .settings
+                                            .cameras
+                                            .iter()
+                                            .map(|camera| CameraSource {
+                                                id: camera.id,
+                                                name: camera.name.clone(),
+                                                rtsp_url: camera.rtsp_url.clone(),
+                                            })
+                                            .collect::<Vec<_>>();
+                                        let (preview, bridge) = if sources.is_empty() {
+                                            tracing::info!(
+                                                "preview skipped because no cameras are configured"
+                                            );
+                                            (PreviewState::NoCameras, None)
+                                        } else {
+                                            tracing::info!(
+                                                camera_count = sources.len(),
+                                                camera_ids = ?camera_ids,
+                                                "preview startup requested"
+                                            );
+                                            match bridge::start(sources) {
+                                                Ok((state, bridge)) => {
+                                                    tracing::info!(
+                                                        camera_count = config.settings.cameras.len(),
+                                                        camera_ids = ?camera_ids,
+                                                        "preview ready"
+                                                    );
+                                                    (state, Some(bridge))
+                                                }
+                                                Err(error) => {
+                                                    tracing::warn!(
+                                                        error = %error,
+                                                        camera_count = config.settings.cameras.len(),
+                                                        camera_ids = ?camera_ids,
+                                                        "preview unavailable"
+                                                    );
+                                                    (
+                                                        PreviewState::Unavailable {
+                                                            message: error.to_string(),
+                                                        },
+                                                        None,
+                                                    )
+                                                }
+                                            }
+                                        };
+                                        preview_owner = bridge;
+
+                                        Bootstrap::Ready {
+                                            config: Box::new(config),
+                                            preview,
+                                            recorder,
+                                            workflow,
                                         }
                                     }
-                                };
-
-                                Bootstrap::Ready {
-                                    config: Box::new(config),
-                                    preview,
-                                    recorder,
-                                    workflow,
                                 }
                             }
                         }
@@ -367,21 +386,21 @@ mod tests {
         session::SessionController,
     };
 
-    use super::{RecorderBootstrap, initialize_workflow, openai_config, take_recorder_events};
+    use super::{RecorderBootstrap, initialize_workflow, take_recorder_events};
     use crate::{
-        camera_config::{CameraConfig, StartupConfig},
         session_task::handle_recorder_event,
+        settings::{CameraSettings, Settings, SettingsStore},
         workflow::{SessionRunState, Workflow},
     };
 
-    fn camera_configs() -> Vec<CameraConfig> {
+    fn camera_settings() -> Vec<CameraSettings> {
         [1_u32, 2]
             .into_iter()
-            .map(|id| CameraConfig {
+            .map(|id| CameraSettings {
                 id,
                 name: format!("Salon {id}"),
                 rtsp_url: format!("rtsp://camera-{id}.example/live"),
-                enabled: true,
+                initially_included_in_analysis: true,
                 sample_every_ms: 1_000,
             })
             .collect()
@@ -419,20 +438,6 @@ mod tests {
     }
 
     #[test]
-    fn model_configuration_availability_is_sanitized_without_environment_mutation() {
-        assert!(openai_config(None, None, None).is_none());
-        assert!(openai_config(None, Some("model".into()), None).is_none());
-        assert!(openai_config(Some("key".into()), None, None).is_none());
-        assert!(openai_config(Some("key".into()), Some("model".into()), None).is_some());
-    }
-
-    #[test]
-    fn model_configuration_requires_non_blank_values() {
-        assert!(openai_config(Some("".into()), Some("model".into()), None).is_none());
-        assert!(openai_config(Some("key".into()), Some("  \t".into()), None).is_none());
-    }
-
-    #[test]
     fn recorder_event_receiver_is_taken_exactly_once() {
         let (_temporary, runtime, recorder) = test_recorder();
 
@@ -445,20 +450,18 @@ mod tests {
     #[test]
     fn workflow_bootstrap_reports_catalogue_io_without_taking_receiver() {
         let (temporary, runtime, recorder) = test_recorder();
-        let sessions_root = temporary.path().join("sessions");
-        fs::write(&sessions_root, b"not a directory")
+        let data_root = temporary.path().join("data");
+        fs::create_dir(&data_root).expect("data root should be created");
+        let mut settings = Settings::default();
+        settings.next_camera_id = 3;
+        settings.cameras = camera_settings();
+        let store = SettingsStore::new(temporary.path().join("config/settings.json"), data_root)
+            .expect("test settings paths should be valid");
+        let config = store
+            .resolve(settings)
+            .expect("test settings should resolve");
+        fs::write(&config.sessions_root, b"not a directory")
             .expect("catalogue root should become invalid after startup validation");
-        let config = StartupConfig {
-            cameras: camera_configs(),
-            data_root: temporary.path().to_owned(),
-            sessions_root,
-            logs_root: temporary.path().join("logs"),
-            recorder_settings: RecorderSettings {
-                io_timeout: Duration::from_secs(1),
-                retry_delay: Duration::from_secs(1),
-                stop_timeout: Duration::from_secs(1),
-            },
-        };
 
         let Err(error) = initialize_workflow(&config, &recorder) else {
             panic!("invalid catalogue should make Workflow unavailable");
@@ -473,7 +476,7 @@ mod tests {
     fn root_event_dispatch_updates_reconnecting_and_claims_one_fatal_cleanup() {
         let (temporary, runtime, recorder) = test_recorder();
         let mut workflow = Workflow::new(
-            camera_configs(),
+            camera_settings(),
             temporary.path().join("sessions"),
             recorder.handle.clone(),
             Some(crate::test_openai_config()),
