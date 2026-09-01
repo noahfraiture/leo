@@ -1,3 +1,6 @@
+#[cfg(target_os = "windows")]
+compile_error!("Leo does not support Windows.");
+
 use std::{
     rc::Rc,
     sync::{Arc, Mutex},
