@@ -14,6 +14,7 @@ camera-2:
 vlc:
     nix develop --command vlc rtsp://127.0.0.1:8554/axis-media/media.amp
 
+# First run opens Settings; later runs use saved platform settings after restart.
 app:
     nix develop --command dx serve -p app --desktop
 

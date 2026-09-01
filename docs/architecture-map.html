@@ -365,15 +365,17 @@
     <div class="shell hero-top">
       <div>
         <p class="eyebrow">Leo / system field map</p>
-        <h1>From two cameras to one durable analysis.</h1>
-        <p class="lede">A visual guide to process ownership, independent preview and recording paths, the session commit protocol, and explicit model analysis.</p>
+        <h1>From configured cameras to durable analysis.</h1>
+        <p class="lede">A visual guide to application-owned settings, startup-only runtime ownership, independent preview and recording paths, the session commit protocol, and explicit model analysis.</p>
       </div>
       <a class="doc-link" href="architecture.md">Detailed architecture</a>
     </div>
     <div class="shell facts" aria-label="System facts">
-      <span class="fact">two configured cameras</span>
+      <span class="fact">zero cameras keep shell + Analyze</span>
+      <span class="fact">app-owned settings</span>
+      <span class="fact">restart to apply</span>
       <span class="fact">desktop-owned recording</span>
-      <span class="fact">append-only session events</span>
+      <span class="fact">preview failure never blocks recording</span>
       <span class="fact">portable completed directory</span>
       <span class="fact">provider only on Analyze</span>
     </div>
@@ -382,12 +384,25 @@
   <main class="shell">
     <section aria-labelledby="flow-title">
       <div class="section-heading">
-        <h2 id="flow-title">Four independent flows</h2>
-        <p class="section-note">Preview and recording open separate RTSP/TCP connections. A healthy preview is not proof of a healthy recorder.</p>
+        <h2 id="flow-title">Settings and runtime flows</h2>
+        <p class="section-note">Missing settings open first-run setup. Invalid settings fail startup. Operational resources start once from valid saved settings; preview and recording then remain independent.</p>
       </div>
 
       <div class="lanes">
-        <article class="lane preview">
+        <article class="lane session" aria-label="Settings flow">
+          <div class="lane-label">Settings</div>
+          <div class="flow">
+            <div class="node"><span class="node-kicker">platform</span><strong>settings.json</strong><small>Standard per-user path</small></div>
+            <div class="arrow" aria-hidden="true">&rarr;</div>
+            <div class="node"><span class="node-kicker">boundary</span><strong>Validate / resolve</strong><small>Version, fields, and runtime paths</small></div>
+            <div class="arrow" aria-hidden="true">&rarr;</div>
+            <div class="node"><span class="node-kicker">desktop</span><strong>Dioxus shell + Settings</strong><small>First-run setup or a valid saved draft</small></div>
+            <div class="arrow" aria-hidden="true">&rarr;</div>
+            <div class="node"><span class="node-kicker">startup only</span><strong>Operational runtime</strong><small>Restart applies saved logging, recorder, catalogue, and preview</small></div>
+          </div>
+        </article>
+
+        <article class="lane preview" aria-label="Preview flow">
           <div class="lane-label">Preview</div>
           <div class="flow">
             <div class="node"><span class="node-kicker">source</span><strong>Camera RTSP</strong><small>Credential-bearing URL</small></div>
@@ -396,11 +411,11 @@
             <div class="arrow" aria-hidden="true">&rarr;</div>
             <div class="node"><span class="node-kicker">transport</span><strong>WHEP / WebRTC</strong><small>No camera credentials</small></div>
             <div class="arrow" aria-hidden="true">&rarr;</div>
-            <div class="node"><span class="node-kicker">desktop UI</span><strong>Monitor feed</strong><small>Exactly two keyed views</small></div>
+            <div class="node"><span class="node-kicker">desktop UI</span><strong>Monitor feed</strong><small>One keyed view per camera</small></div>
           </div>
         </article>
 
-        <article class="lane record">
+        <article class="lane record" aria-label="Recording flow">
           <div class="lane-label">Record</div>
           <div class="flow">
             <div class="node"><span class="node-kicker">source</span><strong>Camera RTSP</strong><small>Independent TCP reader</small></div>
@@ -413,7 +428,7 @@
           </div>
         </article>
 
-        <article class="lane session">
+        <article class="lane session" aria-label="Timeline flow">
           <div class="lane-label">Timeline</div>
           <div class="flow">
             <div class="node"><span class="node-kicker">operator</span><strong>Start / changes / Stop</strong><small>Participation and cadence controls</small></div>
@@ -426,7 +441,7 @@
           </div>
         </article>
 
-        <article class="lane analysis">
+        <article class="lane analysis" aria-label="Analysis flow">
           <div class="lane-label">Analyze</div>
           <div class="flow">
             <div class="node"><span class="node-kicker">commit gate</span><strong>Ended log + marker</strong><small>Selected completed session</small></div>
@@ -444,17 +459,18 @@
     <section aria-labelledby="ownership-title">
       <div class="section-heading">
         <h2 id="ownership-title">Ownership boundaries</h2>
-        <p class="section-note">The desktop owns lifetimes, the backend owns durable rules, and the session directory owns portable state.</p>
+        <p class="section-note">The app owns settings and lifetimes, the backend owns durable rules, and the session directory owns portable state.</p>
       </div>
       <div class="ownership-grid">
         <article class="owner app">
           <p class="eyebrow">app crate / process</p>
           <h3>Desktop lifetime</h3>
           <ul>
-            <li>Dioxus routes and shared Workflow state</li>
-            <li>MediaMTX preview bridge</li>
-            <li>RecorderRuntime and event receiver</li>
+            <li>Platform settings store and desktop shell</li>
+            <li><code>RuntimeAvailability</code> and ready-only contexts</li>
+            <li>MediaMTX, RecorderRuntime, and event receiver</li>
             <li>Root-scoped session and analysis tasks</li>
+            <li>Save writes disk only; restart changes runtime</li>
             <li>Logging guard and orderly shutdown</li>
           </ul>
         </article>
@@ -517,7 +533,7 @@
       </div>
       <aside class="callout">
         <strong>One full local desktop E2E</strong>
-        <p>The opt-in macOS test drives the real WKWebView from two fixture cameras through recording and loopback-model analysis. Physical cameras, packaged pointer automation, and external-SSD failures remain separate acceptance work.</p>
+        <p>The opt-in macOS test drives one explicit two-fixture scenario through the real WKWebView, recording, and loopback-model analysis. The fixture pair is test coverage, not a production count restriction. Physical cameras, packaged pointer automation, and external-SSD failures remain separate acceptance work.</p>
       </aside>
     </section>
   </main>
