@@ -26,6 +26,7 @@ mod logging;
 mod paid_openai_workflow;
 mod preview;
 mod session_task;
+mod settings;
 mod views;
 mod workflow;
 

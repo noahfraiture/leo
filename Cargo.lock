@@ -98,6 +98,7 @@ dependencies = [
  "backend",
  "dioxus",
  "dioxus-ssr",
+ "dirs",
  "serde",
  "serde_json",
  "tempfile",

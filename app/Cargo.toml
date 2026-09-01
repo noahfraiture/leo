@@ -11,6 +11,7 @@ paid-openai-test = []
 
 [dependencies]
 backend = { path = "../backend" }
+dirs = "6"
 dioxus = {
     version = "0.7.9",
     default-features = false,
@@ -20,7 +21,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["rt", "sync"] }
 tracing = { workspace = true }
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
