@@ -4,6 +4,7 @@ mod page;
 mod provider;
 mod recording;
 #[cfg(all(test, unix))]
+#[path = "tests/render.rs"]
 mod render_tests;
 mod sidebar;
 mod state;

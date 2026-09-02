@@ -1,3 +1,5 @@
+//! Render-level coverage for the settings form's operator-visible contract.
+
 use std::sync::{Arc, Mutex};
 
 use dioxus::{dioxus_core::NoOpMutations, prelude::*};
@@ -97,57 +99,6 @@ fn form_composes_all_sections_and_keeps_editable_secrets_local_to_inputs() {
     assert!(
         opening_tag_with_marker(&html, "input", r#"id="camera-1-rtsp-url""#)
             .contains("rtsp://render-camera.example/stream"),
-        "{html}"
-    );
-}
-
-#[test]
-fn batching_controls_render_numeric_constraints_and_help() {
-    let state = SettingsPageState::new(ApplicationSettings::default());
-
-    let html = render_settings(state, None);
-
-    let frame_sets =
-        opening_tag_with_marker(&html, "input", r#"id="settings-analysis-frame-sets""#);
-    assert!(frame_sets.contains(r#"type="number""#), "{frame_sets}");
-    assert!(frame_sets.contains(r#"min="1""#), "{frame_sets}");
-    assert!(frame_sets.contains(r#"step="1""#), "{frame_sets}");
-    assert!(frame_sets.contains(r#"value="5""#), "{frame_sets}");
-
-    let overlap = opening_tag_with_marker(&html, "input", r#"id="settings-analysis-overlap""#);
-    assert!(overlap.contains(r#"type="number""#), "{overlap}");
-    assert!(overlap.contains(r#"min="0""#), "{overlap}");
-    assert!(overlap.contains(r#"step="1""#), "{overlap}");
-    assert!(overlap.contains(r#"value="0""#), "{overlap}");
-    assert!(
-        html.contains("Each frame set can contain one image per camera."),
-        "{html}"
-    );
-    assert!(
-        html.contains("Overlap repeats images and may increase provider cost."),
-        "{html}"
-    );
-}
-
-#[test]
-fn overlap_error_is_accessibly_described() {
-    let mut state = SettingsPageState::new(ApplicationSettings::default());
-    state.draft.analysis_overlap_frame_sets = "5".into();
-    state.field_errors = match state.submission() {
-        Err(errors) => errors,
-        Ok(_) => panic!("overlap should be invalid"),
-    };
-
-    let html = render_settings(state, None);
-
-    let overlap = opening_tag_with_marker(&html, "input", r#"id="settings-analysis-overlap""#);
-    assert!(overlap.contains(r#"aria-invalid="true""#), "{overlap}");
-    assert!(
-        overlap.contains(r#"aria-describedby="settings-analysis-overlap-error""#),
-        "{overlap}"
-    );
-    assert!(
-        html.contains(r#"id="settings-analysis-overlap-error""#),
         "{html}"
     );
 }

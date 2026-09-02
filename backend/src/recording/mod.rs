@@ -4,10 +4,13 @@ mod error;
 mod recorder;
 mod segment;
 
-pub use error::Error;
 #[cfg(feature = "test-support")]
-#[doc(hidden)]
-pub use recorder::spawn_for_test;
+/// Construction hooks for cross-crate recording tests.
+pub mod test_support {
+    pub use super::recorder::spawn_for_test as spawn;
+}
+
+pub use error::Error;
 pub use recorder::{
     RecorderEvent, RecorderHandle, RecorderRuntime, RecorderSettings, RecorderStatus,
     RecordingCamera,

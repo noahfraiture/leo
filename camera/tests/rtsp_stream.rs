@@ -15,7 +15,7 @@ use backend::{
     analysis::extract_jpeg_for_test,
     recording::{
         RecorderEvent, RecorderSettings, RecorderStatus, RecordingCamera, RecordingSegment,
-        spawn_for_test,
+        test_support,
     },
 };
 use tempfile::NamedTempFile;
@@ -143,7 +143,7 @@ async fn host_recorder_records_playable_mkv() {
     let (ffmpeg, ffmpeg_pids) = instrumented_executable(processes.path(), "ffmpeg");
     let (ffprobe, ffprobe_pids) = instrumented_executable(processes.path(), "ffprobe");
     let (runtime, recorder, mut events) =
-        spawn_for_test(recorder_settings(), ffmpeg, ffprobe).expect("start recorder runtime");
+        test_support::spawn(recorder_settings(), ffmpeg, ffprobe).expect("start recorder runtime");
 
     tokio::time::timeout(
         RECORDER_OPERATION_TIMEOUT,
@@ -198,7 +198,7 @@ async fn host_recorder_reconnects_into_a_second_segment() {
     let (ffmpeg, ffmpeg_pids) = instrumented_executable(processes.path(), "ffmpeg");
     let (ffprobe, ffprobe_pids) = instrumented_executable(processes.path(), "ffprobe");
     let (runtime, recorder, mut events) =
-        spawn_for_test(recorder_settings(), ffmpeg, ffprobe).expect("start recorder runtime");
+        test_support::spawn(recorder_settings(), ffmpeg, ffprobe).expect("start recorder runtime");
 
     tokio::time::timeout(
         RECORDER_OPERATION_TIMEOUT,

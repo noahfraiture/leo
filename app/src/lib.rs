@@ -15,6 +15,7 @@ mod preview;
 mod route;
 mod settings;
 #[cfg(all(test, unix))]
+#[path = "tests/support.rs"]
 mod test_support;
 mod views;
 

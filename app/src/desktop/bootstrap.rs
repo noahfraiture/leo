@@ -235,11 +235,3 @@ fn prepare_preview(config: &ResolvedSettings) -> (PreviewState, Option<Bridge>) 
         }
     }
 }
-
-#[cfg(all(test, unix))]
-pub fn initialize_operator_for_test(
-    config: &ResolvedSettings,
-    recorder: &RecorderBootstrap,
-) -> Result<InitialOperatorState, String> {
-    initialize_operator(config, recorder)
-}

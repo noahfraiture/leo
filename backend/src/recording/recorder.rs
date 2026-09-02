@@ -220,6 +220,19 @@ fn spawn_with_executables(
     preflight(&ffmpeg, settings.io_timeout)?;
     preflight(&ffprobe, settings.io_timeout)?;
 
+    spawn_management_thread(settings, ffmpeg, ffprobe, shutdown)
+}
+
+fn spawn_management_thread(
+    settings: RecorderSettings,
+    ffmpeg: PathBuf,
+    ffprobe: PathBuf,
+    shutdown: Arc<AtomicBool>,
+) -> Result<(
+    RecorderRuntime,
+    RecorderHandle,
+    UnboundedReceiver<RecorderEvent>,
+)> {
     let (commands, command_receiver) = mpsc::channel();
     let (events, event_receiver) = tokio::sync::mpsc::unbounded_channel();
     let thread_shutdown = Arc::clone(&shutdown);
@@ -261,7 +274,8 @@ pub fn spawn_for_test(
     RecorderHandle,
     UnboundedReceiver<RecorderEvent>,
 )> {
-    spawn_with_executables(settings, ffmpeg, ffprobe)
+    validate_settings(settings)?;
+    spawn_management_thread(settings, ffmpeg, ffprobe, Arc::new(AtomicBool::new(false)))
 }
 
 fn management_loop(

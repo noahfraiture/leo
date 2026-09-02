@@ -1,16 +1,15 @@
 //! Shared server-rendering support for view-owning test modules.
 
 use std::{
-    fs,
     num::NonZeroUsize,
-    os::unix::fs::PermissionsExt,
+    path::PathBuf,
     rc::Rc,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use backend::{
-    recording::{RecorderRuntime, RecorderSettings, spawn_for_test},
+    recording::{RecorderRuntime, RecorderSettings, test_support},
     session::SessionController,
 };
 use dioxus::{
@@ -32,7 +31,7 @@ pub const START_UTC_MS: i64 = 1_786_552_800_000;
 
 #[derive(Clone)]
 struct RenderRootProps {
-    workflow: Arc<Mutex<Option<OperatorState>>>,
+    operator: Arc<Mutex<Option<OperatorState>>>,
     preview: PreviewState,
     availability: RuntimeAvailability,
     settings_store: SettingsStore,
@@ -41,21 +40,21 @@ struct RenderRootProps {
 
 fn render_root(props: RenderRootProps) -> Element {
     let RenderRootProps {
-        workflow: initial,
+        operator: initial,
         preview,
         availability,
         settings_store,
         path,
     } = props;
-    let workflow = use_signal(move || {
+    let operator = use_signal(move || {
         initial
             .lock()
-            .expect("render workflow mutex should not be poisoned")
+            .expect("render operator mutex should not be poisoned")
             .take()
             .expect("render root should take operator state once")
     });
     let settings = use_signal(|| SettingsPageState::new(ApplicationSettings::default()));
-    use_context_provider(|| workflow);
+    use_context_provider(|| operator);
     use_context_provider(move || preview);
     use_context_provider(move || SettingsContext {
         state: settings,
@@ -75,7 +74,7 @@ fn render_root(props: RenderRootProps) -> Element {
 pub struct RenderHarness {
     temporary: tempfile::TempDir,
     runtime: Option<RecorderRuntime>,
-    workflow: Option<OperatorState>,
+    operator: Option<OperatorState>,
 }
 
 impl RenderHarness {
@@ -85,22 +84,17 @@ impl RenderHarness {
 
     pub fn with_cameras(cameras: Vec<CameraSettings>) -> Self {
         let temporary = tempfile::tempdir().expect("temporary render root should be created");
-        let executable = temporary.path().join("successful-preflight");
-        fs::write(&executable, "#!/bin/sh\nexit 0\n")
-            .expect("fake preflight executable should be written");
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
-            .expect("fake preflight executable should be executable");
-        let (runtime, recorder, _events) = spawn_for_test(
+        let (runtime, recorder, _events) = test_support::spawn(
             RecorderSettings {
                 io_timeout: Duration::from_secs(1),
                 retry_delay: Duration::from_secs(1),
                 stop_timeout: Duration::from_secs(1),
             },
-            executable.clone(),
-            executable,
+            PathBuf::from("unused-test-ffmpeg"),
+            PathBuf::from("unused-test-ffprobe"),
         )
         .expect("test recorder runtime should start");
-        let workflow = OperatorState::new(
+        let operator = OperatorState::new(
             cameras,
             temporary.path().join("sessions"),
             recorder,
@@ -113,38 +107,31 @@ impl RenderHarness {
         Self {
             temporary,
             runtime: Some(runtime),
-            workflow: Some(workflow),
+            operator: Some(operator),
         }
     }
 
-    pub fn workflow(&self) -> &OperatorState {
-        self.workflow
+    pub fn operator(&self) -> &OperatorState {
+        self.operator
             .as_ref()
             .expect("operator state should be retained")
     }
 
-    pub fn workflow_mut(&mut self) -> &mut OperatorState {
-        self.workflow
+    pub fn operator_mut(&mut self) -> &mut OperatorState {
+        self.operator
             .as_mut()
             .expect("operator state should be retained")
     }
 
-    pub fn start(&mut self) -> std::path::PathBuf {
-        self.workflow_mut()
-            .begin_start(START_UTC_MS)
-            .expect("idle render state should begin starting")
-            .directory
-    }
-
     pub fn activate(&mut self) -> std::path::PathBuf {
         let request = self
-            .workflow_mut()
+            .operator_mut()
             .begin_start(START_UTC_MS)
             .expect("idle render state should begin starting");
         let directory = request.directory.clone();
         let controller = SessionController::create(request.events_path, request.session_cameras)
             .expect("active render controller should be created");
-        self.workflow_mut()
+        self.operator_mut()
             .finish_start(directory.clone(), controller);
         directory
     }
@@ -154,13 +141,13 @@ impl RenderHarness {
     }
 
     pub fn render_at(mut self, preview: PreviewState, path: &str) -> String {
-        let camera_count = self.workflow().cameras.len();
+        let camera_count = self.operator().cameras.len();
         let settings_store = SettingsStore::new(
             self.temporary.path().join("settings/settings.json"),
             self.temporary.path().join("settings-data"),
         );
         let props = RenderRootProps {
-            workflow: Arc::new(Mutex::new(self.workflow.take())),
+            operator: Arc::new(Mutex::new(self.operator.take())),
             preview,
             availability: RuntimeAvailability::Ready { camera_count },
             settings_store,

@@ -5,9 +5,8 @@ mod launch;
 mod shell;
 
 #[cfg(all(test, unix))]
+#[path = "tests/render.rs"]
 mod render_tests;
-#[cfg(all(test, unix))]
-mod tests;
 
 pub use launch::launch;
 #[cfg(feature = "desktop-e2e")]
