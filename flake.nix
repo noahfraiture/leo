@@ -19,7 +19,7 @@
           inputs.rust-overlay.overlays.default
           (final: prev: {
             rustToolchain = prev.rust-bin.stable.latest.default.override {
-              extensions = [ "rust-src" ];
+              extensions = [ "rust-src" "llvm-tools-preview" ];
               targets = [ "wasm32-unknown-unknown" ];
             };
           })
@@ -37,6 +37,7 @@
           tailwindcss_4
           dioxus-cli
           bacon
+          cargo-llvm-cov
           rustToolchain
         ];
 
