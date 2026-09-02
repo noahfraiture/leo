@@ -14,9 +14,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use logging::LogGuard;
 use preview::{Bridge, CameraSource, PreviewState, bridge};
-use settings::{
-    LoadOutcome, LogLevel, ResolvedSettings, Settings as ApplicationSettings, SettingsStore,
-};
+use settings::{LogLevel, ResolvedSettings, Settings as ApplicationSettings, SettingsStore};
 use views::{Analyze, Layout, Monitor, Settings, SettingsContext, SettingsPageState};
 use workflow::Workflow;
 
@@ -123,23 +121,18 @@ enum Bootstrap {
     },
 }
 
-/// Settings snapshots and route used to initialize the shell once.
+/// Settings store, editable values, and route used to initialize the shell once.
 #[derive(Clone)]
 struct InitialSettings {
-    store: Option<SettingsStore>,
+    store: SettingsStore,
     draft: ApplicationSettings,
-    saved: Option<ResolvedSettings>,
-    active: Option<ResolvedSettings>,
-    load_error: Option<String>,
     initial_route: Route,
 }
 
 /// Validates startup dependencies and launches the desktop operator app.
 pub fn launch() {
-    match SettingsStore::platform() {
-        Ok(store) => launch_with_store(store),
-        Err(error) => launch_with_store_result(Err(error)),
-    }
+    let store = SettingsStore::platform().expect("platform settings paths should be available");
+    launch_with_store(store);
 }
 
 #[cfg(feature = "desktop-e2e")]
@@ -153,158 +146,115 @@ pub fn launch_desktop_e2e(settings_path: std::path::PathBuf) {
 }
 
 fn launch_with_store(store: SettingsStore) {
-    launch_with_store_result(Ok(store));
-}
-
-fn launch_with_store_result(store: Result<SettingsStore, settings::Error>) {
     let mut recorder_owner: Option<RecorderRuntime> = None;
     let mut preview_owner: Option<Bridge> = None;
     let mut log_owner: Option<LogGuard> = None;
 
-    let (bootstrap, initial_settings) = match store {
-        Err(_error) => {
-            let message = "Application settings storage is unavailable.".to_string();
+    let loaded = store
+        .load()
+        .unwrap_or_else(|error| panic!("application settings could not be loaded: {error}"));
+    let (bootstrap, initial_settings) = match loaded {
+        None => {
             let _ = logging::init_stderr(LogLevel::Info);
-            tracing::error!("application settings storage is unavailable");
+            tracing::info!("application settings setup is required");
             (
-                Bootstrap::Failed {
-                    message: message.clone(),
-                },
+                Bootstrap::SetupRequired,
                 InitialSettings {
-                    store: None,
+                    store,
                     draft: ApplicationSettings::default(),
-                    saved: None,
-                    active: None,
-                    load_error: Some(message),
                     initial_route: Route::Settings {},
                 },
             )
         }
-        Ok(store) => match store.load() {
-            Ok(LoadOutcome::Missing(resolved)) => {
-                let _ = logging::init_stderr(LogLevel::Info);
-                tracing::info!("application settings setup is required");
-                (
-                    Bootstrap::SetupRequired,
-                    InitialSettings {
-                        store: Some(store),
-                        draft: resolved.settings,
-                        saved: None,
-                        active: None,
-                        load_error: None,
-                        initial_route: Route::Settings {},
-                    },
-                )
-            }
-            Err(_error) => {
-                let message = "Application settings could not be loaded. Check the settings file and configured data directories.".to_string();
-                let _ = logging::init_stderr(LogLevel::Info);
-                tracing::error!("application settings could not be loaded");
-                (
-                    Bootstrap::SetupRequired,
-                    InitialSettings {
-                        store: Some(store),
-                        draft: ApplicationSettings::default(),
-                        saved: None,
-                        active: None,
-                        load_error: Some(message),
-                        initial_route: Route::Settings {},
-                    },
-                )
-            }
-            Ok(LoadOutcome::Loaded(config)) => {
-                let initial_settings = InitialSettings {
-                    store: Some(store),
-                    draft: config.settings.clone(),
-                    saved: Some(config.clone()),
-                    active: Some(config.clone()),
-                    load_error: None,
-                    initial_route: Route::Monitor {},
-                };
-                let bootstrap = match logging::init(&config.logs_root, config.log_level) {
-                    Err(_error) => {
-                        let _ = logging::init_stderr(config.log_level);
-                        tracing::error!("application logging initialization failed");
-                        Bootstrap::Failed {
-                            message: "Application logging is unavailable.".into(),
-                        }
+        Some(config) => {
+            let initial_settings = InitialSettings {
+                store,
+                draft: config.settings.clone(),
+                initial_route: Route::Monitor {},
+            };
+            let bootstrap = match logging::init(&config.logs_root, config.log_level) {
+                Err(_error) => {
+                    let _ = logging::init_stderr(config.log_level);
+                    tracing::error!("application logging initialization failed");
+                    Bootstrap::Failed {
+                        message: "Application logging is unavailable.".into(),
                     }
-                    Ok(log_guard) => {
-                        log_owner = Some(log_guard);
-                        tracing::info!("startup configuration loaded");
+                }
+                Ok(log_guard) => {
+                    log_owner = Some(log_guard);
+                    tracing::info!("startup configuration loaded");
 
-                        match RecorderRuntime::spawn(config.recorder_settings) {
-                            Err(error) => {
-                                tracing::error!(error = %error, "recorder preflight failed");
-                                Bootstrap::Failed {
-                                    message: "Recorder preflight failed.".into(),
-                                }
+                    match RecorderRuntime::spawn(config.recorder_settings) {
+                        Err(error) => {
+                            tracing::error!(error = %error, "recorder preflight failed");
+                            Bootstrap::Failed {
+                                message: "Recorder preflight failed.".into(),
                             }
-                            Ok((runtime, handle, events)) => {
-                                recorder_owner = Some(runtime);
-                                let recorder = RecorderBootstrap {
-                                    handle,
-                                    events: Arc::new(Mutex::new(Some(events))),
-                                };
-                                match initialize_workflow(&config, &recorder) {
-                                    Err(message) => {
-                                        tracing::error!("session workflow initialization failed");
-                                        Bootstrap::Failed { message }
-                                    }
-                                    Ok(workflow) => {
-                                        let sources = config
-                                            .settings
-                                            .cameras
-                                            .iter()
-                                            .map(|camera| CameraSource {
-                                                id: camera.id,
-                                                name: camera.name.clone(),
-                                                rtsp_url: camera.rtsp_url.clone(),
-                                            })
-                                            .collect::<Vec<_>>();
-                                        let (preview, bridge) = if sources.is_empty() {
-                                            tracing::info!(
-                                                "preview skipped because no cameras are configured"
-                                            );
-                                            (PreviewState::NoCameras, None)
-                                        } else {
-                                            tracing::info!("preview startup requested");
-                                            match bridge::start(sources) {
-                                                Ok((state, bridge)) => {
-                                                    tracing::info!("preview ready");
-                                                    (state, Some(bridge))
-                                                }
-                                                Err(error) => {
-                                                    tracing::warn!(
-                                                        error = %error,
-                                                        "preview unavailable"
-                                                    );
-                                                    (
-                                                        PreviewState::Unavailable {
-                                                            message: error.to_string(),
-                                                        },
-                                                        None,
-                                                    )
-                                                }
+                        }
+                        Ok((runtime, handle, events)) => {
+                            recorder_owner = Some(runtime);
+                            let recorder = RecorderBootstrap {
+                                handle,
+                                events: Arc::new(Mutex::new(Some(events))),
+                            };
+                            match initialize_workflow(&config, &recorder) {
+                                Err(message) => {
+                                    tracing::error!("session workflow initialization failed");
+                                    Bootstrap::Failed { message }
+                                }
+                                Ok(workflow) => {
+                                    let sources = config
+                                        .settings
+                                        .cameras
+                                        .iter()
+                                        .map(|camera| CameraSource {
+                                            id: camera.id,
+                                            name: camera.name.clone(),
+                                            rtsp_url: camera.rtsp_url.clone(),
+                                        })
+                                        .collect::<Vec<_>>();
+                                    let (preview, bridge) = if sources.is_empty() {
+                                        tracing::info!(
+                                            "preview skipped because no cameras are configured"
+                                        );
+                                        (PreviewState::NoCameras, None)
+                                    } else {
+                                        tracing::info!("preview startup requested");
+                                        match bridge::start(sources) {
+                                            Ok((state, bridge)) => {
+                                                tracing::info!("preview ready");
+                                                (state, Some(bridge))
                                             }
-                                        };
-                                        preview_owner = bridge;
-
-                                        Bootstrap::Ready {
-                                            config: Box::new(config),
-                                            preview,
-                                            recorder,
-                                            workflow,
+                                            Err(error) => {
+                                                tracing::warn!(
+                                                    error = %error,
+                                                    "preview unavailable"
+                                                );
+                                                (
+                                                    PreviewState::Unavailable {
+                                                        message: error.to_string(),
+                                                    },
+                                                    None,
+                                                )
+                                            }
                                         }
+                                    };
+                                    preview_owner = bridge;
+
+                                    Bootstrap::Ready {
+                                        config: Box::new(config),
+                                        preview,
+                                        recorder,
+                                        workflow,
                                     }
                                 }
                             }
                         }
                     }
-                };
-                (bootstrap, initial_settings)
-            }
-        },
+                }
+            };
+            (bootstrap, initial_settings)
+        }
     };
 
     let desktop = Config::new().with_custom_event_handler(move |event, _| {
@@ -359,17 +309,10 @@ fn App() -> Element {
     let InitialSettings {
         store,
         draft,
-        saved,
-        active,
-        load_error,
         initial_route,
     } = use_context::<InitialSettings>();
-    let settings = use_hook(move || {
-        Signal::new_in_scope(
-            SettingsPageState::new(draft, saved, active, load_error),
-            ScopeId::ROOT,
-        )
-    });
+    let settings =
+        use_hook(move || Signal::new_in_scope(SettingsPageState::new(draft), ScopeId::ROOT));
     use_context_provider(move || SettingsContext {
         state: settings,
         store,
@@ -549,9 +492,11 @@ mod tests {
         let (temporary, runtime, recorder) = test_recorder();
         let data_root = temporary.path().join("data");
         fs::create_dir(&data_root).expect("data root should be created");
-        let mut settings = Settings::default();
-        settings.next_camera_id = 3;
-        settings.cameras = camera_settings();
+        let settings = Settings {
+            next_camera_id: 3,
+            cameras: camera_settings(),
+            ..Settings::default()
+        };
         let store = SettingsStore::new(temporary.path().join("config/settings.json"), data_root)
             .expect("test settings paths should be valid");
         let config = store

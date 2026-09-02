@@ -44,11 +44,17 @@ pub fn init_stderr(level: LogLevel) -> Result<(), Error> {
 }
 
 fn filter(level: LogLevel) -> EnvFilter {
-    EnvFilter::new(level.as_str()).add_directive(
-        "rig::completions=off"
-            .parse()
-            .expect("provider payload filter should be valid"),
-    )
+    EnvFilter::new(level.as_str())
+        .add_directive(
+            "rig::completions=off"
+                .parse()
+                .expect("provider payload filter should be valid"),
+        )
+        .add_directive(
+            "dioxus_core::diff::node=off"
+                .parse()
+                .expect("Dioxus VNode filter should be valid"),
+        )
 }
 
 fn build_subscriber(
@@ -83,7 +89,15 @@ mod tests {
 
     use super::build_subscriber;
     use crate::settings::LogLevel;
+    use dioxus::prelude::*;
     use serde_json::Value;
+
+    const VNODE_SECRET: &str = "vnode-private-value-sentinel";
+
+    #[component]
+    fn SensitiveInput(value: String) -> Element {
+        rsx! { input { value } }
+    }
 
     #[test]
     fn writes_structured_events_to_daily_json_log() {
@@ -165,5 +179,34 @@ mod tests {
         let contents = fs::read_to_string(path).unwrap();
 
         assert!(!contents.contains("private checklist and image bytes"));
+    }
+
+    #[test]
+    fn never_writes_dynamic_vnode_values_when_trace_is_enabled() {
+        let directory = tempfile::tempdir().unwrap();
+        let (subscriber, guard) = build_subscriber(directory.path(), LogLevel::Trace).unwrap();
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::trace!("application trace marker");
+            let mut dom = VirtualDom::new_with_props(
+                SensitiveInput,
+                SensitiveInputProps {
+                    value: VNODE_SECRET.into(),
+                },
+            );
+            dom.rebuild_in_place();
+        });
+        drop(guard);
+
+        let path = fs::read_dir(directory.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let contents = fs::read_to_string(path).unwrap();
+
+        assert!(contents.contains("application trace marker"));
+        assert!(!contents.contains(VNODE_SECRET));
     }
 }

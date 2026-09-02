@@ -2,6 +2,7 @@
 
 use std::{
     env,
+    ffi::OsStr,
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream, UdpSocket},
@@ -34,6 +35,21 @@ const ESRCH: i32 = 3;
 const SIGINT: i32 = 2;
 const SIGKILL: i32 = 9;
 
+fn direct_openai_endpoint(base_url: Option<&OsStr>) -> Result<(), &'static str> {
+    if base_url.is_some() {
+        Err("OPENAI_BASE_URL must be unset; desktop paid validation targets OpenAI directly")
+    } else {
+        Ok(())
+    }
+}
+
+#[test]
+fn real_openai_endpoint_rejects_present_base_url_even_when_empty() {
+    assert!(direct_openai_endpoint(None).is_ok());
+    assert!(direct_openai_endpoint(Some(OsStr::new(""))).is_err());
+    assert!(direct_openai_endpoint(Some(OsStr::new("custom-endpoint"))).is_err());
+}
+
 unsafe extern "C" {
     fn kill(pid: i32, signal: i32) -> i32;
 }
@@ -43,6 +59,8 @@ unsafe extern "C" {
 fn desktop_operator_flow_records_two_cameras_and_analyzes() {
     let real_openai = env::var("LEO_E2E_REAL_OPENAI").as_deref() == Ok("1");
     let real_provider = if real_openai {
+        direct_openai_endpoint(env::var_os("OPENAI_BASE_URL").as_deref())
+            .unwrap_or_else(|message| panic!("{message}"));
         assert_eq!(
             env::var("LEO_E2E_REAL_OPENAI").as_deref(),
             Ok("1"),

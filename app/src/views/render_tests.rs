@@ -31,7 +31,8 @@ use crate::{
     preview::{PreviewFeed, PreviewState},
     session_task::handle_recorder_event,
     settings::{
-        CameraSettings, LogLevel, ResolvedSettings, Settings as ApplicationSettings, SettingsStore,
+        CameraSettings, LogLevel, OpenAiSettings, ResolvedSettings,
+        Settings as ApplicationSettings, SettingsStore,
     },
     views::{Settings as SettingsView, SettingsContext, SettingsPageState},
     workflow::Workflow,
@@ -44,6 +45,7 @@ struct RenderRootProps {
     workflow: Arc<Mutex<Option<Workflow>>>,
     preview: PreviewState,
     availability: RuntimeAvailability,
+    settings_store: SettingsStore,
     path: String,
 }
 
@@ -52,6 +54,7 @@ fn render_root(props: RenderRootProps) -> Element {
         workflow: initial,
         preview,
         availability,
+        settings_store,
         path,
     } = props;
     let workflow = use_signal(move || {
@@ -61,13 +64,12 @@ fn render_root(props: RenderRootProps) -> Element {
             .take()
             .expect("render root should take Workflow once")
     });
-    let settings =
-        use_signal(|| SettingsPageState::new(ApplicationSettings::default(), None, None, None));
+    let settings = use_signal(|| SettingsPageState::new(ApplicationSettings::default()));
     use_context_provider(|| workflow);
     use_context_provider(move || preview);
     use_context_provider(move || SettingsContext {
         state: settings,
-        store: None,
+        store: settings_store,
     });
     use_context_provider(move || availability);
 
@@ -112,7 +114,10 @@ fn render_settings_root(props: SettingsRenderRootProps) -> Element {
             .take()
             .expect("render settings root should take state once")
     });
-    use_context_provider(move || SettingsContext { state, store });
+    use_context_provider(move || SettingsContext {
+        state,
+        store: store.expect("render settings store should be available"),
+    });
     rsx! { SettingsView {} }
 }
 
@@ -136,7 +141,10 @@ fn render_settings_router_root(props: SettingsRouterRootProps) -> Element {
             .take()
             .expect("render settings root should take state once")
     });
-    use_context_provider(move || SettingsContext { state, store });
+    use_context_provider(move || SettingsContext {
+        state,
+        store: store.expect("render settings store should be available"),
+    });
     use_context_provider(move || availability);
     rsx! {
         HistoryProvider {
@@ -149,7 +157,7 @@ fn render_settings_router_root(props: SettingsRouterRootProps) -> Element {
 fn render_settings(state: SettingsPageState, store: Option<SettingsStore>) -> String {
     let props = SettingsRenderRootProps {
         state: Arc::new(Mutex::new(Some(state))),
-        store,
+        store: Some(store.unwrap_or_else(render_settings_store)),
     };
     let mut dom = VirtualDom::new_with_props(render_settings_root, props);
     dom.rebuild(&mut NoOpMutations);
@@ -163,7 +171,7 @@ fn render_settings_route(
 ) -> String {
     let props = SettingsRouterRootProps {
         state: Arc::new(Mutex::new(Some(state))),
-        store,
+        store: Some(store.unwrap_or_else(render_settings_store)),
         availability,
     };
     let mut dom = VirtualDom::new_with_props(render_settings_router_root, props);
@@ -171,11 +179,13 @@ fn render_settings_route(
     dioxus_ssr::render(&dom)
 }
 
-fn render_unconfigured(route: Route) -> String {
-    render_setup(route, None)
+fn render_settings_store() -> SettingsStore {
+    let root = std::env::temp_dir().join("leo-render-settings");
+    SettingsStore::new(root.join("settings.json"), root.join("data"))
+        .expect("render settings paths should be valid")
 }
 
-fn render_setup(route: Route, load_error: Option<String>) -> String {
+fn render_unconfigured(route: Route) -> String {
     let temporary = tempfile::tempdir().expect("temporary settings root should be created");
     let store = SettingsStore::new(
         temporary.path().join("config/settings.json"),
@@ -185,11 +195,8 @@ fn render_setup(route: Route, load_error: Option<String>) -> String {
     render_app(
         Bootstrap::SetupRequired,
         InitialSettings {
-            store: Some(store),
+            store,
             draft: ApplicationSettings::default(),
-            saved: None,
-            active: None,
-            load_error,
             initial_route: route,
         },
     )
@@ -206,11 +213,8 @@ fn render_loaded_failure(
             message: message.into(),
         },
         InitialSettings {
-            store: Some(store),
+            store,
             draft: resolved.settings.clone(),
-            saved: Some(resolved.clone()),
-            active: Some(resolved),
-            load_error: None,
             initial_route: route,
         },
     )
@@ -236,19 +240,29 @@ fn settings_snapshot(
         root.join(format!("{name}-default-data")),
     )
     .expect("render settings store should be valid");
-    let mut settings = ApplicationSettings::default();
-    settings.data_root = Some(root.join(format!("{name}-data")));
-    settings.openai.api_key = format!("{name}-secret-key");
-    settings.openai.model = model.into();
-    settings.openai.base_url = Some(format!("https://{name}.provider.example/v1"));
-    settings.log_level = log_level;
-    for _ in 0..camera_count {
-        let id = settings
-            .add_camera()
-            .expect("render settings camera should be added");
-        settings.cameras.last_mut().unwrap().rtsp_url =
-            format!("rtsp://{name}-camera-{id}.example/stream");
-    }
+    let next_camera_id = camera_count
+        .checked_add(1)
+        .expect("render settings camera IDs should fit");
+    let settings = ApplicationSettings {
+        next_camera_id,
+        cameras: (1..next_camera_id)
+            .map(|id| CameraSettings {
+                id,
+                name: format!("Camera {id}"),
+                rtsp_url: format!("rtsp://{name}-camera-{id}.example/stream"),
+                initially_included_in_analysis: true,
+                sample_every_ms: 1_000,
+            })
+            .collect(),
+        data_root: Some(root.join(format!("{name}-data"))),
+        openai: OpenAiSettings {
+            api_key: format!("{name}-secret-key"),
+            model: model.into(),
+            base_url: Some(format!("https://{name}.provider.example/v1")),
+        },
+        log_level,
+        ..ApplicationSettings::default()
+    };
     let resolved = store
         .resolve(settings)
         .expect("render settings should resolve");
@@ -334,10 +348,16 @@ impl Harness {
 
     fn render_at(mut self, preview: PreviewState, path: &str) -> String {
         let camera_count = self.workflow().cameras.len();
+        let settings_store = SettingsStore::new(
+            self._temporary.path().join("settings/settings.json"),
+            self._temporary.path().join("settings-data"),
+        )
+        .expect("render Settings store should be available");
         let props = RenderRootProps {
             workflow: Arc::new(Mutex::new(self.workflow.take())),
             preview,
             availability: RuntimeAvailability::Ready { camera_count },
+            settings_store,
             path: path.into(),
         };
         let mut dom = VirtualDom::new_with_props(render_root, props);
@@ -592,20 +612,6 @@ fn opening_tag_with_marker<'a>(html: &'a str, element: &str, marker: &str) -> &'
     &html[start..end]
 }
 
-fn section_with_heading<'a>(html: &'a str, heading: &str) -> &'a str {
-    let heading_index = html
-        .find(&format!(">{heading}<"))
-        .unwrap_or_else(|| panic!("expected heading {heading:?} in {html}"));
-    let start = html[..heading_index]
-        .rfind("<section")
-        .unwrap_or_else(|| panic!("expected section before {heading:?} in {html}"));
-    let end = html[heading_index..]
-        .find("</section>")
-        .map(|offset| heading_index + offset + "</section>".len())
-        .expect("diagnostic section should end");
-    &html[start..end]
-}
-
 fn assert_analysis_action(html: &str, label: &str, disabled: bool) {
     let button = opening_tag_with_marker(html, "button", r#"id="analysis-action""#);
     assert_eq!(
@@ -694,17 +700,6 @@ fn unavailable_monitor_renders_guidance_without_workflow_context() {
 }
 
 #[test]
-fn invalid_settings_render_the_shell_and_recovery_form() {
-    let message = "Application settings could not be loaded. Check the settings file and configured data directories.";
-    let html = render_setup(Route::Settings {}, Some(message.into()));
-
-    assert!(html.contains("Application settings"), "{html}");
-    assert!(html.contains(message), "{html}");
-    assert!(html.contains("Save settings"), "{html}");
-    assert!(!html.contains("Start session"), "{html}");
-}
-
-#[test]
 fn zero_camera_runtime_hides_start_and_keeps_analyze_available() {
     let html = render_ready_with_cameras(Route::Monitor {}, Vec::new());
     assert!(html.contains("No cameras are configured"));
@@ -737,7 +732,7 @@ fn monitor_sidebar_with_no_cameras_never_renders_start() {
 
 #[test]
 fn ready_settings_route_does_not_require_operational_contexts() {
-    let state = SettingsPageState::new(ApplicationSettings::default(), None, None, None);
+    let state = SettingsPageState::new(ApplicationSettings::default());
 
     let html = render_settings_route(state, None, RuntimeAvailability::Ready { camera_count: 2 });
 
@@ -746,7 +741,27 @@ fn ready_settings_route_does_not_require_operational_contexts() {
 }
 
 #[test]
-fn loaded_runtime_failure_keeps_settings_and_saved_active_snapshots() {
+fn active_recording_keeps_settings_save_enabled() {
+    let mut harness = Harness::new();
+    harness.activate();
+
+    let html = harness.render_at(ready_preview(), "/settings");
+
+    assert_button_disabled(&html, "Save settings", false);
+}
+
+#[test]
+fn running_analysis_keeps_settings_save_enabled() {
+    let mut harness = Harness::new();
+    harness.workflow_mut().running_analysis_id = Some(Uuid::from_u128(200));
+
+    let html = harness.render_at(ready_preview(), "/settings");
+
+    assert_button_disabled(&html, "Save settings", false);
+}
+
+#[test]
+fn loaded_runtime_failure_keeps_settings_editable() {
     let temporary = tempfile::tempdir().expect("temporary settings root should be created");
     let (store, resolved) = settings_snapshot(
         temporary.path(),
@@ -786,28 +801,35 @@ fn loaded_runtime_failure_keeps_settings_and_saved_active_snapshots() {
         resolved,
     );
     assert!(settings.contains("Application settings"), "{settings}");
-    assert!(settings.contains("Saved on disk"), "{settings}");
-    assert!(settings.contains("Active at startup"), "{settings}");
     assert!(settings.contains("loaded-model"), "{settings}");
 }
 
 #[test]
-fn settings_form_renders_all_sections_and_diagnostics() {
+fn settings_form_renders_all_sections() {
     let temporary = tempfile::tempdir().expect("temporary settings root should be created");
     let store = SettingsStore::new(
         temporary.path().join("config/settings.json"),
         temporary.path().join("default-data"),
     )
     .expect("render settings store should be valid");
-    let settings_path = store.settings_path.display().to_string();
     let default_data_root = store.default_data_root.display().to_string();
-    let mut settings = ApplicationSettings::default();
-    settings
-        .add_camera()
-        .expect("render settings camera should be added");
-    settings.cameras[0].rtsp_url = "rtsp://render-camera.example/stream".into();
-    settings.openai.api_key = "render-secret-key".into();
-    let state = SettingsPageState::new(settings, None, None, None);
+    let settings = ApplicationSettings {
+        next_camera_id: 2,
+        cameras: vec![CameraSettings {
+            id: 1,
+            name: "Camera 1".into(),
+            rtsp_url: "rtsp://render-camera.example/stream".into(),
+            initially_included_in_analysis: true,
+            sample_every_ms: 1_000,
+        }],
+        openai: OpenAiSettings {
+            api_key: "render-secret-key".into(),
+            model: String::new(),
+            base_url: None,
+        },
+        ..ApplicationSettings::default()
+    };
+    let state = SettingsPageState::new(settings);
 
     let html = render_settings(state, Some(store));
 
@@ -816,11 +838,10 @@ fn settings_form_renders_all_sections_and_diagnostics() {
     assert!(html.contains("Storage"), "{html}");
     assert!(html.contains("Recording"), "{html}");
     assert!(html.contains("Analysis provider"), "{html}");
-    assert!(html.contains("Diagnostics"), "{html}");
+    assert!(html.contains("Application"), "{html}");
     assert!(html.contains("type=\"password\""), "{html}");
     assert!(html.contains("webkitdirectory"), "{html}");
     assert!(html.contains("Save settings"), "{html}");
-    assert!(html.contains(&settings_path), "{html}");
     assert!(html.contains(&default_data_root), "{html}");
     assert!(!html.contains("Move up"), "{html}");
     assert!(!html.contains("Move down"), "{html}");
@@ -844,7 +865,7 @@ fn settings_form_renders_all_sections_and_diagnostics() {
 
 #[test]
 fn settings_form_renders_analysis_batching_controls_and_help() {
-    let state = SettingsPageState::new(ApplicationSettings::default(), None, None, None);
+    let state = SettingsPageState::new(ApplicationSettings::default());
 
     let html = render_settings(state, None);
 
@@ -872,7 +893,7 @@ fn settings_form_renders_analysis_batching_controls_and_help() {
 
 #[test]
 fn settings_overlap_error_is_accessibly_described() {
-    let mut state = SettingsPageState::new(ApplicationSettings::default(), None, None, None);
+    let mut state = SettingsPageState::new(ApplicationSettings::default());
     state.draft.analysis_overlap_frame_sets = "5".into();
     state.field_errors = match state.submission() {
         Err(errors) => errors,
@@ -899,10 +920,8 @@ fn settings_overlap_error_is_accessibly_described() {
 
 #[test]
 fn settings_form_field_errors_have_accessible_descriptions() {
-    let mut state = SettingsPageState::new(ApplicationSettings::default(), None, None, None);
-    state
-        .add_camera()
-        .expect("render settings camera should be added");
+    let mut state = SettingsPageState::new(ApplicationSettings::default());
+    state.add_camera();
     state.draft.cameras[0].rtsp_url = "http://wrong".into();
     state.field_errors = match state.submission() {
         Err(errors) => errors,
@@ -923,11 +942,9 @@ fn settings_form_field_errors_have_accessible_descriptions() {
 
 #[test]
 fn settings_camera_list_marks_every_camera_with_an_error() {
-    let mut state = SettingsPageState::new(ApplicationSettings::default(), None, None, None);
+    let mut state = SettingsPageState::new(ApplicationSettings::default());
     for _ in 0..3 {
-        let id = state
-            .add_camera()
-            .expect("render settings camera should be added");
+        let id = state.add_camera();
         state.draft.cameras[usize::try_from(id - 1).unwrap()].rtsp_url =
             format!("rtsp://camera-{id}.example/stream");
     }
@@ -959,116 +976,6 @@ fn settings_camera_list_marks_every_camera_with_an_error() {
             expected,
             "unexpected camera error marker for ID {camera_id}: {html}"
         );
-    }
-}
-
-#[test]
-fn settings_diagnostics_distinguish_draft_saved_and_active_snapshots() {
-    let temporary = tempfile::tempdir().expect("temporary settings root should be created");
-    let (draft_store, draft) =
-        settings_snapshot(temporary.path(), "draft", "draft-model", LogLevel::Debug, 1);
-    let (_, saved) = settings_snapshot(temporary.path(), "saved", "saved-model", LogLevel::Warn, 2);
-    let (_, active) = settings_snapshot(
-        temporary.path(),
-        "active",
-        "active-model",
-        LogLevel::Trace,
-        3,
-    );
-    let state = SettingsPageState::new(
-        draft.settings.clone(),
-        Some(saved.clone()),
-        Some(active.clone()),
-        None,
-    );
-
-    let html = render_settings(state, Some(draft_store));
-
-    for (heading, resolved, model, log_level, camera_ids) in [
-        ("Draft", &draft, "draft-model", "debug", "1"),
-        ("Saved on disk", &saved, "saved-model", "warn", "1, 2"),
-        (
-            "Active at startup",
-            &active,
-            "active-model",
-            "trace",
-            "1, 2, 3",
-        ),
-    ] {
-        let summary = section_with_heading(&html, heading);
-        for path in [
-            &resolved.settings_path,
-            &resolved.data_root,
-            &resolved.sessions_root,
-            &resolved.logs_root,
-        ] {
-            assert!(summary.contains(&path.display().to_string()), "{summary}");
-        }
-        assert!(summary.contains(model), "{summary}");
-        assert!(
-            summary.contains(resolved.settings.openai.base_url.as_deref().unwrap()),
-            "{summary}"
-        );
-        assert!(summary.contains("Configured"), "{summary}");
-        assert!(summary.contains(log_level), "{summary}");
-        assert!(summary.contains(camera_ids), "{summary}");
-        assert!(summary.contains("10 seconds"), "{summary}");
-        assert!(!summary.contains("secret-key"), "{summary}");
-        assert!(!summary.contains("rtsp://"), "{summary}");
-    }
-    assert_eq!(html.matches("draft-secret-key").count(), 1, "{html}");
-    for hidden in [
-        "saved-secret-key",
-        "active-secret-key",
-        "rtsp://saved-camera-1.example/stream",
-        "rtsp://active-camera-1.example/stream",
-    ] {
-        assert!(
-            !html.contains(hidden),
-            "found protected value {hidden:?} in {html}"
-        );
-    }
-}
-
-#[test]
-fn settings_diagnostics_include_draft_saved_and_active_batching_values() {
-    let temporary = tempfile::tempdir().expect("temporary settings root should be created");
-    let store = SettingsStore::new(
-        temporary.path().join("settings.json"),
-        temporary.path().join("default-data"),
-    )
-    .expect("render settings store should be valid");
-    let resolved = |frame_sets, overlap| {
-        store
-            .resolve(ApplicationSettings {
-                analysis_frame_sets_per_prompt: frame_sets,
-                analysis_overlap_frame_sets: overlap,
-                ..ApplicationSettings::default()
-            })
-            .expect("batching settings should resolve")
-    };
-    let draft = resolved(71, 11);
-    let saved = resolved(72, 12);
-    let active = resolved(73, 13);
-    let state = SettingsPageState::new(
-        draft.settings,
-        Some(saved.clone()),
-        Some(active.clone()),
-        None,
-    );
-
-    let html = render_settings(state, Some(store));
-
-    for (heading, frame_sets, overlap) in [
-        ("Draft", 71, 11),
-        ("Saved on disk", 72, 12),
-        ("Active at startup", 73, 13),
-    ] {
-        let summary = section_with_heading(&html, heading);
-        assert!(summary.contains("Frame sets per prompt"), "{summary}");
-        assert!(summary.contains("Overlapping frame sets"), "{summary}");
-        assert!(summary.contains(&format!(">{frame_sets}<")), "{summary}");
-        assert!(summary.contains(&format!(">{overlap}<")), "{summary}");
     }
 }
 

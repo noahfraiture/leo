@@ -33,8 +33,10 @@ test-e2e:
     nix develop --command cargo test -p camera --test rtsp_stream host_recorder_reconnects_into_a_second_segment -- --ignored --exact --nocapture
     LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 nix develop --command cargo test -p camera --features desktop-e2e --test desktop_e2e desktop_operator_flow_records_two_cameras_and_analyzes -- --ignored --exact --nocapture --test-threads=1
 
-# Run both real-provider checks only after explicit caller opt-in.
+# Run all three real-OpenAI checks only after explicit caller opt-in.
 test-paid:
+    @test -z "${OPENAI_BASE_URL+x}" || (echo "unset OPENAI_BASE_URL; desktop paid validation targets OpenAI directly" >&2; exit 1)
     @test "${LEO_RUN_PAID_OPENAI_TEST:-}" = 1 && test "${LEO_E2E_REAL_OPENAI:-}" = 1 && test -n "${OPENAI_API_KEY:-}" && test -n "${ANALYSIS_MODEL:-}" || (echo "set both paid flags, OPENAI_API_KEY, and ANALYSIS_MODEL to run paid tests" >&2; exit 1)
     nix develop --command cargo test -p app --features paid-openai-test paid_openai_workflow::paid_openai_analyzes_one_local_application_session -- --ignored --exact --nocapture
+    nix develop --command cargo test -p app --features paid-openai-test paid_openai_workflow::paid_openai_evaluates_controlled_visual_payloads -- --ignored --exact --nocapture
     nix develop --command cargo test -p camera --features desktop-e2e --test desktop_e2e desktop_operator_flow_records_two_cameras_and_analyzes -- --ignored --exact --nocapture --test-threads=1

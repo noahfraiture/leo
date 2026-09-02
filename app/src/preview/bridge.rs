@@ -217,8 +217,8 @@ pub(crate) fn start(sources: Vec<CameraSource>) -> Result<(PreviewState, Bridge)
     let mut child = Command::new("mediamtx")
         .arg(config.path())
         .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .map_err(Error::spawn)?;
 

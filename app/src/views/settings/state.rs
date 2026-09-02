@@ -3,15 +3,14 @@ use std::{collections::HashMap, path::PathBuf};
 use dioxus::prelude::Signal;
 
 use crate::settings::{
-    CameraSettings, LogLevel, OpenAiSettings, ResolvedSettings, SaveOutcome, Settings,
-    SettingsStore, ValidationError,
+    CameraSettings, LogLevel, OpenAiSettings, Settings, SettingsStore, ValidationError,
 };
 
-/// Root settings state and optional durable store shared by Settings components.
+/// Root settings state and durable store shared by Settings components.
 #[derive(Clone)]
 pub struct SettingsContext {
     pub state: Signal<SettingsPageState>,
-    pub store: Option<SettingsStore>,
+    pub store: SettingsStore,
 }
 
 /// Editable settings values, including numeric fields that may be temporarily invalid.
@@ -57,56 +56,37 @@ pub enum SettingsField {
     AnalysisFrameSetsPerPrompt,
     AnalysisOverlapFrameSets,
     OpenAiBaseUrl,
-    General,
 }
 
-/// Editable draft plus saved, active, and user-visible save status.
+/// Editable draft plus validation and save status.
 #[derive(Clone)]
 pub struct SettingsPageState {
     pub draft: SettingsDraft,
     pub selected_camera_id: Option<u32>,
-    pub saved: Option<ResolvedSettings>,
-    pub active: Option<ResolvedSettings>,
     pub field_errors: HashMap<SettingsField, String>,
-    pub load_error: Option<String>,
     pub save_error: Option<String>,
-    pub saving: bool,
     pub restart_required: bool,
-    pub durability_warning: Option<String>,
 }
 
 impl SettingsPageState {
-    /// Creates an editable draft while retaining independent saved and active snapshots.
-    pub fn new(
-        settings: Settings,
-        saved: Option<ResolvedSettings>,
-        active: Option<ResolvedSettings>,
-        load_error: Option<String>,
-    ) -> Self {
+    /// Creates an editable settings draft.
+    pub fn new(settings: Settings) -> Self {
         let selected_camera_id = settings.cameras.first().map(|camera| camera.id);
         Self {
             draft: SettingsDraft::from(settings),
             selected_camera_id,
-            saved,
-            active,
             field_errors: HashMap::new(),
-            load_error,
             save_error: None,
-            saving: false,
             restart_required: false,
-            durability_warning: None,
         }
     }
 
     /// Adds and selects a camera with the next monotonic ID.
-    pub fn add_camera(&mut self) -> Result<u32, ValidationError> {
-        if self.draft.next_camera_id == 0 {
-            return Err(ValidationError::InvalidNextCameraId);
-        }
+    pub fn add_camera(&mut self) -> u32 {
         let id = self.draft.next_camera_id;
         self.draft.next_camera_id = id
             .checked_add(1)
-            .ok_or(ValidationError::CameraIdExhausted)?;
+            .expect("camera IDs should not be exhausted");
         self.draft.cameras.push(CameraDraft {
             id,
             name: format!("Camera {id}"),
@@ -115,7 +95,7 @@ impl SettingsPageState {
             sample_every_secs: "1".into(),
         });
         self.selected_camera_id = Some(id);
-        Ok(id)
+        id
     }
 
     /// Removes only the selected camera and selects its nearest remaining neighbor.
@@ -268,13 +248,11 @@ impl SettingsPageState {
                     ),
                     ValidationError::UnsupportedSchemaVersion { .. }
                     | ValidationError::InvalidNextCameraId
-                    | ValidationError::CameraIdExhausted
                     | ValidationError::ZeroCameraId { .. }
                     | ValidationError::DuplicateCameraId { .. }
-                    | ValidationError::CameraIdNotBelowNext { .. } => (
-                        SettingsField::General,
-                        "Settings state is inconsistent. Reload Leo and try again.",
-                    ),
+                    | ValidationError::CameraIdNotBelowNext { .. } => {
+                        panic!("settings draft invariant should remain valid")
+                    }
                 };
                 errors.entry(field).or_insert_with(|| message.into());
             }
@@ -287,14 +265,11 @@ impl SettingsPageState {
         }
     }
 
-    /// Records a durable save while leaving active runtime settings untouched.
-    pub fn apply_save(&mut self, outcome: SaveOutcome) {
-        self.saved = Some(outcome.resolved);
+    /// Marks the draft as saved; runtime services still require a restart.
+    pub fn mark_saved(&mut self) {
         self.field_errors.clear();
         self.save_error = None;
-        self.saving = false;
         self.restart_required = true;
-        self.durability_warning = outcome.durability_warning;
     }
 }
 
@@ -330,49 +305,22 @@ impl From<Settings> for SettingsDraft {
 
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroUsize, time::Duration};
-
-    use backend::recording::RecorderSettings;
-
     use super::*;
-    use crate::settings::{ResolvedSettings, SaveOutcome, Settings};
-
-    fn resolved_settings(model: &str) -> ResolvedSettings {
-        let root = std::env::temp_dir().join(format!("leo-settings-state-{model}"));
-        let mut settings = Settings::default();
-        settings.openai.api_key = "test-key".into();
-        settings.openai.model = model.into();
-        ResolvedSettings {
-            openai: settings.openai_config(),
-            log_level: settings.log_level,
-            settings,
-            settings_path: root.join("settings.json"),
-            data_root: root.join("data"),
-            sessions_root: root.join("data/sessions"),
-            logs_root: root.join("data/logs"),
-            recorder_settings: RecorderSettings {
-                io_timeout: Duration::from_secs(10),
-                retry_delay: Duration::from_secs(1),
-                stop_timeout: Duration::from_secs(5),
-            },
-            analysis_frame_sets_per_prompt: NonZeroUsize::new(5).unwrap(),
-            analysis_overlap_frame_sets: 0,
-        }
-    }
+    use crate::settings::Settings;
 
     #[test]
     fn camera_ids_remain_monotonic_after_removing_the_selected_camera() {
-        let mut state = SettingsPageState::new(Settings::default(), None, None, None);
-        assert_eq!(state.add_camera().unwrap(), 1);
+        let mut state = SettingsPageState::new(Settings::default());
+        assert_eq!(state.add_camera(), 1);
         state.remove_selected_camera();
-        assert_eq!(state.add_camera().unwrap(), 2);
+        assert_eq!(state.add_camera(), 2);
     }
 
     #[test]
     fn removing_a_camera_clears_only_its_field_errors() {
-        let mut state = SettingsPageState::new(Settings::default(), None, None, None);
-        state.add_camera().unwrap();
-        let removed_id = state.add_camera().unwrap();
+        let mut state = SettingsPageState::new(Settings::default());
+        state.add_camera();
+        let removed_id = state.add_camera();
         for field in [
             SettingsField::CameraName(removed_id),
             SettingsField::CameraRtspUrl(removed_id),
@@ -401,35 +349,17 @@ mod tests {
     }
 
     #[test]
-    fn successful_save_updates_saved_not_active_and_requires_restart() {
-        let active = resolved_settings("active-model");
-        let saved = resolved_settings("saved-model");
-        let mut state = SettingsPageState::new(
-            active.settings.clone(),
-            Some(active.clone()),
-            Some(active.clone()),
-            None,
-        );
-        state.apply_save(SaveOutcome {
-            resolved: saved.clone(),
-            durability_warning: None,
-        });
+    fn successful_save_requires_restart() {
+        let mut state = SettingsPageState::new(Settings::default());
+        state.mark_saved();
 
-        assert_eq!(
-            state.active.as_ref().unwrap().settings.openai.model,
-            "active-model"
-        );
-        assert_eq!(
-            state.saved.as_ref().unwrap().settings.openai.model,
-            "saved-model"
-        );
         assert!(state.restart_required);
     }
 
     #[test]
     fn draft_conversion_reports_camera_and_numeric_fields() {
-        let mut state = SettingsPageState::new(Settings::default(), None, None, None);
-        state.add_camera().unwrap();
+        let mut state = SettingsPageState::new(Settings::default());
+        state.add_camera();
         state.draft.cameras[0].rtsp_url = "http://wrong".into();
         state.draft.recorder_timeout_secs.clear();
         let errors = match state.submission() {
@@ -447,7 +377,7 @@ mod tests {
             analysis_overlap_frame_sets: 2,
             ..Settings::default()
         };
-        let mut state = SettingsPageState::new(settings, None, None, None);
+        let mut state = SettingsPageState::new(settings);
 
         assert_eq!(state.draft.analysis_frame_sets_per_prompt, "7");
         assert_eq!(state.draft.analysis_overlap_frame_sets, "2");
@@ -461,7 +391,7 @@ mod tests {
 
     #[test]
     fn draft_maps_analysis_batching_errors_to_their_fields() {
-        let mut state = SettingsPageState::new(Settings::default(), None, None, None);
+        let mut state = SettingsPageState::new(Settings::default());
         state.draft.analysis_frame_sets_per_prompt.clear();
         state.draft.analysis_overlap_frame_sets = "-1".into();
 

@@ -97,33 +97,6 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Adds an editable camera draft with a fresh monotonic ID.
-    pub fn add_camera(&mut self) -> Result<u32, ValidationError> {
-        if self.next_camera_id == 0 {
-            return Err(ValidationError::InvalidNextCameraId);
-        }
-        let id = self.next_camera_id;
-        let next_camera_id = id
-            .checked_add(1)
-            .ok_or(ValidationError::CameraIdExhausted)?;
-        self.cameras.push(CameraSettings {
-            id,
-            name: format!("Camera {id}"),
-            rtsp_url: String::new(),
-            initially_included_in_analysis: true,
-            sample_every_ms: 1_000,
-        });
-        self.next_camera_id = next_camera_id;
-        Ok(id)
-    }
-
-    /// Removes the camera with `camera_id` without making its ID reusable.
-    pub fn remove_camera(&mut self, camera_id: u32) -> bool {
-        let previous_len = self.cameras.len();
-        self.cameras.retain(|camera| camera.id != camera_id);
-        self.cameras.len() != previous_len
-    }
-
     /// Returns every invalid persisted field or cross-field invariant.
     pub fn validate(&self) -> Result<(), ValidationErrors> {
         let mut errors = Vec::new();
@@ -163,7 +136,7 @@ impl Settings {
                 errors.push(ValidationError::BlankCameraUrl {
                     camera_id: camera.id,
                 });
-            } else if !Url::parse(&camera.rtsp_url).is_ok_and(|url| url.scheme() == "rtsp") {
+            } else if !valid_rtsp_url(&camera.rtsp_url) {
                 errors.push(ValidationError::InvalidCameraUrl {
                     camera_id: camera.id,
                 });
@@ -223,12 +196,40 @@ impl Settings {
     }
 }
 
+fn valid_rtsp_url(value: &str) -> bool {
+    Url::parse(value).is_ok_and(|url| url.scheme() == "rtsp" && url.has_host())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
     use super::*;
     use crate::settings::ValidationError;
+
+    fn settings_with_camera_url(rtsp_url: &str) -> Settings {
+        Settings {
+            next_camera_id: 2,
+            cameras: vec![CameraSettings {
+                id: 1,
+                name: "Camera 1".into(),
+                rtsp_url: rtsp_url.into(),
+                initially_included_in_analysis: true,
+                sample_every_ms: 1_000,
+            }],
+            ..Settings::default()
+        }
+    }
+
+    fn assert_invalid_camera_url(rtsp_url: &str) {
+        let errors = settings_with_camera_url(rtsp_url).validate().unwrap_err();
+        assert!(
+            errors
+                .0
+                .contains(&ValidationError::InvalidCameraUrl { camera_id: 1 })
+        );
+        assert_eq!(errors.to_string(), "settings validation failed");
+    }
 
     #[test]
     fn defaults_are_an_unconfigured_valid_draft() {
@@ -271,15 +272,6 @@ mod tests {
     }
 
     #[test]
-    fn generated_camera_ids_remain_monotonic_after_removal() {
-        let mut settings = Settings::default();
-        assert_eq!(settings.add_camera().unwrap(), 1);
-        assert!(settings.remove_camera(1));
-        assert_eq!(settings.add_camera().unwrap(), 2);
-        assert_eq!(settings.next_camera_id, 3);
-    }
-
-    #[test]
     fn strict_schema_rejects_unknown_fields() {
         let mut value = serde_json::to_value(Settings::default()).unwrap();
         value["unexpected"] = serde_json::json!(true);
@@ -301,6 +293,25 @@ mod tests {
         }
         settings.next_camera_id = 4;
         settings.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_hostless_camera_url() {
+        assert_invalid_camera_url("rtsp:private-hostless-marker");
+    }
+
+    #[test]
+    fn accepts_credential_bearing_camera_url() {
+        settings_with_camera_url("rtsp://user:pass@camera.example/stream")
+            .validate()
+            .unwrap();
+    }
+
+    #[test]
+    fn accepts_percent_encoded_camera_url() {
+        settings_with_camera_url("rtsp://camera.example/private-%25-marker")
+            .validate()
+            .unwrap();
     }
 
     #[test]
@@ -403,7 +414,6 @@ mod tests {
     #[test]
     fn camera_ids_must_be_below_the_next_allocation() {
         let mut settings = Settings::default();
-        settings.next_camera_id = 1;
         settings.cameras.push(CameraSettings {
             id: 1,
             name: "Camera 1".into(),
@@ -421,22 +431,11 @@ mod tests {
     }
 
     #[test]
-    fn camera_id_exhaustion_does_not_mutate_settings() {
-        let mut settings = Settings::default();
-        settings.next_camera_id = u32::MAX;
-
-        assert_eq!(
-            settings.add_camera(),
-            Err(ValidationError::CameraIdExhausted)
-        );
-        assert!(settings.cameras.is_empty());
-        assert_eq!(settings.next_camera_id, u32::MAX);
-    }
-
-    #[test]
     fn recorder_timeout_must_fit_runtime_limits() {
-        let mut settings = Settings::default();
-        settings.recorder_timeout_secs = u64::MAX;
+        let settings = Settings {
+            recorder_timeout_secs: u64::MAX,
+            ..Settings::default()
+        };
 
         assert!(
             settings

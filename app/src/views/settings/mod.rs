@@ -1,5 +1,5 @@
-mod settings;
+mod page;
 mod state;
 
-pub use settings::{Settings, SettingsSidebar};
+pub use page::{Settings, SettingsSidebar};
 pub use state::{SettingsContext, SettingsPageState};

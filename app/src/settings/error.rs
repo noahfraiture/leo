@@ -14,14 +14,6 @@ pub enum Error {
     InvalidSettings(#[source] ValidationErrors),
     #[error("settings path has no parent directory: {path}")]
     SettingsPathWithoutParent { path: PathBuf },
-    #[error("failed to inspect settings file at {path}")]
-    InspectSettingsFile {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("settings file is not a direct regular file: {path}")]
-    InvalidSettingsFile { path: PathBuf },
     #[error("failed to read settings file at {path}")]
     ReadSettings {
         path: PathBuf,
@@ -30,35 +22,8 @@ pub enum Error {
     },
     #[error("failed to parse settings file at {path}")]
     ParseSettings { path: PathBuf },
-    #[error("managed path is not a direct directory: {path}")]
-    InvalidDirectory { path: PathBuf },
-    #[error("failed to inspect managed directory {path}")]
-    InspectDirectory {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
     #[error("failed to create managed directory {path}")]
     CreateDirectory {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("failed to probe managed directory {path}")]
-    ProbeDirectory {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("failed to create a temporary settings file beside {path}")]
-    CreateTemporarySettings {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[cfg(unix)]
-    #[error("failed to make the temporary settings file private at {path}")]
-    SetTemporaryPermissions {
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -69,14 +34,8 @@ pub enum Error {
         #[source]
         source: serde_json::Error,
     },
-    #[error("failed to write temporary settings beside {path}")]
-    WriteTemporarySettings {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("failed to replace settings file at {path}")]
-    ReplaceSettings {
+    #[error("failed to write settings at {path}")]
+    WriteSettings {
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -90,8 +49,6 @@ pub enum ValidationError {
     UnsupportedSchemaVersion { expected: u32, actual: u32 },
     #[error("next camera ID must be nonzero")]
     InvalidNextCameraId,
-    #[error("camera IDs are exhausted")]
-    CameraIdExhausted,
     #[error("camera at index {camera_index} has ID zero")]
     ZeroCameraId { camera_index: usize },
     #[error("camera ID {camera_id} is duplicated")]
