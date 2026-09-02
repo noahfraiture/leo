@@ -1,5 +1,7 @@
 #[allow(clippy::module_inception)]
 mod monitor;
+#[cfg(all(test, unix))]
+mod render_tests;
 mod sidebar;
 
 pub use monitor::Monitor;

@@ -19,7 +19,7 @@ pub fn Layout() -> Element {
                 class: "flex shrink-0 flex-col bg-base-200 p-3 lg:w-80 lg:overflow-y-auto",
                 div {
                     class: "shrink-0",
-                    NavButton { route: route.clone() }
+                    PrimaryNavigation { route: route.clone() }
                 }
 
                 hr {
@@ -37,16 +37,20 @@ pub fn Layout() -> Element {
                 if matches!(&availability, RuntimeAvailability::Ready { .. })
                     && !matches!(&route, Route::Settings {})
                 {
-                    WorkflowMessage {}
+                    WorkflowAlert {}
                 }
-                Home { route: route.clone(), availability }
+                RouteContent { route: route.clone(), availability }
             }
         }
     }
 }
 
+/// Reads the ready-only Workflow context and renders its route-independent failure alert.
+///
+/// Keeping this context consumer behind a component boundary lets setup and failed shells render
+/// the same layout without installing operational contexts.
 #[component]
-fn WorkflowMessage() -> Element {
+fn WorkflowAlert() -> Element {
     let workflow = use_context::<Signal<Workflow>>();
     let message = workflow.read().message.clone();
 
@@ -63,7 +67,7 @@ fn WorkflowMessage() -> Element {
 }
 
 #[component]
-fn NavButton(route: Route) -> Element {
+fn PrimaryNavigation(route: Route) -> Element {
     rsx! {
         nav {
             id: "navbutton",
@@ -106,7 +110,7 @@ fn NavButton(route: Route) -> Element {
 }
 
 #[component]
-fn Home(route: Route, availability: RuntimeAvailability) -> Element {
+fn RouteContent(route: Route, availability: RuntimeAvailability) -> Element {
     match route {
         Route::Settings {} => rsx! {
             Settings {}
