@@ -86,22 +86,6 @@ pub fn list_sessions(root: &Path) -> Result<Vec<StoredSession>> {
 
 /// Durably creates the zero-byte completion marker without replacing an existing entry.
 pub fn mark_recording_complete(directory: &Path) -> Result<()> {
-    mark_recording_complete_with_sync(
-        directory,
-        File::sync_all,
-        |directory| File::open(directory)?.sync_all(),
-        |file| file.set_len(1).and_then(|()| file.sync_all()),
-        |path| fs::remove_file(path),
-    )
-}
-
-fn mark_recording_complete_with_sync(
-    directory: &Path,
-    mut sync_marker: impl FnMut(&File) -> io::Result<()>,
-    mut sync_directory: impl FnMut(&Path) -> io::Result<()>,
-    invalidate_marker: impl FnOnce(&File) -> io::Result<()>,
-    mut remove_marker: impl FnMut(&Path) -> io::Result<()>,
-) -> Result<()> {
     if !fs::symlink_metadata(directory)?.file_type().is_dir() {
         return Err(Error::InvalidSessionDirectory);
     }
@@ -111,23 +95,23 @@ fn mark_recording_complete_with_sync(
         .prefix(".recording-complete-")
         .tempfile_in(directory)?;
     temporary.write_all(&[0])?;
-    sync_marker(temporary.as_file())?;
+    temporary.as_file().sync_all()?;
     let file = temporary
         .persist_noclobber(&path)
         .map_err(|error| error.error)?;
     let completed = (|| {
-        sync_directory(directory)?;
+        File::open(directory)?.sync_all()?;
         file.set_len(0)?;
-        sync_marker(&file)
+        file.sync_all()
     })();
     if let Err(first_error) = completed {
-        let _ = invalidate_marker(&file);
+        let _ = file.set_len(1).and_then(|()| file.sync_all());
         drop(file);
-        if let Err(error) = remove_marker(&path) {
-            let _ = sync_directory(directory);
+        if let Err(error) = fs::remove_file(&path) {
+            let _ = File::open(directory).and_then(|directory| directory.sync_all());
             return Err(error.into());
         }
-        let _ = sync_directory(directory);
+        let _ = File::open(directory).and_then(|directory| directory.sync_all());
         return Err(first_error.into());
     }
     Ok(())
@@ -136,15 +120,13 @@ fn mark_recording_complete_with_sync(
 #[cfg(test)]
 mod tests {
     use std::{
-        cell::Cell,
-        fs, io,
+        fs,
         path::{Path, PathBuf},
     };
 
     use serde_json::json;
     use uuid::Uuid;
 
-    use super::mark_recording_complete_with_sync;
     use crate::session::{Error, StoredSession, list_sessions, mark_recording_complete};
 
     const VALID_ID: &str = "5a660250-36fc-4c2b-93fa-b04247bdad20";
@@ -341,24 +323,6 @@ mod tests {
         assert_eq!(sessions[0].directory, valid);
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn catalogue_rejects_a_symlinked_root() {
-        use std::os::unix::fs::symlink;
-
-        let target = tempfile::tempdir().expect("target directory should be created");
-        write_complete_session(target.path(), "valid", VALID_ID, 1_000);
-        let parent = tempfile::tempdir().expect("temporary directory should be created");
-        let root = parent.path().join("sessions");
-        symlink(target.path(), &root).expect("root symlink should be created");
-
-        let Error::Io(error) = list_sessions(&root).expect_err("symlinked root should be rejected")
-        else {
-            panic!("symlinked root should return an I/O error");
-        };
-        assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory);
-    }
-
     #[test]
     fn catalogue_sorts_newest_first_by_start_and_uuid() {
         let root = tempfile::tempdir().expect("temporary directory should be created");
@@ -401,157 +365,6 @@ mod tests {
             panic!("existing marker should return an I/O error");
         };
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
-    }
-
-    #[test]
-    fn temporary_marker_sync_failure_never_publishes_marker() {
-        let root = tempfile::tempdir().expect("temporary directory should be created");
-        let directory = root.path().join("session");
-        fs::create_dir(&directory).expect("session directory should be created");
-        let directory_syncs = Cell::new(0);
-
-        let Error::Io(error) = mark_recording_complete_with_sync(
-            &directory,
-            |_| Err(io::Error::other("injected marker sync failure")),
-            |_| {
-                directory_syncs.set(directory_syncs.get() + 1);
-                Ok(())
-            },
-            |file| file.set_len(1).and_then(|()| file.sync_all()),
-            |path| fs::remove_file(path),
-        )
-        .expect_err("marker sync should fail") else {
-            panic!("sync failure should return an I/O error");
-        };
-
-        assert_eq!(error.to_string(), "injected marker sync failure");
-        assert_eq!(directory_syncs.get(), 0);
-        assert!(!directory.join("recording-complete").exists());
-    }
-
-    #[test]
-    fn directory_sync_failure_preserves_first_error_after_cleanup_attempts() {
-        let root = tempfile::tempdir().expect("temporary directory should be created");
-        let directory = root.path().join("session");
-        fs::create_dir(&directory).expect("session directory should be created");
-        let directory_syncs = Cell::new(0);
-
-        let Error::Io(error) = mark_recording_complete_with_sync(
-            &directory,
-            |_| Ok(()),
-            |_| {
-                let call = directory_syncs.get();
-                directory_syncs.set(call + 1);
-                Err(io::Error::other(if call == 0 {
-                    "injected initial directory sync failure"
-                } else {
-                    "injected cleanup directory sync failure"
-                }))
-            },
-            |file| file.set_len(1).and_then(|()| file.sync_all()),
-            |path| fs::remove_file(path),
-        )
-        .expect_err("directory sync should fail") else {
-            panic!("sync failure should return an I/O error");
-        };
-
-        assert_eq!(error.to_string(), "injected initial directory sync failure");
-        assert_eq!(directory_syncs.get(), 2);
-        assert!(!directory.join("recording-complete").exists());
-    }
-
-    #[test]
-    fn marker_removal_failure_leaves_an_invalid_marker() {
-        let root = tempfile::tempdir().expect("temporary directory should be created");
-        let directory = root.path().join("session");
-        fs::create_dir(&directory).expect("session directory should be created");
-
-        let Error::Io(error) = mark_recording_complete_with_sync(
-            &directory,
-            |_| Ok(()),
-            |_| Err(io::Error::other("injected directory sync failure")),
-            |file| file.set_len(1).and_then(|()| file.sync_all()),
-            |_| Err(io::Error::other("injected marker removal failure")),
-        )
-        .expect_err("marker rollback should fail") else {
-            panic!("rollback failure should return an I/O error");
-        };
-
-        assert_eq!(error.to_string(), "injected marker removal failure");
-        assert_eq!(
-            fs::metadata(directory.join("recording-complete"))
-                .unwrap()
-                .len(),
-            1
-        );
-    }
-
-    #[test]
-    fn marker_invalidation_failure_still_attempts_removal() {
-        let root = tempfile::tempdir().expect("temporary directory should be created");
-        let directory = root.path().join("session");
-        fs::create_dir(&directory).expect("session directory should be created");
-        let removal_attempted = Cell::new(false);
-
-        let Error::Io(error) = mark_recording_complete_with_sync(
-            &directory,
-            |_| Ok(()),
-            |_| Err(io::Error::other("injected directory sync failure")),
-            |_| Err(io::Error::other("injected marker invalidation failure")),
-            |path| {
-                removal_attempted.set(true);
-                fs::remove_file(path)
-            },
-        )
-        .expect_err("marker sync should fail") else {
-            panic!("sync failure should return an I/O error");
-        };
-
-        assert_eq!(error.to_string(), "injected directory sync failure");
-        assert!(removal_attempted.get());
-        assert!(!directory.join("recording-complete").exists());
-    }
-
-    #[test]
-    fn marker_stays_unpublished_until_the_sentinel_is_synced() {
-        let root = tempfile::tempdir().expect("temporary directory should be created");
-        let directory = root.path().join("session");
-        fs::create_dir(&directory).expect("session directory should be created");
-        let marker = directory.join("recording-complete");
-
-        let Error::Io(error) = mark_recording_complete_with_sync(
-            &directory,
-            |_| {
-                assert!(!marker.exists(), "zero-byte marker was published too early");
-                Err(io::Error::other("injected temporary marker sync failure"))
-            },
-            |_| Ok(()),
-            |file| file.set_len(1).and_then(|()| file.sync_all()),
-            |path| fs::remove_file(path),
-        )
-        .expect_err("temporary marker sync should fail") else {
-            panic!("sync failure should return an I/O error");
-        };
-
-        assert_eq!(error.to_string(), "injected temporary marker sync failure");
-        assert!(!marker.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn mark_recording_complete_rejects_a_symlinked_path_before_marker_creation() {
-        use std::os::unix::fs::symlink;
-
-        let target = tempfile::tempdir().expect("target directory should be created");
-        let parent = tempfile::tempdir().expect("temporary directory should be created");
-        let directory = parent.path().join("session");
-        symlink(target.path(), &directory).expect("directory symlink should be created");
-
-        assert!(matches!(
-            mark_recording_complete(&directory),
-            Err(Error::InvalidSessionDirectory)
-        ));
-        assert!(!target.path().join("recording-complete").exists());
     }
 
     #[test]

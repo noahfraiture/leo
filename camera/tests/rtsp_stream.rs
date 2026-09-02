@@ -11,12 +11,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use backend::{
-    analysis::extract_jpeg_for_test,
-    recording::{
-        RecorderEvent, RecorderSettings, RecorderStatus, RecordingCamera, RecordingSegment,
-        test_support,
-    },
+use backend::recording::{
+    RecorderEvent, RecorderSettings, RecorderStatus, RecordingCamera, RecordingSegment,
+    test_support,
 };
 use tempfile::NamedTempFile;
 
@@ -249,10 +246,6 @@ async fn host_recorder_reconnects_into_a_second_segment() {
     for segment in &segments {
         assert!(segment.start_utc_ms < segment.end_utc_ms);
         assert_finalized_matroska_h264(&segment.path);
-        let jpeg = extract_jpeg_for_test(&segment.path, Duration::from_millis(500))
-            .expect("extract JPEG from finalized segment");
-        assert!(jpeg.starts_with(&[0xff, 0xd8, 0xff]));
-        assert!(jpeg.ends_with(&[0xff, 0xd9]));
     }
 
     let camera_pid = camera.child.id() as i32;

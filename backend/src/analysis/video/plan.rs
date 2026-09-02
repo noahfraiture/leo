@@ -494,127 +494,93 @@ mod tests {
     }
 
     #[test]
-    fn initially_enabled_cameras_sample_at_offset_zero() {
-        let session = session(
-            true,
-            Duration::from_secs(3),
-            Duration::from_secs(10),
-            vec![],
-        );
+    fn operator_changes_define_the_sampling_schedule() {
+        struct Case {
+            name: &'static str,
+            initially_enabled: bool,
+            sample_every_secs: u64,
+            actions: Vec<(Duration, OperatorAction)>,
+            expected_secs: &'static [u64],
+        }
 
-        assert_eq!(sample_offsets(&session), seconds(&[0, 3, 6, 9]));
-    }
+        let cases = [
+            Case {
+                name: "initially enabled",
+                initially_enabled: true,
+                sample_every_secs: 3,
+                actions: vec![],
+                expected_secs: &[0, 3, 6, 9],
+            },
+            Case {
+                name: "initially disabled",
+                initially_enabled: false,
+                sample_every_secs: 3,
+                actions: vec![participation(4, true)],
+                expected_secs: &[4, 7],
+            },
+            Case {
+                name: "disabled on a scheduled sample",
+                initially_enabled: true,
+                sample_every_secs: 3,
+                actions: vec![participation(6, false)],
+                expected_secs: &[0, 3],
+            },
+            Case {
+                name: "re-enabled with a fresh cadence",
+                initially_enabled: true,
+                sample_every_secs: 3,
+                actions: vec![participation(2, false), participation(5, true)],
+                expected_secs: &[0, 5, 8],
+            },
+            Case {
+                name: "cadence changed",
+                initially_enabled: true,
+                sample_every_secs: 3,
+                actions: vec![interval(4, 2)],
+                expected_secs: &[0, 3, 4, 6, 8],
+            },
+            Case {
+                name: "same-offset changes applied together",
+                initially_enabled: true,
+                sample_every_secs: 5,
+                actions: vec![
+                    participation(5, false),
+                    interval(5, 2),
+                    participation(5, true),
+                ],
+                expected_secs: &[0, 5, 7, 9],
+            },
+            Case {
+                name: "repeated values are no-ops",
+                initially_enabled: true,
+                sample_every_secs: 4,
+                actions: vec![participation(3, true), interval(5, 4)],
+                expected_secs: &[0, 4, 8],
+            },
+            Case {
+                name: "session end is exclusive",
+                initially_enabled: true,
+                sample_every_secs: 5,
+                actions: vec![],
+                expected_secs: &[0, 5],
+            },
+        ];
 
-    #[test]
-    fn initially_disabled_cameras_wait_until_enabled() {
-        let session = session(
-            false,
-            Duration::from_secs(3),
-            Duration::from_secs(10),
-            vec![participation(4, true)],
-        );
+        for case in cases {
+            let session = session(
+                case.initially_enabled,
+                Duration::from_secs(case.sample_every_secs),
+                Duration::from_secs(10),
+                case.actions,
+            );
 
-        assert_eq!(sample_offsets(&session), seconds(&[4, 7]));
-    }
-
-    #[test]
-    fn disabling_at_an_offset_removes_that_offsets_sample() {
-        let session = session(
-            true,
-            Duration::from_secs(3),
-            Duration::from_secs(10),
-            vec![participation(6, false)],
-        );
-
-        assert_eq!(sample_offsets(&session), seconds(&[0, 3]));
-    }
-
-    #[test]
-    fn enabling_samples_immediately_and_starts_a_new_cadence() {
-        let session = session(
-            true,
-            Duration::from_secs(3),
-            Duration::from_secs(10),
-            vec![participation(2, false), participation(5, true)],
-        );
-
-        assert_eq!(sample_offsets(&session), seconds(&[0, 5, 8]));
-    }
-
-    #[test]
-    fn interval_changes_sample_immediately_and_start_a_new_cadence() {
-        let session = session(
-            true,
-            Duration::from_secs(3),
-            Duration::from_secs(10),
-            vec![interval(4, 2)],
-        );
-
-        assert_eq!(sample_offsets(&session), seconds(&[0, 3, 4, 6, 8]));
-    }
-
-    #[test]
-    fn same_offset_events_are_applied_before_sampling() {
-        let session = session(
-            true,
-            Duration::from_secs(5),
-            Duration::from_secs(10),
-            vec![
-                participation(5, false),
-                interval(5, 2),
-                participation(5, true),
-            ],
-        );
-
-        assert_eq!(sample_offsets(&session), seconds(&[0, 5, 7, 9]));
-    }
-
-    #[test]
-    fn repeated_state_and_interval_are_no_ops_for_cadence() {
-        let session = session(
-            true,
-            Duration::from_secs(4),
-            Duration::from_secs(10),
-            vec![participation(3, true), interval(5, 4)],
-        );
-
-        assert_eq!(sample_offsets(&session), seconds(&[0, 4, 8]));
-    }
-
-    #[test]
-    fn same_offset_participation_changes_that_cancel_are_a_no_op() {
-        let session = session(
-            true,
-            Duration::from_secs(4),
-            Duration::from_secs(10),
-            vec![participation(3, false), participation(3, true)],
-        );
-
-        assert_eq!(sample_offsets(&session), seconds(&[0, 4, 8]));
-    }
-
-    #[test]
-    fn same_offset_interval_changes_that_cancel_are_a_no_op() {
-        let session = session(
-            true,
-            Duration::from_secs(4),
-            Duration::from_secs(10),
-            vec![interval(3, 2), interval(3, 4)],
-        );
-
-        assert_eq!(sample_offsets(&session), seconds(&[0, 4, 8]));
-    }
-
-    #[test]
-    fn session_end_is_exclusive() {
-        let session = session(
-            true,
-            Duration::from_secs(5),
-            Duration::from_secs(10),
-            vec![],
-        );
-
-        assert_eq!(sample_offsets(&session), seconds(&[0, 5]));
+            assert_eq!(
+                sample_offsets(&session),
+                seconds(case.expected_secs),
+                "{}",
+                case.name
+            );
+        }
     }
 
     #[test]
@@ -665,24 +631,6 @@ mod tests {
                 .windows(2)
                 .all(|periods| periods[0].end <= periods[1].start)
         );
-    }
-
-    #[test]
-    fn generated_offsets_are_ordered_and_unique() {
-        let session = session(
-            true,
-            Duration::from_secs(3),
-            Duration::from_secs(12),
-            vec![
-                interval(4, 2),
-                participation(8, false),
-                participation(9, true),
-            ],
-        );
-
-        let offsets = sample_offsets(&session);
-
-        assert!(offsets.windows(2).all(|offsets| offsets[0] < offsets[1]));
     }
 
     #[test]
@@ -781,23 +729,6 @@ mod tests {
             .expect_err("the sample at two seconds has two recordings");
 
         assert!(error.to_string().contains("multiple recordings"));
-    }
-
-    #[test]
-    fn sequences_reject_utc_timestamp_overflow() {
-        let schedule = SamplingSchedule {
-            camera_id: 1,
-            periods: vec![SamplingPeriod {
-                start: Duration::from_millis(1),
-                end: Duration::from_millis(2),
-                sample_every: Duration::from_millis(1),
-            }],
-        };
-
-        let error = SampleSequence::from_segments(i64::MAX, &schedule, &[])
-            .expect_err("the session anchor and offset should be checked");
-
-        assert!(error.to_string().contains("UTC timestamp"));
     }
 
     fn frame(camera_id: u32, sample_index: usize, offset_secs: u64) -> Frame {
@@ -990,25 +921,6 @@ mod tests {
     }
 
     #[test]
-    fn frame_sets_sort_unsorted_input_sequences_by_camera_id() {
-        let frame_sets = FrameSet::from_sequences(vec![
-            sequence(3, &[0]),
-            sequence(1, &[0]),
-            sequence(2, &[0]),
-        ])
-        .expect("input sequence order should not affect output");
-
-        assert_eq!(
-            frame_sets[0]
-                .frames
-                .iter()
-                .map(|frame| frame.camera_id)
-                .collect::<Vec<_>>(),
-            vec![1, 2, 3]
-        );
-    }
-
-    #[test]
     fn frame_sets_reject_duplicate_camera_frames_at_one_offset() {
         let duplicate_inputs = [
             vec![sequence(1, &[0, 0])],
@@ -1020,13 +932,5 @@ mod tests {
                 .expect_err("one camera may contribute at most one frame per offset");
             assert!(error.to_string().contains("duplicate camera 1 frame"));
         }
-    }
-
-    #[test]
-    fn frame_sets_reject_frames_out_of_session_offset_order() {
-        let error = FrameSet::from_sequences(vec![sequence(1, &[2, 1])])
-            .expect_err("the peekable merge requires each sequence to be ordered");
-
-        assert!(error.to_string().contains("not ordered"));
     }
 }

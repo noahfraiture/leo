@@ -294,54 +294,37 @@ mod tests {
     }
 
     #[test]
-    fn create_rejects_duplicate_cameras_before_creating_a_file() {
-        let directory = tempfile::tempdir().expect("temporary directory should be created");
-        let path = directory.path().join("events.jsonl");
-
-        let error = SessionController::create(
-            path.clone(),
-            vec![
-                camera(1, Duration::from_secs(1)),
-                camera(1, Duration::from_secs(2)),
-            ],
-        )
-        .expect_err("camera IDs should be unique");
-
-        assert!(error.to_string().contains("duplicate camera 1"));
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn create_rejects_zero_initial_intervals_before_creating_a_file() {
-        let directory = tempfile::tempdir().expect("temporary directory should be created");
-        let path = directory.path().join("events.jsonl");
-
-        let error = SessionController::create(path.clone(), vec![camera(1, Duration::ZERO)])
-            .expect_err("sampling intervals should be positive");
-
-        assert!(error.to_string().contains("sampling interval"));
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn session_controller_rejects_empty_and_zero_id_camera_lists() {
+    fn create_rejects_invalid_camera_lists_before_writing() {
         let directory = tempfile::tempdir().expect("temporary directory should be created");
 
         for (name, cameras, expected) in [
-            ("empty.jsonl", vec![], "at least one camera"),
+            ("empty", vec![], "at least one camera"),
             (
-                "zero-id.jsonl",
+                "zero ID",
                 vec![camera(0, Duration::from_secs(1))],
                 "camera ID must be non-zero",
             ),
+            (
+                "duplicate ID",
+                vec![
+                    camera(1, Duration::from_secs(1)),
+                    camera(1, Duration::from_secs(2)),
+                ],
+                "duplicate camera 1",
+            ),
+            (
+                "zero interval",
+                vec![camera(1, Duration::ZERO)],
+                "sampling interval",
+            ),
         ] {
-            let path = directory.path().join(name);
+            let path = directory.path().join(format!("{name}.jsonl"));
 
             let error = SessionController::create(path.clone(), cameras)
                 .expect_err("invalid cameras should be rejected");
 
-            assert!(error.to_string().contains(expected));
-            assert!(!path.exists());
+            assert!(error.to_string().contains(expected), "{name}");
+            assert!(!path.exists(), "{name}");
         }
     }
 

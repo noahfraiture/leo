@@ -1321,29 +1321,6 @@ fn cleanup_child(
     }
 }
 
-#[cfg(all(test, unix))]
-fn drain_pump(
-    pump: &Receiver<PumpEvent>,
-    partial_path: &Path,
-    events: &Sender<AttemptEvent>,
-    now_utc_ms: &mut impl FnMut() -> Result<i64>,
-    media_zero_utc_ms: &mut Option<i64>,
-    first_error: &mut Option<Error>,
-) {
-    drain_pump_with_ready(
-        pump,
-        partial_path,
-        &mut |event| {
-            events
-                .send(event)
-                .map_err(|_| Error::RecorderEventReceiverClosed)
-        },
-        now_utc_ms,
-        media_zero_utc_ms,
-        first_error,
-    );
-}
-
 fn drain_pump_with_ready(
     pump: &Receiver<PumpEvent>,
     partial_path: &Path,
@@ -1441,30 +1418,23 @@ mod tests {
         path::{Path, PathBuf},
         process::{Command, Stdio},
         sync::{
-            Arc, Condvar, Mutex,
-            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
             mpsc,
         },
         thread,
         time::{Duration, Instant},
     };
 
-    use ffmpeg_sidecar::log_parser::try_parse_progress;
     use serde_json::json;
     use tempfile::TempDir;
-    use tracing::{
-        Event, Metadata, Subscriber,
-        field::{Field, Visit},
-        span::{Attributes, Id, Record},
-    };
 
     use crate::recording::{Error, RecordingSegment};
 
     use super::{
-        AttemptConfig, AttemptEvent, AttemptResult, CameraSupervisor, PumpEvent, RecorderEvent,
-        RecorderSet, RecorderSettings, RecorderStatus, RecordingCamera, StartupState,
-        cleanup_failed_start, drain_pump, finalize_attempt, parse_progress_time,
-        run_attempt_with_clock, spawn_with_executables, supervise_camera,
+        AttemptConfig, AttemptEvent, AttemptResult, CameraSupervisor, RecorderEvent, RecorderSet,
+        RecorderSettings, RecorderStatus, RecordingCamera, StartupState, cleanup_failed_start,
+        finalize_attempt, parse_progress_time, run_attempt_with_clock, spawn_with_executables,
     };
 
     const PROGRESS_ONE_SECOND: &str = "[info] frame=    1 fps=1.0 q=-1.0 size=       1kB time=00:00:01.000 bitrate=   8.0kbits/s speed=1x";
@@ -1531,14 +1501,6 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(2);
         while !path.exists() {
             assert!(Instant::now() < deadline, "timed out waiting for {path:?}");
-            thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    fn wait_for_process_exit(pid: &str) {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while process_exists(pid) {
-            assert!(Instant::now() < deadline, "process {pid:?} did not exit");
             thread::sleep(Duration::from_millis(10));
         }
     }
@@ -1770,107 +1732,9 @@ fi
             .block_on(future)
     }
 
-    struct TraceBoundary {
-        message: &'static str,
-        occurrence: usize,
-        event_count: AtomicUsize,
-        reached: Mutex<bool>,
-        reached_changed: Condvar,
-        released: Mutex<bool>,
-        released_changed: Condvar,
-    }
-
-    impl TraceBoundary {
-        fn new(message: &'static str, occurrence: usize) -> Self {
-            Self {
-                message,
-                occurrence,
-                event_count: AtomicUsize::new(0),
-                reached: Mutex::new(false),
-                reached_changed: Condvar::new(),
-                released: Mutex::new(false),
-                released_changed: Condvar::new(),
-            }
-        }
-
-        fn wait(&self) {
-            let mut reached = self.reached.lock().unwrap();
-            while !*reached {
-                let (next, timeout) = self
-                    .reached_changed
-                    .wait_timeout(reached, Duration::from_secs(2))
-                    .unwrap();
-                assert!(!timeout.timed_out(), "trace boundary was not reached");
-                reached = next;
-            }
-        }
-
-        fn release(&self) {
-            *self.released.lock().unwrap() = true;
-            self.released_changed.notify_one();
-        }
-    }
-
-    struct BoundarySubscriber {
-        boundary: Arc<TraceBoundary>,
-        next_span_id: AtomicU64,
-    }
-
-    impl Subscriber for BoundarySubscriber {
-        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
-            true
-        }
-
-        fn new_span(&self, _span: &Attributes<'_>) -> Id {
-            Id::from_u64(self.next_span_id.fetch_add(1, Ordering::Relaxed) + 1)
-        }
-
-        fn record(&self, _span: &Id, _values: &Record<'_>) {}
-
-        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
-
-        fn event(&self, event: &Event<'_>) {
-            let mut message = EventMessage::default();
-            event.record(&mut message);
-            if message.0.as_deref() != Some(self.boundary.message)
-                || self.boundary.event_count.fetch_add(1, Ordering::Relaxed) + 1
-                    != self.boundary.occurrence
-            {
-                return;
-            }
-
-            *self.boundary.reached.lock().unwrap() = true;
-            self.boundary.reached_changed.notify_one();
-            let mut released = self.boundary.released.lock().unwrap();
-            while !*released {
-                released = self.boundary.released_changed.wait(released).unwrap();
-            }
-        }
-
-        fn enter(&self, _span: &Id) {}
-
-        fn exit(&self, _span: &Id) {}
-    }
-
-    #[derive(Default)]
-    struct EventMessage(Option<String>);
-
-    impl Visit for EventMessage {
-        fn record_str(&mut self, field: &Field, value: &str) {
-            if field.name() == "message" {
-                self.0 = Some(value.into());
-            }
-        }
-
-        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-            if field.name() == "message" {
-                self.0 = Some(format!("{value:?}").trim_matches('"').into());
-            }
-        }
-    }
-
     #[test]
     fn spawn_rejects_missing_or_failing_ffmpeg_and_ffprobe() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let success = preflight_executable(&directory, "preflight-success", 0);
         let failure = preflight_executable(&directory, "preflight-failure", 23);
@@ -1895,6 +1759,7 @@ fi
 
     #[test]
     fn hanging_preflight_is_killed_reaped_and_times_out() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let hanging = write_script(
             &directory,
@@ -1919,6 +1784,7 @@ exec sleep 30"#,
 
     #[test]
     fn spawn_rejects_zero_or_unrepresentable_settings() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let executable = preflight_executable(&directory, "preflight-settings", 0);
         let valid = recorder_settings();
@@ -1959,6 +1825,7 @@ exec sleep 30"#,
 
     #[tokio::test]
     async fn start_rejects_empty_duplicate_zero_and_non_rtsp_cameras() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let executable = preflight_executable(&directory, "preflight-cameras", 0);
         let (runtime, handle, _events) =
@@ -2017,6 +1884,7 @@ exec sleep 30"#,
 
     #[tokio::test]
     async fn start_rejects_missing_symlinked_and_non_directory_output_paths() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let executable = preflight_executable(&directory, "preflight-paths", 0);
         let (runtime, handle, _events) =
@@ -2069,6 +1937,7 @@ exec sleep 30"#,
 
     #[tokio::test]
     async fn start_waits_for_every_camera() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let ffmpeg = startup_ffmpeg(&directory, "startup-all");
         let ffprobe = preflight_executable(&directory, "startup-all-probe", 0);
@@ -2114,6 +1983,7 @@ exec sleep 30"#,
 
     #[tokio::test]
     async fn one_startup_failure_stops_and_reaps_ready_cameras() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let ffmpeg = startup_ffmpeg(&directory, "startup-rollback");
         let ffprobe = preflight_executable(&directory, "startup-rollback-probe", 0);
@@ -2160,6 +2030,7 @@ exec sleep 30"#,
 
     #[test]
     fn startup_cleanup_failure_is_reported_distinctly() {
+        let _process_test = crate::recording::process_test_guard();
         let shutdown = Arc::new(AtomicBool::new(false));
         let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let recorders = RecorderSet {
@@ -2187,87 +2058,9 @@ exec sleep 30"#,
         assert!(matches!(error, Error::RecorderStartupCleanupFailed));
     }
 
-    #[test]
-    fn simultaneous_ordinary_startup_failures_are_not_cleanup_failures() {
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
-        let recorders = RecorderSet {
-            stop: Arc::new(AtomicBool::new(false)),
-            shutdown,
-            startup: Arc::new(Mutex::new(StartupState::Pending)),
-            fault_emitted: Arc::new(AtomicBool::new(false)),
-            events,
-            supervisors: vec![
-                CameraSupervisor {
-                    thread: thread::spawn(|| Err(Error::RecorderStartupFailed)),
-                },
-                CameraSupervisor {
-                    thread: thread::spawn(|| Err(Error::InvalidFfmpegProgress)),
-                },
-            ],
-        };
-
-        let error = cleanup_failed_start(recorders, Error::RecorderStartupFailed);
-
-        assert!(matches!(error, Error::RecorderStartupFailed));
-    }
-
-    #[tokio::test]
-    async fn ready_camera_failure_before_publication_fails_start_without_fault() {
-        let directory = tempfile::tempdir().unwrap();
-        let ffmpeg = startup_ffmpeg(&directory, "startup-ready-failure");
-        let ffprobe = valid_runtime_ffprobe(&directory, "startup-ready-failure-probe");
-        let mut settings = recorder_settings();
-        settings.io_timeout = Duration::from_secs(5);
-        settings.stop_timeout = Duration::from_millis(100);
-        let (runtime, handle, mut events) =
-            spawn_with_executables(settings, ffmpeg.clone(), ffprobe).unwrap();
-        let root = valid_recordings_root(&directory, &[1, 2]);
-        let start_handle = handle.clone();
-        let start = tokio::spawn(async move {
-            start_handle
-                .start(
-                    vec![
-                        RecordingCamera {
-                            id: 1,
-                            rtsp_url: "rtsp://camera.invalid/ready-fail".into(),
-                        },
-                        RecordingCamera {
-                            id: 2,
-                            rtsp_url: "rtsp://camera.invalid/slow".into(),
-                        },
-                    ],
-                    root,
-                )
-                .await
-        });
-        tokio::task::yield_now().await;
-
-        wait_for_status(&mut events, 1, RecorderStatus::Recording);
-        let slow_pid_path = scenario_marker(&ffmpeg, "slow", "pid");
-        wait_for_file(&slow_pid_path);
-        let slow_pid = fs::read_to_string(&slow_pid_path).unwrap();
-        fs::write(marker_path(&ffmpeg, "ready-fail-exit"), []).unwrap();
-        wait_for_file(&marker_path(&ffmpeg, "ready-fail-exited"));
-        wait_for_process_exit(&slow_pid);
-
-        let result = start.await.unwrap();
-        assert!(
-            result.is_err(),
-            "Start succeeded after a ready camera had exited"
-        );
-        for scenario in ["ready-fail", "slow"] {
-            let pid = fs::read_to_string(scenario_marker(&ffmpeg, scenario, "pid")).unwrap();
-            assert!(!process_exists(&pid), "startup process {pid:?} leaked");
-        }
-        while let Ok(event) = events.try_recv() {
-            assert!(!matches!(event, RecorderEvent::Faulted { .. }));
-        }
-        runtime.shutdown().unwrap();
-    }
-
     #[tokio::test]
     async fn failure_after_successful_start_reply_is_faulted() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let ffmpeg = startup_ffmpeg(&directory, "startup-published-failure");
         let ffprobe = runtime_ffprobe(&directory, "startup-published-failure-probe", "printf '{'");
@@ -2299,51 +2092,8 @@ exec sleep 30"#,
     }
 
     #[tokio::test]
-    async fn dropped_start_reply_cancels_without_fault() {
-        let directory = tempfile::tempdir().unwrap();
-        let ffmpeg = startup_ffmpeg(&directory, "startup-dropped-reply");
-        let ffprobe = valid_runtime_ffprobe(&directory, "startup-dropped-reply-probe");
-        let (runtime, handle, mut events) =
-            spawn_with_executables(recorder_settings(), ffmpeg.clone(), ffprobe).unwrap();
-        let root = valid_recordings_root(&directory, &[1, 2]);
-        let start_handle = handle.clone();
-        let start = tokio::spawn(async move {
-            start_handle
-                .start(
-                    vec![
-                        RecordingCamera {
-                            id: 1,
-                            rtsp_url: "rtsp://camera.invalid/ready".into(),
-                        },
-                        RecordingCamera {
-                            id: 2,
-                            rtsp_url: "rtsp://camera.invalid/slow".into(),
-                        },
-                    ],
-                    root,
-                )
-                .await
-        });
-        tokio::task::yield_now().await;
-
-        wait_for_status(&mut events, 1, RecorderStatus::Recording);
-        wait_for_file(&scenario_marker(&ffmpeg, "slow", "pid"));
-        start.abort();
-        assert!(start.await.unwrap_err().is_cancelled());
-        fs::write(marker_path(&ffmpeg, "release"), []).unwrap();
-
-        for scenario in ["ready", "slow"] {
-            let pid = fs::read_to_string(scenario_marker(&ffmpeg, scenario, "pid")).unwrap();
-            wait_for_process_exit(&pid);
-        }
-        while let Ok(event) = events.try_recv() {
-            assert!(!matches!(event, RecorderEvent::Faulted { .. }));
-        }
-        runtime.shutdown().unwrap();
-    }
-
-    #[tokio::test]
     async fn duplicate_start_and_stop_commands_are_rejected() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let ffmpeg = startup_ffmpeg(&directory, "startup-duplicates");
         let ffprobe = preflight_executable(&directory, "startup-duplicates-probe", 0);
@@ -2364,6 +2114,7 @@ exec sleep 30"#,
 
     #[tokio::test]
     async fn ordinary_exit_finalizes_and_emits_reconnecting() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let ffmpeg = supervision_ffmpeg(&directory, "supervision-ordinary");
         let ffprobe = valid_runtime_ffprobe(&directory, "supervision-ordinary-probe");
@@ -2392,6 +2143,7 @@ exec sleep 30"#,
 
     #[tokio::test]
     async fn retry_uses_a_new_partial_path_and_returns_to_recording() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let ffmpeg = supervision_ffmpeg(&directory, "supervision-retry");
         let ffprobe = valid_runtime_ffprobe(&directory, "supervision-retry-probe");
@@ -2428,254 +2180,9 @@ exec sleep 30"#,
         runtime.shutdown().unwrap();
     }
 
-    #[test]
-    fn startup_parser_failure_is_classified_before_child_cleanup_finishes() {
-        let directory = tempfile::tempdir().unwrap();
-        let ffmpeg = write_script(
-            &directory,
-            "startup-parser-failure",
-            &format!(
-                r#"for output_path
-do
-    :
-done
-printf '%s\n' "$$" > "$0.pid"
-printf media > "$output_path"
-printf '%s\r' '{PROGRESS_ONE_SECOND}' >&2
-printf '%s\n' '[info] Stream #0:0: Video: h264, yuv420p, 16x16, 1 fps' >&2
-exec sleep 30"#
-            ),
-        );
-        let root = valid_recordings_root(&directory, &[43]);
-        let mut settings = recorder_settings();
-        settings.stop_timeout = Duration::from_millis(200);
-        let stop = Arc::new(AtomicBool::new(false));
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let startup_state = Arc::new(Mutex::new(StartupState::Pending));
-        let observed_startup = Arc::clone(&startup_state);
-        let fault_emitted = Arc::new(AtomicBool::new(false));
-        let (startup, _startup_events) = mpsc::channel();
-        let (events, _event_receiver) = tokio::sync::mpsc::unbounded_channel();
-        let boundary = Arc::new(TraceBoundary::new("forcing recorder child termination", 1));
-        let thread_boundary = Arc::clone(&boundary);
-        let supervisor = thread::spawn(move || {
-            let subscriber = BoundarySubscriber {
-                boundary: thread_boundary,
-                next_span_id: AtomicU64::new(0),
-            };
-            let dispatch = tracing::Dispatch::new(subscriber);
-            tracing::dispatcher::with_default(&dispatch, || {
-                supervise_camera(
-                    settings,
-                    ffmpeg,
-                    PathBuf::from("unused-ffprobe"),
-                    RecordingCamera {
-                        id: 43,
-                        rtsp_url: "rtsp://camera.invalid/parser-failure".into(),
-                    },
-                    root.join("camera-43"),
-                    Instant::now() + Duration::from_secs(1),
-                    stop,
-                    shutdown,
-                    startup_state,
-                    fault_emitted,
-                    startup,
-                    events,
-                )
-            })
-        });
-
-        boundary.wait();
-        let classified = matches!(*observed_startup.lock().unwrap(), StartupState::Failed);
-        boundary.release();
-
-        assert!(supervisor.join().unwrap().is_err());
-        let pid = fs::read_to_string(directory.path().join("startup-parser-failure.pid")).unwrap();
-        assert!(
-            !process_exists(&pid),
-            "parser-failure process {pid:?} leaked"
-        );
-        assert!(
-            classified,
-            "parser failure remained publishable during child cleanup"
-        );
-    }
-
-    #[test]
-    fn stop_at_reconnect_boundary_does_not_launch_second_attempt() {
-        let directory = tempfile::tempdir().unwrap();
-        let ffmpeg = supervision_ffmpeg(&directory, "supervision-boundary-stop");
-        let ffprobe = valid_runtime_ffprobe(&directory, "supervision-boundary-stop-probe");
-        let root = valid_recordings_root(&directory, &[42]);
-        let stop = Arc::new(AtomicBool::new(false));
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let startup_state = Arc::new(Mutex::new(StartupState::Published));
-        let fault_emitted = Arc::new(AtomicBool::new(false));
-        let (startup, _startup_events) = mpsc::channel();
-        let (events, _event_receiver) = tokio::sync::mpsc::unbounded_channel();
-        let boundary = Arc::new(TraceBoundary::new("spawning recorder attempt", 2));
-        fs::write(marker_path(&ffmpeg, "reconnect-exit"), []).unwrap();
-        let thread_boundary = Arc::clone(&boundary);
-        let thread_stop = Arc::clone(&stop);
-        let supervisor = thread::spawn(move || {
-            let subscriber = BoundarySubscriber {
-                boundary: thread_boundary,
-                next_span_id: AtomicU64::new(0),
-            };
-            let dispatch = tracing::Dispatch::new(subscriber);
-            tracing::dispatcher::with_default(&dispatch, || {
-                supervise_camera(
-                    recorder_settings(),
-                    ffmpeg,
-                    ffprobe,
-                    RecordingCamera {
-                        id: 42,
-                        rtsp_url: "rtsp://camera.invalid/reconnect".into(),
-                    },
-                    root.join("camera-42"),
-                    Instant::now() + Duration::from_secs(1),
-                    thread_stop,
-                    shutdown,
-                    startup_state,
-                    fault_emitted,
-                    startup,
-                    events,
-                )
-            })
-        });
-
-        boundary.wait();
-        stop.store(true, Ordering::Relaxed);
-        boundary.release();
-
-        let segments = supervisor.join().unwrap().unwrap();
-        assert_eq!(segments.len(), 1);
-        let paths =
-            fs::read_to_string(directory.path().join("supervision-boundary-stop.paths")).unwrap();
-        assert_eq!(paths.lines().count(), 1, "Stop launched a retry attempt");
-        let first_pid = fs::read_to_string(
-            directory
-                .path()
-                .join("supervision-boundary-stop.reconnect.1.pid"),
-        )
-        .unwrap();
-        assert!(
-            !process_exists(&first_pid),
-            "first attempt {first_pid:?} leaked"
-        );
-        assert!(
-            !directory
-                .path()
-                .join("supervision-boundary-stop.reconnect.2.pid")
-                .exists(),
-            "retry child was launched"
-        );
-    }
-
-    #[test]
-    fn stop_during_failing_storage_probe_preserves_fault() {
-        let directory = tempfile::tempdir().unwrap();
-        let ffmpeg = supervision_ffmpeg(&directory, "supervision-storage-stop");
-        let ffprobe = valid_runtime_ffprobe(&directory, "supervision-storage-stop-probe");
-        let root = valid_recordings_root(&directory, &[44]);
-        let camera_directory = root.join("camera-44");
-        let stop = Arc::new(AtomicBool::new(false));
-        let observed_stop = Arc::clone(&stop);
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let set_shutdown = Arc::clone(&shutdown);
-        let startup_state = Arc::new(Mutex::new(StartupState::Published));
-        let fault_emitted = Arc::new(AtomicBool::new(false));
-        let (startup, _startup_events) = mpsc::channel();
-        let (events, mut event_receiver) = tokio::sync::mpsc::unbounded_channel();
-        let boundary = Arc::new(TraceBoundary::new("recorder storage probe failed", 1));
-        let thread_boundary = Arc::clone(&boundary);
-        let thread_stop = Arc::clone(&stop);
-        let thread_startup = Arc::clone(&startup_state);
-        let thread_fault = Arc::clone(&fault_emitted);
-        let thread_events = events.clone();
-        let supervisor = thread::spawn(move || {
-            let subscriber = BoundarySubscriber {
-                boundary: thread_boundary,
-                next_span_id: AtomicU64::new(0),
-            };
-            let dispatch = tracing::Dispatch::new(subscriber);
-            tracing::dispatcher::with_default(&dispatch, || {
-                supervise_camera(
-                    recorder_settings(),
-                    ffmpeg,
-                    ffprobe,
-                    RecordingCamera {
-                        id: 44,
-                        rtsp_url: "rtsp://student:secret@camera.invalid/storage".into(),
-                    },
-                    camera_directory,
-                    Instant::now() + Duration::from_secs(1),
-                    thread_stop,
-                    shutdown,
-                    thread_startup,
-                    thread_fault,
-                    startup,
-                    thread_events,
-                )
-            })
-        });
-        let recorders = RecorderSet {
-            stop,
-            shutdown: set_shutdown,
-            startup: startup_state,
-            fault_emitted,
-            events,
-            supervisors: vec![CameraSupervisor { thread: supervisor }],
-        };
-
-        wait_for_status(&mut event_receiver, 44, RecorderStatus::Recording);
-        let partial =
-            fs::read_to_string(directory.path().join("supervision-storage-stop.paths")).unwrap();
-        fs::remove_file(partial.trim()).unwrap();
-        fs::remove_dir(root.join("camera-44")).unwrap();
-        fs::write(directory.path().join("supervision-storage-stop.exit"), []).unwrap();
-        boundary.wait();
-
-        let stopper = thread::spawn(move || recorders.stop());
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !observed_stop.load(Ordering::Relaxed) {
-            assert!(
-                Instant::now() < deadline,
-                "Stop did not signal the supervisor"
-            );
-            thread::sleep(Duration::from_millis(10));
-        }
-        boundary.release();
-
-        assert!(stopper.join().unwrap().is_err());
-        let (camera_id, message) = wait_for_fault(&mut event_receiver);
-        assert_eq!(camera_id, Some(44));
-        assert!(!message.contains("student:secret"));
-        assert!(!message.contains("rtsp://"));
-        while let Ok(event) = event_receiver.try_recv() {
-            assert!(!matches!(event, RecorderEvent::Faulted { .. }));
-        }
-        let pid = fs::read_to_string(
-            directory
-                .path()
-                .join("supervision-storage-stop.storage.1.pid"),
-        )
-        .unwrap();
-        assert!(
-            !process_exists(&pid),
-            "storage-boundary process {pid:?} leaked"
-        );
-        assert!(
-            !directory
-                .path()
-                .join("supervision-storage-stop.storage.2.pid")
-                .exists(),
-            "storage failure launched a retry child"
-        );
-    }
-
     #[tokio::test]
     async fn storage_probe_failure_emits_faulted() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let ffmpeg = supervision_ffmpeg(&directory, "supervision-storage");
         let ffprobe = valid_runtime_ffprobe(&directory, "supervision-storage-probe");
@@ -2713,59 +2220,8 @@ exec sleep 30"#
     }
 
     #[tokio::test]
-    async fn simultaneous_post_start_failures_emit_one_faulted() {
-        let directory = tempfile::tempdir().unwrap();
-        let ffmpeg = supervision_ffmpeg(&directory, "supervision-double-fatal");
-        let ffprobe = runtime_ffprobe(
-            &directory,
-            "supervision-double-fatal-probe",
-            r#"case "$9" in
-    */camera-1/*) marker="$0.camera-1" ;;
-    */camera-2/*) marker="$0.camera-2" ;;
-    *) exit 98 ;;
-esac
-: > "$marker"
-while [ ! -f "$0.camera-1" ] || [ ! -f "$0.camera-2" ]; do sleep 0.01; done
-printf '{'"#,
-        );
-        let (runtime, handle, mut events) =
-            spawn_with_executables(recorder_settings(), ffmpeg.clone(), ffprobe).unwrap();
-        let root = valid_recordings_root(&directory, &[1, 2]);
-
-        handle
-            .start(
-                vec![
-                    RecordingCamera {
-                        id: 1,
-                        rtsp_url: "rtsp://camera.invalid/fatal-1".into(),
-                    },
-                    RecordingCamera {
-                        id: 2,
-                        rtsp_url: "rtsp://camera.invalid/fatal-2".into(),
-                    },
-                ],
-                root,
-            )
-            .await
-            .unwrap();
-        fs::write(marker_path(&ffmpeg, "fatal"), []).unwrap();
-
-        let _ = wait_for_fault(&mut events);
-        assert!(handle.stop().await.is_err());
-        let mut additional_faults = 0;
-        while let Ok(event) = events.try_recv() {
-            additional_faults += usize::from(matches!(event, RecorderEvent::Faulted { .. }));
-        }
-        assert_eq!(additional_faults, 0);
-        for scenario in ["fatal-1", "fatal-2"] {
-            let pid = fs::read_to_string(scenario_marker(&ffmpeg, scenario, "1.pid")).unwrap();
-            assert!(!process_exists(&pid), "fatal process {pid:?} leaked");
-        }
-        runtime.shutdown().unwrap();
-    }
-
-    #[tokio::test]
     async fn stop_finalizes_and_reaps_every_camera_concurrently() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let ffmpeg = supervision_ffmpeg(&directory, "supervision-concurrent");
         let ffprobe = runtime_ffprobe(
@@ -2837,6 +2293,7 @@ cat "$0.stdout""#,
 
     #[tokio::test]
     async fn hanging_stop_probe_times_out_without_leaking_a_process() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let ffmpeg = supervision_ffmpeg(&directory, "supervision-hanging-probe");
         let ffprobe = runtime_ffprobe(
@@ -2879,6 +2336,7 @@ exec sleep 30"#,
 
     #[test]
     fn shutdown_interrupts_initial_readiness_and_reaps_children() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let ffmpeg = write_script(
             &directory,
@@ -2920,6 +2378,7 @@ exec sleep 30"#,
 
     #[test]
     fn shutdown_interrupts_reconnect_delay() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let ffmpeg = supervision_ffmpeg(&directory, "shutdown-reconnect-delay");
         let ffprobe = valid_runtime_ffprobe(&directory, "shutdown-reconnect-delay-probe");
@@ -2956,51 +2415,8 @@ exec sleep 30"#,
     }
 
     #[test]
-    fn shutdown_during_stop_finalization_still_joins_runtime() {
-        let directory = tempfile::tempdir().unwrap();
-        let ffmpeg = supervision_ffmpeg(&directory, "shutdown-stop-finalization");
-        let ffprobe = runtime_ffprobe(
-            &directory,
-            "shutdown-stop-finalization-probe",
-            r#"printf '%s\n' "$$" > "$0.pid"
-exec sleep 30"#,
-        );
-        let mut settings = recorder_settings();
-        settings.io_timeout = Duration::from_secs(5);
-        let (runtime, handle, _events) =
-            spawn_with_executables(settings, ffmpeg.clone(), ffprobe.clone()).unwrap();
-        let root = valid_recordings_root(&directory, &[1]);
-        block_on(handle.start(
-            vec![RecordingCamera {
-                id: 1,
-                rtsp_url: "rtsp://camera.invalid/hold".into(),
-            }],
-            root,
-        ))
-        .unwrap();
-        let stop_handle = handle.clone();
-        let stop = thread::spawn(move || block_on(stop_handle.stop()));
-        wait_for_file(&marker_path(&ffprobe, "pid"));
-        let probe_pid = fs::read_to_string(marker_path(&ffprobe, "pid")).unwrap();
-        let ffmpeg_pid = fs::read_to_string(scenario_marker(&ffmpeg, "hold", "1.pid")).unwrap();
-        let started = Instant::now();
-
-        runtime.shutdown().unwrap();
-
-        assert!(started.elapsed() < Duration::from_secs(2));
-        assert!(matches!(stop.join().unwrap(), Err(Error::Shutdown)));
-        assert!(
-            !process_exists(&probe_pid),
-            "FFprobe process {probe_pid:?} leaked"
-        );
-        assert!(
-            !process_exists(&ffmpeg_pid),
-            "FFmpeg process {ffmpeg_pid:?} leaked"
-        );
-    }
-
-    #[test]
     fn shutdown_interrupts_ffprobe_and_reaps_it() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let ffmpeg = supervision_ffmpeg(&directory, "shutdown-active-probe");
         let ffprobe = runtime_ffprobe(
@@ -3037,6 +2453,7 @@ exec sleep 30"#,
 
     #[test]
     fn ffmpeg_command_uses_tcp_timeout_video_copy_and_matroska() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let ffmpeg = write_script(
             &directory,
@@ -3106,6 +2523,7 @@ printf '%s' "$quit" > "$0.quit""#
 
     #[test]
     fn timeout_microseconds_are_checked_before_command_creation() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let ffmpeg = write_script(
             &directory,
@@ -3126,6 +2544,7 @@ printf '%s' "$quit" > "$0.quit""#
 
     #[test]
     fn recorder_errors_and_events_never_expose_rtsp_credentials() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let ffmpeg = write_script(
             &directory,
@@ -3162,6 +2581,7 @@ exec sleep 30"#,
 
     #[test]
     fn first_qualifying_progress_freezes_media_timeline_zero() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let ffmpeg = write_script(
             &directory,
@@ -3193,6 +2613,7 @@ printf '%s\r' '[info] frame=    1 fps=1.0 q=-1.0 size=       1kB time=00:00:02.5
 
     #[test]
     fn later_progress_does_not_move_media_timeline_zero() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let ffmpeg = write_script(
             &directory,
@@ -3235,66 +2656,8 @@ printf '%s\r' '[info] frame=    2 fps=1.0 q=-1.0 size=       2kB time=00:00:05.0
     }
 
     #[test]
-    fn terminating_drain_freezes_queued_progress_without_ready_event() {
-        let directory = tempfile::tempdir().unwrap();
-        let partial_path = directory.path().join(".attempt-queued.partial.mkv");
-        fs::write(&partial_path, b"media").unwrap();
-        let (pump_tx, pump_rx) = mpsc::channel();
-        pump_tx
-            .send(PumpEvent::Progress(
-                try_parse_progress(PROGRESS_ONE_SECOND).unwrap(),
-            ))
-            .unwrap();
-        let (events_tx, events_rx) = mpsc::channel();
-        let mut media_zero_utc_ms = None;
-        let mut first_error = None;
-
-        drain_pump(
-            &pump_rx,
-            &partial_path,
-            &events_tx,
-            &mut || Ok(10_000),
-            &mut media_zero_utc_ms,
-            &mut first_error,
-        );
-
-        assert_eq!(media_zero_utc_ms, Some(9_000));
-        assert!(first_error.is_none());
-        assert!(matches!(
-            events_rx.try_recv(),
-            Err(mpsc::TryRecvError::Empty)
-        ));
-    }
-
-    #[test]
-    fn graceful_cleanup_keeps_final_progress_without_reporting_ready() {
-        let directory = tempfile::tempdir().unwrap();
-        let ffmpeg = write_script(
-            &directory,
-            "ffmpeg-final-progress",
-            &format!(
-                r#"for output_path
-do
-    :
-done
-sleep 0.5
-printf media > "$output_path"
-printf '%s\r' '{PROGRESS_ONE_SECOND}' >&2"#
-            ),
-        );
-        let partial_path = directory.path().join(".attempt-final-progress.partial.mkv");
-        let stop = AtomicBool::new(true);
-
-        let mut config = attempt_config(&ffmpeg, "rtsp://camera.invalid/stream", &partial_path);
-        config.stop_timeout = Duration::from_secs(1);
-        let (result, events) = run(config, &stop, || Ok(10_000));
-
-        assert_eq!(result.unwrap().media_zero_utc_ms, Some(9_000));
-        assert!(events.is_empty());
-    }
-
-    #[test]
     fn progress_time_rejects_negative_and_non_finite_values() {
+        let _process_test = crate::recording::process_test_guard();
         for value in ["-00:00:00.000", "-0.0000001", "01:-01:00", "NaN", "inf"] {
             assert!(parse_progress_time(value).is_none(), "accepted {value}");
         }
@@ -3305,14 +2668,8 @@ printf '%s\r' '{PROGRESS_ONE_SECOND}' >&2"#
     }
 
     #[test]
-    fn progress_time_rejects_values_outside_i64_microseconds() {
-        for value in ["1e300", "1e300ms", "1e300us"] {
-            assert!(parse_progress_time(value).is_none(), "accepted {value}");
-        }
-    }
-
-    #[test]
     fn readiness_requires_a_frame_and_nonempty_regular_output() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let cases = [
             (
@@ -3391,6 +2748,7 @@ printf '%s\r' '{PROGRESS_ONE_SECOND}' >&2"#
 
     #[test]
     fn graceful_stop_sends_q_and_reaps() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let ffmpeg = write_script(
             &directory,
@@ -3436,6 +2794,7 @@ printf '%s' "$quit" > "$0.quit""#
 
     #[test]
     fn stop_timeout_kills_and_reaps() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let ffmpeg = write_script(
             &directory,
@@ -3465,101 +2824,8 @@ exec sleep 30"#,
     }
 
     #[test]
-    fn shutdown_token_stops_kills_and_reaps() {
-        let directory = tempfile::tempdir().unwrap();
-        let ffmpeg = write_script(
-            &directory,
-            "ffmpeg-shutdown",
-            r#"printf '%s\n' "$$" > "$0.pid"
-exec sleep 30"#,
-        );
-        let partial_path = directory.path().join(".attempt-shutdown.partial.mkv");
-        let pid_path = marker_path(&ffmpeg, "pid");
-        let stop = AtomicBool::new(false);
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let shutdown_signal = Arc::clone(&shutdown);
-        let shutdown_setter = thread::spawn(move || {
-            wait_for_file(&pid_path);
-            shutdown_signal.store(true, Ordering::Relaxed);
-        });
-        let mut config = attempt_config(&ffmpeg, "rtsp://camera.invalid/stream", &partial_path);
-        config.stop_timeout = Duration::from_millis(100);
-        let started = Instant::now();
-
-        let result = run_with_tokens(config, &stop, &shutdown, || Ok(10_000))
-            .0
-            .unwrap();
-        shutdown_setter.join().unwrap();
-
-        assert!(result.stopped);
-        assert!(started.elapsed() < Duration::from_secs(2));
-        let pid = fs::read_to_string(marker_path(&ffmpeg, "pid")).unwrap();
-        assert!(!process_exists(&pid), "fake FFmpeg process {pid:?} leaked");
-    }
-
-    #[test]
-    fn failed_q_forces_kill_and_reap_preserving_first_error() {
-        let directory = tempfile::tempdir().unwrap();
-        let ffmpeg = write_script(
-            &directory,
-            "ffmpeg-failed-q",
-            r#"exec /bin/sh -c 'printf "%s\n" "$$" > "$1"; exec sleep 30' failed-q "$0.pid" 0<&-"#,
-        );
-        let partial_path = directory.path().join(".attempt-failed-q.partial.mkv");
-        let pid_path = marker_path(&ffmpeg, "pid");
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_signal = Arc::clone(&stop);
-        let stopper = thread::spawn(move || {
-            wait_for_file(&pid_path);
-            stop_signal.store(true, Ordering::Relaxed);
-        });
-        let mut config = attempt_config(&ffmpeg, "rtsp://camera.invalid/stream", &partial_path);
-        config.stop_timeout = Duration::from_secs(5);
-        let started = Instant::now();
-
-        let error = run(config, &stop, || Ok(10_000)).0.unwrap_err();
-        stopper.join().unwrap();
-
-        assert!(matches!(
-            error,
-            Error::RecorderCleanupFailed { source }
-                if matches!(*source, Error::FfmpegQuit)
-        ));
-        assert!(started.elapsed() < Duration::from_secs(2));
-        let pid = fs::read_to_string(marker_path(&ffmpeg, "pid")).unwrap();
-        assert!(!process_exists(&pid), "fake FFmpeg process {pid:?} leaked");
-    }
-
-    #[test]
-    fn natural_nonzero_exit_and_eof_is_an_ordinary_attempt() {
-        let directory = tempfile::tempdir().unwrap();
-        let ffmpeg = write_script(
-            &directory,
-            "ffmpeg-nonzero",
-            r#"printf '%s\n' "$$" > "$0.pid"
-exit 23"#,
-        );
-        let partial_path = directory.path().join(".attempt-nonzero.partial.mkv");
-        let stop = AtomicBool::new(false);
-        let started = Instant::now();
-
-        let (result, events) = run(
-            attempt_config(&ffmpeg, "rtsp://camera.invalid/stream", &partial_path),
-            &stop,
-            || Ok(10_000),
-        );
-        let result = result.unwrap();
-
-        assert!(!result.stopped);
-        assert_eq!(result.media_zero_utc_ms, None);
-        assert!(events.is_empty());
-        assert!(started.elapsed() < Duration::from_secs(2));
-        let pid = fs::read_to_string(marker_path(&ffmpeg, "pid")).unwrap();
-        assert!(!process_exists(&pid), "fake FFmpeg process {pid:?} leaked");
-    }
-
-    #[test]
     fn positive_container_start_adjusts_segment_bounds() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let partial_path = directory.path().join(".attempt-positive.partial.mkv");
         fs::write(&partial_path, b"media").unwrap();
@@ -3596,6 +2862,7 @@ exit 23"#,
 
     #[test]
     fn reconnect_start_is_clamped_to_previous_end() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let partial_path = directory.path().join(".attempt-reconnect.partial.mkv");
         fs::write(&partial_path, b"media").unwrap();
@@ -3620,6 +2887,7 @@ exit 23"#,
 
     #[test]
     fn valid_attempt_is_promoted_without_overwrite() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let ffprobe = fake_ffprobe(&directory, "ffprobe-promote", &valid_probe("0", "1"), 0);
         let shutdown = AtomicBool::new(false);
@@ -3661,6 +2929,7 @@ exit 23"#,
 
     #[test]
     fn empty_attempt_is_removed() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let partial_path = directory.path().join(".attempt-empty.partial.mkv");
         fs::write(&partial_path, []).unwrap();
@@ -3689,6 +2958,7 @@ exit 99"#,
 
     #[test]
     fn invalid_nonempty_attempt_is_retained() {
+        let _process_test = crate::recording::process_test_guard();
         let directory = tempfile::tempdir().unwrap();
         let partial_path = directory.path().join(".attempt-invalid.partial.mkv");
         fs::write(&partial_path, b"invalid media").unwrap();

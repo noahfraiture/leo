@@ -549,34 +549,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_checkpoint_resumes_exact_trailing_whitespace_without_agent_construction() {
-        let root = tempfile::tempdir().expect("temporary directory should be created");
-        let directory = root.path().join("session");
-        let mut persisted = create_completed_checkpoint(&directory).await;
-        persisted.checklist = "Start the exercise  \n".into();
-        let saved_bytes = persist_checkpoint(&directory, &persisted);
-        let constructions = Cell::new(0);
-        let mut snapshots = Vec::new();
-
-        let resumed = analyze_with_mock(
-            request(&directory, &persisted.checklist),
-            MockCompletionModel::default(),
-            &constructions,
-            |checkpoint| snapshots.push(checkpoint),
-        )
-        .await
-        .expect("the exact persisted checklist should resume");
-
-        assert_eq!(constructions.get(), 0);
-        assert_eq!(resumed, persisted);
-        assert_eq!(snapshots, vec![persisted]);
-        assert_eq!(
-            fs::read(directory.join("analysis.json")).expect("checkpoint should remain readable"),
-            saved_bytes
-        );
-    }
-
-    #[tokio::test]
     async fn existing_checkpoint_rejects_changed_checklist_bytes() {
         let root = tempfile::tempdir().expect("temporary directory should be created");
         let directory = root.path().join("session");

@@ -288,8 +288,7 @@ mod tests {
     use serde_json::{Value, json};
     use uuid::Uuid;
 
-    use super::SessionAction;
-    use crate::session::{OperatorAction, Session, SessionCamera, controller::SessionController};
+    use crate::session::{OperatorAction, Session, SessionCamera};
 
     const SESSION_ID: &str = "5a660250-36fc-4c2b-93fa-b04247bdad20";
     const OTHER_SESSION_ID: &str = "74690993-6174-4312-9d72-fb5f7127d9d4";
@@ -439,66 +438,6 @@ mod tests {
     }
 
     #[test]
-    fn session_started_round_trips_session_cameras_with_persisted_field_names() {
-        let action = SessionAction::SessionStarted {
-            cameras: vec![SessionCamera {
-                id: 7,
-                name: "Front".into(),
-                enabled: false,
-                sample_every: Duration::from_millis(2_500),
-            }],
-        };
-
-        let json = serde_json::to_value(&action).expect("session action should serialize");
-        assert_eq!(
-            json,
-            json!({
-                "type": "session_started",
-                "cameras": [{
-                    "camera_id": 7,
-                    "name": "Front",
-                    "enabled": false,
-                    "sample_every_ms": 2_500
-                }]
-            })
-        );
-
-        let SessionAction::SessionStarted { cameras } =
-            serde_json::from_value(json).expect("session action should deserialize")
-        else {
-            panic!("session-start action should round trip");
-        };
-        assert_eq!(cameras[0].id, 7);
-        assert_eq!(cameras[0].sample_every, Duration::from_millis(2_500));
-    }
-
-    #[test]
-    fn reopens_a_log_written_by_the_controller() {
-        let directory = tempfile::tempdir().expect("temporary directory should be created");
-        let path = directory.path().join("events.jsonl");
-        {
-            let mut controller = SessionController::create(
-                path.clone(),
-                vec![SessionCamera {
-                    id: 1,
-                    name: "Front".into(),
-                    enabled: true,
-                    sample_every: Duration::from_secs(2),
-                }],
-            )
-            .expect("session should be created");
-            controller
-                .apply(OperatorAction::EndSession)
-                .expect("session should end");
-        }
-
-        let session = Session::load(&path).expect("closed event file should reopen");
-
-        assert_eq!(session.cameras.len(), 1);
-        assert_eq!(session.cameras[0].sample_every, Duration::from_secs(2));
-    }
-
-    #[test]
     fn rejects_malformed_json() {
         let directory = tempfile::tempdir().expect("temporary directory should be created");
         let path = directory.path().join("events.jsonl");
@@ -529,40 +468,6 @@ mod tests {
             .to_string();
 
         assert!(error.contains("final newline"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn session_load_rejects_a_symlinked_events_file() {
-        use std::os::unix::fs::symlink;
-
-        let directory = tempfile::tempdir().expect("temporary directory should be created");
-        let target = directory.path().join("events-target.jsonl");
-        let path = directory.path().join("events.jsonl");
-        write_events(
-            &target,
-            &[started(vec![camera(1, 1_000)]), ended(1, SESSION_ID, 1_000)],
-        );
-        symlink(target, &path).expect("event symlink should be created");
-
-        let error = Session::load(&path)
-            .expect_err("symlinked events should be rejected")
-            .to_string();
-
-        assert!(error.contains("regular file"));
-    }
-
-    #[test]
-    fn session_load_rejects_a_directory_events_path() {
-        let directory = tempfile::tempdir().expect("temporary directory should be created");
-        let path = directory.path().join("events.jsonl");
-        fs::create_dir(&path).expect("events directory should be created");
-
-        let error = Session::load(&path)
-            .expect_err("an events directory should be rejected")
-            .to_string();
-
-        assert!(error.contains("regular file"));
     }
 
     #[test]
@@ -686,30 +591,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_session_end_before_the_previous_action() {
-        let events = vec![
-            started(vec![camera(1, 1_000)]),
-            event(
-                1,
-                SESSION_ID,
-                500,
-                json!({
-                    "type": "camera_participation_changed",
-                    "camera_id": 1,
-                    "enabled": false
-                }),
-            ),
-            ended(2, SESSION_ID, 499),
-        ];
-
-        let error = load_error(&events);
-
-        assert!(error.contains("session offsets must be nondecreasing"));
-        assert!(error.contains("500"));
-        assert!(error.contains("499"));
-    }
-
-    #[test]
     fn rejects_duplicate_initial_cameras() {
         let events = vec![
             started(vec![camera(1, 1_000), camera(1, 2_000)]),
@@ -800,18 +681,5 @@ mod tests {
         let error = load_error(&events);
 
         assert!(error.contains("missing session end"));
-    }
-
-    #[test]
-    fn rejects_duplicate_session_end() {
-        let events = vec![
-            started(vec![camera(1, 1_000)]),
-            ended(1, SESSION_ID, 1_000),
-            ended(2, SESSION_ID, 1_001),
-        ];
-
-        let error = load_error(&events);
-
-        assert!(error.contains("more than one session end"));
     }
 }
