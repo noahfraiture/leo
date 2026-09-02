@@ -6,11 +6,12 @@ compile_error!("Leo does not support Windows.");
 mod components;
 mod desktop;
 #[cfg(feature = "desktop-e2e")]
-mod desktop_e2e;
+mod e2e;
 mod logging;
+#[cfg(all(test, feature = "paid-openai-evaluations"))]
+#[path = "evaluations/openai.rs"]
+mod openai_evaluations;
 mod operator;
-#[cfg(all(test, feature = "paid-openai-test"))]
-mod paid_openai_workflow;
 mod preview;
 mod route;
 mod settings;
@@ -22,7 +23,7 @@ mod views;
 use desktop::RuntimeAvailability;
 pub use desktop::launch;
 #[cfg(feature = "desktop-e2e")]
-pub use desktop::launch_desktop_e2e;
+pub use e2e::launch as launch_desktop_e2e;
 use route::Route;
 
 #[cfg(test)]

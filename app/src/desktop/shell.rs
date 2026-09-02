@@ -115,7 +115,7 @@ fn ReadyApp(initial_route: Route) -> Element {
     let desktop_e2e: Element = {
         #[cfg(feature = "desktop-e2e")]
         {
-            rsx! { crate::desktop_e2e::DesktopE2eDriver {} }
+            rsx! { crate::e2e::DesktopE2eDriver {} }
         }
         #[cfg(not(feature = "desktop-e2e"))]
         {

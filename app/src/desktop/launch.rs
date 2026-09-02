@@ -11,18 +11,8 @@ pub fn launch() {
     launch_with_store(SettingsStore::platform());
 }
 
-#[cfg(feature = "desktop-e2e")]
-#[doc(hidden)]
-pub fn launch_desktop_e2e(settings_path: std::path::PathBuf) {
-    let default_data_root = settings_path
-        .parent()
-        .expect("E2E settings path should have a parent")
-        .join("default-data");
-    let store = SettingsStore::new(settings_path, default_data_root);
-    launch_with_store(store);
-}
-
-fn launch_with_store(store: SettingsStore) {
+/// Launches the desktop shell with an explicit settings store.
+pub fn launch_with_store(store: SettingsStore) {
     let Startup {
         bootstrap,
         settings,

@@ -7,7 +7,7 @@ edition = "2024"
 
 [features]
 desktop-e2e = []
-paid-openai-test = []
+paid-openai-evaluations = []
 
 [dependencies]
 backend = { path = "../backend" }

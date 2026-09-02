@@ -1,4 +1,5 @@
-#![cfg(feature = "paid-openai-test")]
+//! Opt-in, human-graded evaluations against the real OpenAI service.
+#![cfg(feature = "paid-openai-evaluations")]
 
 use std::{
     fs,
@@ -20,7 +21,7 @@ use crate::{operator::OperatorState, settings::CameraSettings};
 
 #[tokio::test]
 #[ignore = "costs money; requires explicit approval and LEO_RUN_PAID_OPENAI_TEST=1"]
-async fn paid_openai_analyzes_one_local_application_session() {
+async fn natural_fixture_exercises_application_checkpoint_flow() {
     assert_eq!(
         std::env::var("LEO_RUN_PAID_OPENAI_TEST").as_deref(),
         Ok("1"),
@@ -94,7 +95,7 @@ async fn paid_openai_analyzes_one_local_application_session() {
 
 #[tokio::test]
 #[ignore = "costs money; requires explicit approval and LEO_RUN_PAID_OPENAI_TEST=1"]
-async fn paid_openai_evaluates_controlled_visual_payloads() {
+async fn controlled_visual_cases() {
     assert_eq!(
         std::env::var("LEO_RUN_PAID_OPENAI_TEST").as_deref(),
         Ok("1"),

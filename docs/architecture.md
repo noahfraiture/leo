@@ -244,7 +244,7 @@ Leo has focused integration slices plus one opt-in macOS desktop E2E. That E2E i
 | Virtual-camera and recorder checks | MediaMTX, RTSP/TCP, two simultaneous readers, FFmpeg stream copy, playable MKV output, reconnect, and process cleanup. | Fixture video replaces physical cameras. |
 | Local analysis check | Completed session directory, real FFprobe/FFmpeg extraction, gap-aware planning, durable callbacks, and checkpoint output. | A deterministic Rig mock replaces the model provider. |
 | Full desktop E2E | Two fixture-camera processes, both MediaMTX layers, live WKWebView previews, Dioxus event handlers, FFmpeg recording, Stop finalization, session discovery, production OpenAI HTTP transport, local extraction, results UI, and shutdown. | The fixed pair is a test setup; fixture video and a loopback OpenAI-compatible server are the default, and DOM events are programmatic rather than OS pointer events. |
-| Paid workflow compile check | The feature-gated application path type-checks through the real `OperatorState` callback. | It does not run or contact OpenAI without separate approval. |
+| Paid evaluation compile check | The feature-gated application path type-checks through the real `OperatorState` callback. | It does not run or contact OpenAI without separate approval. |
 
 The desktop E2E creates a strict owner-only temporary settings file and injects its explicit path through a feature-gated launcher; this is a test seam, not a production override. Provider variables are removed from the app child. The mounted driver reads the ready-only active `ResolvedSettings` context and permits only a numeric loopback provider or real mode with both paid gates, which keeps its safety decision aligned with the runtime actually under test.
 
@@ -289,14 +289,14 @@ The full local desktop flow is also an exact ignored Cargo test:
 LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 cargo test -p camera --features desktop-e2e --test desktop_e2e desktop_operator_flow_records_two_cameras_and_analyzes -- --ignored --exact --nocapture --test-threads=1
 ```
 
-## Paid-Test Gates
+## Paid Evaluation Gates
 
-The paid application checks are absent unless Cargo feature `paid-openai-test` is enabled, remain ignored with explicit cost warnings, and assert `LEO_RUN_PAID_OPENAI_TEST=1` before constructing temporary storage, recorder runtime, `OperatorState`, session, or provider. `OPENAI_API_KEY` and `ANALYSIS_MODEL` are paid-test-process inputs only; production gets the corresponding values from Settings. The documented paid recipe rejects `OPENAI_BASE_URL` because desktop paid validation targets OpenAI directly. The focused workflow check uses one short local MKV and applies backend checkpoints through the real `OperatorState` callback.
+The paid application evaluations are absent unless Cargo feature `paid-openai-evaluations` is enabled, remain ignored with explicit cost warnings, and assert `LEO_RUN_PAID_OPENAI_TEST=1` before constructing temporary storage, recorder runtime, `OperatorState`, session, or provider. `OPENAI_API_KEY` and `ANALYSIS_MODEL` are evaluation-process inputs only; production gets the corresponding values from Settings. The documented paid recipe rejects `OPENAI_BASE_URL` because desktop paid validation targets OpenAI directly. The focused workflow evaluation uses one short local MKV and applies backend checkpoints through the real `OperatorState` callback.
 
 The safe verification is compile-only:
 
 ```bash
-cargo test -p app --features paid-openai-test paid_openai_workflow::paid_openai_analyzes_one_local_application_session --no-run
+cargo test -p app --features paid-openai-evaluations openai_evaluations::natural_fixture_exercises_application_checkpoint_flow --no-run
 ```
 
 The desktop E2E uses a loopback mock unless both `LEO_E2E_REAL_OPENAI=1` and `LEO_RUN_PAID_OPENAI_TEST=1` are set. These variables are test gates, not app configuration. Mock mode disables inherited HTTP proxies so fixture images remain on loopback. The mounted driver independently permits only a numeric loopback base URL or real mode with both gates, no base override, and nonblank credentials. Real mode preserves its session for inspection under `target/desktop-e2e-real/` or `LEO_E2E_OUTPUT_DIR`. A successful run also proves the app and fixture-camera process groups have no surviving children and that recorder and preview shutdown logged success.

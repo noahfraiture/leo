@@ -8,7 +8,5 @@ mod shell;
 #[path = "tests/render.rs"]
 mod render_tests;
 
-pub use launch::launch;
-#[cfg(feature = "desktop-e2e")]
-pub use launch::launch_desktop_e2e;
+pub use launch::{launch, launch_with_store};
 pub use shell::RuntimeAvailability;
