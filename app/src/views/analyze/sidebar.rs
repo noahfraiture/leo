@@ -1,13 +1,13 @@
-use crate::workflow::Workflow;
+use crate::operator::OperatorState;
 use backend::analysis::AnalysisCheckpoint;
 use dioxus::prelude::*;
 
 /// Renders completed sessions and their derived analysis state.
 #[component]
 pub fn Sidebar() -> Element {
-    let mut workflow = use_context::<Signal<Workflow>>();
+    let mut operator = use_context::<Signal<OperatorState>>();
     let rows = {
-        let state = workflow.read();
+        let state = operator.read();
         state
             .sessions
             .iter()
@@ -45,7 +45,7 @@ pub fn Sidebar() -> Element {
                     class: "btn btn-sm",
                     r#type: "button",
                     onclick: move |_| {
-                        let mut state = workflow.write();
+                        let mut state = operator.write();
                         if let Err(error) = state.refresh_sessions() {
                             state.set_transient_message(Some(error.to_string()));
                         } else {
@@ -71,7 +71,7 @@ pub fn Sidebar() -> Element {
                                 aria_label: "Session {session_id}, UTC milliseconds: {start_utc_ms}, status: {status}",
                                 aria_pressed: selected,
                                 onclick: move |_| {
-                                    let mut state = workflow.write();
+                                    let mut state = operator.write();
                                     state.selected_session_id = Some(session_id);
                                     state.set_transient_message(None);
                                 },

@@ -4,17 +4,14 @@ use backend::analysis::{AnalysisCheckpoint, AnalysisWarning, AnalyzeSession};
 use dioxus::prelude::*;
 use uuid::Uuid;
 
-use crate::{
-    analysis_task,
-    workflow::{Error as WorkflowError, SessionRunState, Workflow},
-};
+use crate::operator::{self, Error as OperatorError, OperatorState, SessionRunState};
 
 /// Renders the selected completed session and its persisted analysis results.
 #[component]
 pub fn Analyze() -> Element {
-    let workflow = use_context::<Signal<Workflow>>();
+    let operator = use_context::<Signal<OperatorState>>();
     let selected = {
-        let state = workflow.read();
+        let state = operator.read();
         state.selected_session_id.and_then(|session_id| {
             state
                 .sessions
@@ -64,9 +61,9 @@ fn SelectedSession(
     directory: PathBuf,
     checkpoint: Result<Option<AnalysisCheckpoint>, String>,
 ) -> Element {
-    let workflow = use_context::<Signal<Workflow>>();
+    let operator = use_context::<Signal<OperatorState>>();
     let (recording_blocked, running_id, model_config_error, analysis_error) = {
-        let state = workflow.read();
+        let state = operator.read();
         (
             !matches!(state.session, SessionRunState::Idle),
             state.running_analysis_id,
@@ -265,15 +262,15 @@ fn InvalidChecklist(session_id: Uuid) -> Element {
 }
 
 fn prepare_analysis_action(
-    workflow: &mut Workflow,
+    operator: &mut OperatorState,
     expected_session_id: Uuid,
     checklist: String,
-) -> Result<(Uuid, AnalyzeSession), WorkflowError> {
-    let session_id = workflow
+) -> Result<(Uuid, AnalyzeSession), OperatorError> {
+    let session_id = operator
         .selected_session_id
         .filter(|selected_id| *selected_id == expected_session_id)
-        .ok_or(WorkflowError::AnalysisSessionNotSelected)?;
-    let request = workflow.begin_analysis(checklist)?;
+        .ok_or(OperatorError::AnalysisSessionNotSelected)?;
+    let request = operator.begin_analysis(checklist)?;
     Ok((session_id, request))
 }
 
@@ -284,7 +281,7 @@ fn AnalysisAction(
     label: &'static str,
     disabled: bool,
 ) -> Element {
-    let mut workflow = use_context::<Signal<Workflow>>();
+    let mut operator_state = use_context::<Signal<OperatorState>>();
 
     rsx! {
         button {
@@ -294,15 +291,15 @@ fn AnalysisAction(
             disabled,
             onclick: move |_| {
                 let prepared = {
-                    let mut state = workflow.write();
+                    let mut state = operator_state.write();
                     prepare_analysis_action(&mut state, session_id, checklist.clone())
                 };
                 match prepared {
                     Ok((session_id, request)) => {
-                        workflow.write().set_transient_message(None);
-                        analysis_task::spawn_analysis(workflow, request, session_id);
+                        operator_state.write().set_transient_message(None);
+                        operator::spawn_analysis(operator_state, request, session_id);
                     }
-                    Err(error) => workflow
+                    Err(error) => operator_state
                         .write()
                         .set_transient_message(Some(error.to_string())),
                 }
@@ -324,8 +321,8 @@ mod tests {
 
     use super::prepare_analysis_action;
     use crate::{
+        operator::{Error, OperatorState},
         settings::CameraSettings,
-        workflow::{Error, Workflow},
     };
 
     #[test]
@@ -364,7 +361,7 @@ mod tests {
             .expect("completed session should end");
         drop(controller);
         mark_recording_complete(&directory).expect("session should be marked complete");
-        let mut workflow = Workflow::new(
+        let mut workflow = OperatorState::new(
             vec![CameraSettings {
                 id: 1,
                 name: "Salon 1".into(),

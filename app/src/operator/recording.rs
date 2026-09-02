@@ -1,3 +1,5 @@
+//! Route-independent recording tasks and recorder-event coordination.
+
 use std::{
     fs,
     future::Future,
@@ -11,14 +13,14 @@ use backend::{
 };
 use dioxus::prelude::{ReadableExt, Signal, WritableExt};
 
-use crate::workflow::{
-    FaultSessionRequest, SessionRunState, StartSessionRequest, StopSessionRequest, Workflow,
+use super::{
+    FaultSessionRequest, OperatorState, SessionRunState, StartSessionRequest, StopSessionRequest,
 };
 
 /// Starts one route-independent session task after claiming the synchronous transition.
-pub fn spawn_start_session(mut workflow: Signal<Workflow>, utc_ms: i64) {
+pub fn spawn_start_session(mut operator: Signal<OperatorState>, utc_ms: i64) {
     let request = {
-        let mut state = workflow.write();
+        let mut state = operator.write();
         match state.begin_start(utc_ms) {
             Ok(request) => request,
             Err(error) => {
@@ -31,8 +33,8 @@ pub fn spawn_start_session(mut workflow: Signal<Workflow>, utc_ms: i64) {
     let stop_recorder = request.recorder.clone();
     let recording_cameras = request.recording_cameras.clone();
     let recordings_root = request.directory.join("recordings");
-    let current_workflow = workflow;
-    let mut cleanup_workflow = workflow;
+    let current_operator = operator;
+    let mut cleanup_operator = operator;
 
     dioxus::dioxus_core::spawn_forever(async move {
         let outcome = run_start_session_with(
@@ -44,24 +46,24 @@ pub fn spawn_start_session(mut workflow: Signal<Workflow>, utc_ms: i64) {
             },
             async move { stop_recorder.stop().await },
             move |directory| {
-                let state = current_workflow.read();
+                let state = current_operator.read();
                 start_is_current(&state, directory)
             },
             move |directory| {
-                cleanup_workflow
+                cleanup_operator
                     .write()
                     .claim_failed_start_cleanup(directory)
             },
         )
         .await;
-        apply_start_outcome(&mut workflow.write(), outcome);
+        apply_start_outcome(&mut operator.write(), outcome);
     });
 }
 
 /// Stops one active session without tying finalization to a route lifetime.
-pub fn spawn_stop_session(mut workflow: Signal<Workflow>) {
+pub fn spawn_stop_session(mut operator: Signal<OperatorState>) {
     let request = {
-        let mut state = workflow.write();
+        let mut state = operator.write();
         match state.begin_stop() {
             Ok(request) => {
                 state.set_transient_message(None);
@@ -77,31 +79,31 @@ pub fn spawn_stop_session(mut workflow: Signal<Workflow>) {
 
     dioxus::dioxus_core::spawn_forever(async move {
         let outcome = run_stop_session_with(request, async move { recorder.stop().await }).await;
-        apply_stop_outcome(&mut workflow.write(), outcome);
+        apply_stop_outcome(&mut operator.write(), outcome);
     });
 }
 
-/// Runs the single cleanup request already claimed by `Workflow::begin_fault`.
-pub fn spawn_fault_cleanup(mut workflow: Signal<Workflow>, request: FaultSessionRequest) {
+/// Runs the single cleanup request already claimed by [`OperatorState::begin_fault`].
+pub fn spawn_fault_cleanup(mut operator: Signal<OperatorState>, request: FaultSessionRequest) {
     let recorder = request.recorder.clone();
     dioxus::dioxus_core::spawn_forever(async move {
         let outcome = run_fault_session_with(request, async move { recorder.stop().await }).await;
-        apply_fault_outcome(&mut workflow.write(), outcome);
+        apply_fault_outcome(&mut operator.write(), outcome);
     });
 }
 
 /// Applies one recorder event and returns a newly claimed fatal cleanup, if any.
 pub fn handle_recorder_event(
-    workflow: &mut Workflow,
+    operator: &mut OperatorState,
     event: RecorderEvent,
 ) -> Option<FaultSessionRequest> {
-    workflow.apply_recorder_event(&event);
+    operator.apply_recorder_event(&event);
     match event {
         RecorderEvent::Status { .. } => None,
         RecorderEvent::Faulted { camera_id, message } => {
-            let request = workflow.begin_fault(message, true);
+            let request = operator.begin_fault(message, true);
             if request.is_some() {
-                tracing::error!(camera_id, "fatal recorder event claimed by workflow");
+                tracing::error!(camera_id, "fatal recorder event claimed by operator state");
             }
             request
         }
@@ -110,24 +112,24 @@ pub fn handle_recorder_event(
 
 /// Faults an in-flight session when its only recorder event boundary disappears.
 pub fn handle_recorder_event_channel_closed(
-    workflow: &mut Workflow,
+    operator: &mut OperatorState,
 ) -> Option<FaultSessionRequest> {
     let message = "Recorder runtime stopped unexpectedly.".to_owned();
-    let cleanup = workflow.begin_fault(message.clone(), true);
+    let cleanup = operator.begin_fault(message.clone(), true);
     if cleanup.is_none() {
-        workflow.set_transient_message(Some(message));
+        operator.set_transient_message(Some(message));
     }
     cleanup
 }
 
 /// Persists participation before changing presentation state and faults on any write error.
 pub fn set_participation(
-    mut workflow: Signal<Workflow>,
+    mut operator: Signal<OperatorState>,
     camera_id: u32,
     enabled: bool,
-) -> Result<(), crate::workflow::Error> {
+) -> Result<(), super::Error> {
     let (result, cleanup) = {
-        let mut state = workflow.write();
+        let mut state = operator.write();
         match state.set_participation(camera_id, enabled) {
             Ok(()) => {
                 state.set_transient_message(None);
@@ -142,19 +144,19 @@ pub fn set_participation(
         }
     };
     if let Some(request) = cleanup {
-        spawn_fault_cleanup(workflow, request);
+        spawn_fault_cleanup(operator, request);
     }
     result
 }
 
 /// Persists cadence before changing presentation state and faults on any write error.
 pub fn set_sampling_interval(
-    mut workflow: Signal<Workflow>,
+    mut operator: Signal<OperatorState>,
     camera_id: u32,
     sample_every: Duration,
-) -> Result<(), crate::workflow::Error> {
+) -> Result<(), super::Error> {
     let (result, cleanup) = {
-        let mut state = workflow.write();
+        let mut state = operator.write();
         match state.set_sampling_interval(camera_id, sample_every) {
             Ok(()) => {
                 state.set_transient_message(None);
@@ -169,7 +171,7 @@ pub fn set_sampling_interval(
         }
     };
     if let Some(request) = cleanup {
-        spawn_fault_cleanup(workflow, request);
+        spawn_fault_cleanup(operator, request);
     }
     result
 }
@@ -291,21 +293,21 @@ fn remove_failed_start(directory: PathBuf, message: String) -> StartOutcome {
     }
 }
 
-fn apply_start_outcome(workflow: &mut Workflow, outcome: StartOutcome) {
+fn apply_start_outcome(operator: &mut OperatorState, outcome: StartOutcome) {
     match outcome {
         StartOutcome::Active {
             directory,
             controller,
-        } => workflow.finish_start(directory, controller),
-        StartOutcome::Idle { directory, message } => workflow.fail_start(&directory, message),
-        StartOutcome::Faulted { directory, message } => workflow.finish_fault(directory, message),
+        } => operator.finish_start(directory, controller),
+        StartOutcome::Idle { directory, message } => operator.fail_start(&directory, message),
+        StartOutcome::Faulted { directory, message } => operator.finish_fault(directory, message),
         StartOutcome::Superseded => {}
     }
 }
 
-fn start_is_current(workflow: &Workflow, directory: &Path) -> bool {
+fn start_is_current(operator: &OperatorState, directory: &Path) -> bool {
     matches!(
-        &workflow.session,
+        &operator.session,
         SessionRunState::Starting { directory: current } if current == directory
     )
 }
@@ -362,16 +364,16 @@ where
     }
 }
 
-fn apply_stop_outcome(workflow: &mut Workflow, outcome: StopOutcome) {
+fn apply_stop_outcome(operator: &mut OperatorState, outcome: StopOutcome) {
     match outcome {
         StopOutcome::Completed => {
-            if let Err(error) = workflow.finish_stop() {
-                workflow.set_transient_message(Some(format!(
+            if let Err(error) = operator.finish_stop() {
+                operator.set_transient_message(Some(format!(
                     "Completed session refresh failed: {error}"
                 )));
             }
         }
-        StopOutcome::Faulted { directory, message } => workflow.finish_fault(directory, message),
+        StopOutcome::Faulted { directory, message } => operator.finish_fault(directory, message),
     }
 }
 
@@ -406,8 +408,8 @@ where
     }
 }
 
-fn apply_fault_outcome(workflow: &mut Workflow, outcome: FaultOutcome) {
-    workflow.finish_fault(outcome.directory, outcome.message);
+fn apply_fault_outcome(operator: &mut OperatorState, outcome: FaultOutcome) {
+    operator.finish_fault(outcome.directory, outcome.message);
 }
 
 #[cfg(all(test, unix))]
@@ -443,8 +445,8 @@ mod tests {
         spawn_start_session, spawn_stop_session, start_is_current,
     };
     use crate::{
+        operator::{Error, FaultSessionRequest, OperatorState, SessionRunState},
         settings::CameraSettings,
-        workflow::{Error, FaultSessionRequest, SessionRunState, Workflow},
     };
 
     const START_UTC_MS: i64 = 1_786_552_800_000;
@@ -484,8 +486,8 @@ mod tests {
             self.temporary.path().join("sessions")
         }
 
-        fn workflow(&self) -> Workflow {
-            Workflow::new(
+        fn workflow(&self) -> OperatorState {
+            OperatorState::new(
                 camera_settings(),
                 self.session_root(),
                 self.recorder.clone(),
@@ -534,14 +536,15 @@ mod tests {
 
     #[test]
     fn root_session_tasks_keep_the_signal_orchestration_boundary() {
-        let _: fn(Signal<Workflow>, i64) = spawn_start_session;
-        let _: fn(Signal<Workflow>) = spawn_stop_session;
-        let _: fn(Signal<Workflow>, FaultSessionRequest) = spawn_fault_cleanup;
-        let _: fn(Signal<Workflow>, u32, bool) -> Result<(), Error> = set_participation;
-        let _: fn(Signal<Workflow>, u32, Duration) -> Result<(), Error> = set_sampling_interval;
+        let _: fn(Signal<OperatorState>, i64) = spawn_start_session;
+        let _: fn(Signal<OperatorState>) = spawn_stop_session;
+        let _: fn(Signal<OperatorState>, FaultSessionRequest) = spawn_fault_cleanup;
+        let _: fn(Signal<OperatorState>, u32, bool) -> Result<(), Error> = set_participation;
+        let _: fn(Signal<OperatorState>, u32, Duration) -> Result<(), Error> =
+            set_sampling_interval;
     }
 
-    async fn make_active(workflow: &mut Workflow) -> PathBuf {
+    async fn make_active(workflow: &mut OperatorState) -> PathBuf {
         let request = workflow
             .begin_start(START_UTC_MS)
             .expect("session should begin starting");

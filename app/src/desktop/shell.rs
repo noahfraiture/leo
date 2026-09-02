@@ -1,3 +1,8 @@
+//! Root Dioxus shell shared by ready, first-run, and failed desktop startup states.
+//!
+//! The shell installs application-wide contexts and routing; operational state is added only when
+//! desktop startup succeeds.
+
 use std::rc::Rc;
 
 use dioxus::{
@@ -6,9 +11,9 @@ use dioxus::{
     router::components::HistoryProvider,
 };
 
-use super::bootstrap::{Bootstrap, InitialSettings, InitialWorkflow, RecorderBootstrap};
+use super::bootstrap::{Bootstrap, InitialOperatorState, InitialSettings, RecorderBootstrap};
 use crate::{
-    Route, session_task,
+    Route, operator,
     views::{SettingsContext, SettingsPageState},
 };
 
@@ -62,22 +67,22 @@ pub fn App() -> Element {
     }
 }
 
-/// Transfers the one-shot workflow and recorder events into root-scoped UI state.
+/// Transfers one-shot operator state and recorder events into root-scoped UI state.
 #[component]
 fn ReadyApp(initial_route: Route) -> Element {
-    let initial_workflow = use_context::<InitialWorkflow>();
+    let initial_operator = use_context::<InitialOperatorState>();
     let recorder = use_context::<RecorderBootstrap>();
     let event_recorder = recorder.clone();
-    let mut workflow = use_hook(move || {
-        let workflow = initial_workflow
+    let mut operator_state = use_hook(move || {
+        let operator = initial_operator
             .0
             .lock()
-            .expect("initial workflow mutex should not be poisoned")
+            .expect("initial operator-state mutex should not be poisoned")
             .take()
-            .expect("Ready root should take its initialized Workflow exactly once");
-        Signal::new_in_scope(workflow, ScopeId::ROOT)
+            .expect("ready root should take its initial operator state exactly once");
+        Signal::new_in_scope(operator, ScopeId::ROOT)
     });
-    use_context_provider(|| workflow);
+    use_context_provider(|| operator_state);
 
     let _event_task = use_hook(move || {
         let mut events = event_recorder
@@ -89,20 +94,20 @@ fn ReadyApp(initial_route: Route) -> Element {
         dioxus::dioxus_core::spawn_forever(async move {
             while let Some(event) = events.recv().await {
                 let cleanup = {
-                    let mut state = workflow.write();
-                    session_task::handle_recorder_event(&mut state, event)
+                    let mut state = operator_state.write();
+                    operator::handle_recorder_event(&mut state, event)
                 };
                 if let Some(request) = cleanup {
-                    session_task::spawn_fault_cleanup(workflow, request);
+                    operator::spawn_fault_cleanup(operator_state, request);
                 }
             }
             tracing::warn!("recorder event channel closed");
             let cleanup = {
-                let mut state = workflow.write();
-                session_task::handle_recorder_event_channel_closed(&mut state)
+                let mut state = operator_state.write();
+                operator::handle_recorder_event_channel_closed(&mut state)
             };
             if let Some(request) = cleanup {
-                session_task::spawn_fault_cleanup(workflow, request);
+                operator::spawn_fault_cleanup(operator_state, request);
             }
         })
     });

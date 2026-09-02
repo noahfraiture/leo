@@ -1,3 +1,5 @@
+//! Desktop startup, native resource ownership, and the root Dioxus shell.
+
 mod bootstrap;
 mod launch;
 mod shell;

@@ -22,17 +22,17 @@ use dioxus::{
 
 use crate::{
     Route, RuntimeAvailability,
+    operator::OperatorState,
     preview::{PreviewFeed, PreviewState},
     settings::{CameraSettings, Settings as ApplicationSettings, SettingsStore},
     views::{SettingsContext, SettingsPageState},
-    workflow::Workflow,
 };
 
 pub const START_UTC_MS: i64 = 1_786_552_800_000;
 
 #[derive(Clone)]
 struct RenderRootProps {
-    workflow: Arc<Mutex<Option<Workflow>>>,
+    workflow: Arc<Mutex<Option<OperatorState>>>,
     preview: PreviewState,
     availability: RuntimeAvailability,
     settings_store: SettingsStore,
@@ -52,7 +52,7 @@ fn render_root(props: RenderRootProps) -> Element {
             .lock()
             .expect("render workflow mutex should not be poisoned")
             .take()
-            .expect("render root should take Workflow once")
+            .expect("render root should take operator state once")
     });
     let settings = use_signal(|| SettingsPageState::new(ApplicationSettings::default()));
     use_context_provider(|| workflow);
@@ -71,11 +71,11 @@ fn render_root(props: RenderRootProps) -> Element {
     }
 }
 
-/// Owns a test recorder and Workflow while a route is prepared and rendered.
+/// Owns a test recorder and operator state while a route is prepared and rendered.
 pub struct RenderHarness {
     temporary: tempfile::TempDir,
     runtime: Option<RecorderRuntime>,
-    workflow: Option<Workflow>,
+    workflow: Option<OperatorState>,
 }
 
 impl RenderHarness {
@@ -100,7 +100,7 @@ impl RenderHarness {
             executable,
         )
         .expect("test recorder runtime should start");
-        let workflow = Workflow::new(
+        let workflow = OperatorState::new(
             cameras,
             temporary.path().join("sessions"),
             recorder,
@@ -108,7 +108,7 @@ impl RenderHarness {
             NonZeroUsize::new(5).unwrap(),
             0,
         )
-        .expect("render Workflow should initialize");
+        .expect("render operator state should initialize");
 
         Self {
             temporary,
@@ -117,12 +117,16 @@ impl RenderHarness {
         }
     }
 
-    pub fn workflow(&self) -> &Workflow {
-        self.workflow.as_ref().expect("Workflow should be retained")
+    pub fn workflow(&self) -> &OperatorState {
+        self.workflow
+            .as_ref()
+            .expect("operator state should be retained")
     }
 
-    pub fn workflow_mut(&mut self) -> &mut Workflow {
-        self.workflow.as_mut().expect("Workflow should be retained")
+    pub fn workflow_mut(&mut self) -> &mut OperatorState {
+        self.workflow
+            .as_mut()
+            .expect("operator state should be retained")
     }
 
     pub fn start(&mut self) -> std::path::PathBuf {

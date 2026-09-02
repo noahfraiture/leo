@@ -1,26 +1,27 @@
+//! Leo's desktop entry point and internal application composition.
+
 #[cfg(target_os = "windows")]
 compile_error!("Leo does not support Windows.");
 
-mod analysis_task;
 mod components;
 mod desktop;
 #[cfg(feature = "desktop-e2e")]
 mod desktop_e2e;
 mod logging;
+mod operator;
 #[cfg(all(test, feature = "paid-openai-test"))]
 mod paid_openai_workflow;
 mod preview;
 mod route;
-mod session_task;
 mod settings;
 #[cfg(all(test, unix))]
 mod test_support;
 mod views;
-mod workflow;
 
+use desktop::RuntimeAvailability;
+pub use desktop::launch;
 #[cfg(feature = "desktop-e2e")]
 pub use desktop::launch_desktop_e2e;
-pub use desktop::{RuntimeAvailability, launch};
 use route::Route;
 
 #[cfg(test)]

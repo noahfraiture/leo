@@ -10,7 +10,7 @@ The Cargo workspace contains exactly three crates:
 
 | Crate | Type | Responsibility |
 | --- | --- | --- |
-| `app` | Library plus desktop binary | Dioxus routes and views, startup configuration, preview bridge, shared workflow state, logging, and root-scoped tasks. |
+| `app` | Library plus desktop binary | Dioxus routes and views, startup configuration, preview bridge, shared operator state, logging, and root-scoped tasks. |
 | `backend` | Library | Durable session events, FFmpeg recorder supervision, finalized segment discovery, sampling plans, gap warnings, frame extraction, provider transport, and checkpoints. |
 | `camera` | Binary | One fixture-backed Axis-shaped virtual camera per process for local development and acceptance. |
 
@@ -56,7 +56,7 @@ Leo owns production configuration in one strict, versioned `settings.json`. The 
 | macOS | `~/Library/Application Support/Leo/settings.json` | `~/Library/Application Support/Leo/data/` |
 | Linux | `${XDG_CONFIG_HOME:-$HOME/.config}/leo/settings.json` | `${XDG_DATA_HOME:-$HOME/.local/share}/leo/` |
 
-The schema uses strict camel-case JSON and rejects unknown fields or unsupported schema versions. It persists `schemaVersion`, `nextCameraId`, an ordered `cameras` list, optional `dataRoot`, `recorderTimeoutSecs`, `analysisFrameSetsPerPrompt`, `analysisOverlapFrameSets`, OpenAI key/model/base URL fields, and `logLevel`. Leo generates nonzero camera IDs monotonically; IDs are visible but immutable, are not reused after removal, and remain shared by preview metadata, workflow state, session events, recording directories, warnings, and results. Zero cameras and any configured camera count are valid.
+The schema uses strict camel-case JSON and rejects unknown fields or unsupported schema versions. It persists `schemaVersion`, `nextCameraId`, an ordered `cameras` list, optional `dataRoot`, `recorderTimeoutSecs`, `analysisFrameSetsPerPrompt`, `analysisOverlapFrameSets`, OpenAI key/model/base URL fields, and `logLevel`. Leo generates nonzero camera IDs monotonically; IDs are visible but immutable, are not reused after removal, and remain shared by preview metadata, operator state, session events, recording directories, warnings, and results. Zero cameras and any configured camera count are valid.
 
 Each camera requires a nonblank name, an `rtsp` URL, an initial analysis-participation flag, and a positive whole-second sampling cadence. Analysis sends a positive configured number of synchronized frame sets per prompt and can repeat fewer than that number between adjacent prompts; one frame set can contain one image per participating camera. The persisted recorder timeout is the initial all-camera readiness deadline and bounded FFmpeg RTSP network I/O timeout; it must fit both FFmpeg microseconds and a Rust deadline. Reconnect delay remains one second, and graceful Stop has five seconds before forced termination. An optional provider base URL must be absolute HTTP or HTTPS. A blank provider key or model disables Analyze with sanitized guidance but leaves Monitor and completed-session discovery available.
 
@@ -78,18 +78,19 @@ platform settings.json
 The desktop crate keeps these responsibilities in explicit modules: `desktop::bootstrap` loads
 settings and prepares runtime dependencies, `desktop::launch` binds process owners to the native
 event loop, `desktop::shell` installs Dioxus contexts and root-scoped tasks, and `route` defines the
-route table. Route views remain under `views`; the Settings view is composed from separate camera,
+route table. The `operator` module owns route-independent state plus recording and analysis task
+coordination. Route views remain under `views`; the Settings view is composed from separate camera,
 storage, recording, provider, application, and sidebar sections.
 
-A missing file opens Settings with a valid zero-camera draft and does not create runtime directories. Any other settings load, validation, or directory-preparation error fails startup. Valid settings initialize compact stderr and daily JSON logging, spawn `RecorderRuntime` after its `ffmpeg`/`ffprobe` preflight, create `Workflow` and discover completed sessions, and then start preview. Logging, recorder, or catalogue failure leaves the shell running with route-specific failure guidance and Settings reachable.
+A missing file opens Settings with a valid zero-camera draft and does not create runtime directories. Any other settings load, validation, or directory-preparation error fails startup. Valid settings initialize compact stderr and daily JSON logging, spawn `RecorderRuntime` after its `ffmpeg`/`ffprobe` preflight, create `OperatorState` and discover completed sessions, and then start preview. Logging, recorder, or catalogue failure leaves the shell running with route-specific failure guidance and Settings reachable.
 
-Every shell branch receives `RuntimeAvailability` and `SettingsContext`. Concrete `ResolvedSettings`, `PreviewState`, `RecorderBootstrap`, and initial Workflow contexts exist only in the ready branch; `ReadyApp` alone takes the recorder event receiver and provides `Signal<Workflow>`. Setup, failed, and ready Settings routes therefore never require operational contexts. Missing settings initially select Settings. A runtime failure after valid settings initially selects Monitor, where the failure and a Settings link remain visible.
+Every shell branch receives `RuntimeAvailability` and `SettingsContext`. Concrete `ResolvedSettings`, `PreviewState`, `RecorderBootstrap`, and initial operator-state contexts exist only in the ready branch; `ReadyApp` alone takes the recorder event receiver and provides `Signal<OperatorState>`. Setup, failed, and ready Settings routes therefore never require operational contexts. Missing settings initially select Settings. A runtime failure after valid settings initially selects Monitor, where the failure and a Settings link remain visible.
 
-Zero cameras is a ready runtime: Leo skips MediaMTX, retains catalogue discovery and Analyze, omits Start from Monitor, and independently rejects an attempted empty start before creating session storage. Preview startup failure is warning-only: it produces a ready workflow with recovery guidance, and recording remains available.
+Zero cameras is a ready runtime: Leo skips MediaMTX, retains catalogue discovery and Analyze, omits Start from Monitor, and independently rejects an attempted empty start before creating session storage. Preview startup failure is warning-only: it produces ready operator state with recovery guidance, and recording remains available.
 
 The desktop event-loop owner retains `RecorderRuntime`, the preview `Bridge`, and `LogGuard`. On normal loop destruction it requests recorder shutdown, interrupts in-progress readiness or finalization, stops or kills and reaps children, joins the management thread, stops and reaps MediaMTX, and then drops the log guard so queued JSON events flush.
 
-`ReadyApp` owns the single recorder event receiver and allocates one `Signal<Workflow>` in Dioxus's root scope above the router. Root-scoped session and analysis futures own work across awaits, so changing between Monitor and Analyze cannot cancel recording finalization or model analysis. Recorder threads communicate with UI state only through the event channel.
+`ReadyApp` owns the single recorder event receiver and allocates one `Signal<OperatorState>` in Dioxus's root scope above the router. Root-scoped session and analysis futures own work across awaits, so changing between Monitor and Analyze cannot cancel recording finalization or model analysis. Recorder threads communicate with UI state only through the event channel.
 
 ## Preview
 
@@ -108,7 +109,7 @@ The generated configuration disables recording and unrelated protocols and grant
 
 Monitor keeps one keyed feed mounted per configured camera. It displays preview failure, analysis inclusion, and recorder status separately. Recorder states are Idle, Starting, Recording, or Reconnecting.
 
-## Session Workflow
+## Session Lifecycle
 
 Only one recording session may run at a time.
 
@@ -224,7 +225,7 @@ Analyze operates only on a selected completed session while recording is Idle. `
 7. Build configured overlapping frame-set batches and write or validate the initial zero-response `analysis.json` checkpoint.
 8. Construct the provider only if an incomplete batch remains.
 9. Extract requested JPEG bytes directly from local MKVs with FFmpeg, send one structured batch request, and atomically replace the checkpoint after success.
-10. Emit each complete durable checkpoint snapshot to the real Workflow callback.
+10. Emit each complete durable checkpoint snapshot to the real `OperatorState` callback.
 
 A frame set may contain any available subset of the session cameras. An offset with no available frame is omitted. No available frames across the complete plan fails before provider construction. Invalid or overlapping segments fail without replacing a valid prior checkpoint.
 
@@ -238,12 +239,12 @@ Leo has focused integration slices plus one opt-in macOS desktop E2E. That E2E i
 
 | Coverage | What is real | What is substituted or absent |
 | --- | --- | --- |
-| Workspace and workflow tests | Session persistence, state transitions, catalogue rules, sampling plans, checkpoints, and failure handling. | External processes are isolated where the test does not need media. |
-| Dioxus SSR render tests | Monitor and Analyze controls plus projections of prepared Workflow states on both routes. | No DOM-event dispatch, native webview, browser media stack, or mouse automation; workflow actions are covered separately by state and task tests. |
+| Workspace and operator tests | Session persistence, state transitions, catalogue rules, sampling plans, checkpoints, and failure handling. | External processes are isolated where the test does not need media. |
+| Dioxus SSR render tests | Monitor and Analyze controls plus projections of prepared operator states on both routes. | No DOM-event dispatch, native webview, browser media stack, or mouse automation; operator actions are covered separately by state and task tests. |
 | Virtual-camera and recorder checks | MediaMTX, RTSP/TCP, two simultaneous readers, FFmpeg stream copy, playable MKV output, reconnect, and process cleanup. | Fixture video replaces physical cameras. |
 | Local analysis check | Completed session directory, real FFprobe/FFmpeg extraction, gap-aware planning, durable callbacks, and checkpoint output. | A deterministic Rig mock replaces the model provider. |
 | Full desktop E2E | Two fixture-camera processes, both MediaMTX layers, live WKWebView previews, Dioxus event handlers, FFmpeg recording, Stop finalization, session discovery, production OpenAI HTTP transport, local extraction, results UI, and shutdown. | The fixed pair is a test setup; fixture video and a loopback OpenAI-compatible server are the default, and DOM events are programmatic rather than OS pointer events. |
-| Paid workflow compile check | The feature-gated application path type-checks through the real Workflow callback. | It does not run or contact OpenAI without separate approval. |
+| Paid workflow compile check | The feature-gated application path type-checks through the real `OperatorState` callback. | It does not run or contact OpenAI without separate approval. |
 
 The desktop E2E creates a strict owner-only temporary settings file and injects its explicit path through a feature-gated launcher; this is a test seam, not a production override. Provider variables are removed from the app child. The mounted driver reads the ready-only active `ResolvedSettings` context and permits only a numeric loopback provider or real mode with both paid gates, which keeps its safety decision aligned with the runtime actually under test.
 
@@ -290,7 +291,7 @@ LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 cargo test -p camera --features
 
 ## Paid-Test Gates
 
-The paid application checks are absent unless Cargo feature `paid-openai-test` is enabled, remain ignored with explicit cost warnings, and assert `LEO_RUN_PAID_OPENAI_TEST=1` before constructing temporary storage, recorder runtime, Workflow, session, or provider. `OPENAI_API_KEY` and `ANALYSIS_MODEL` are paid-test-process inputs only; production gets the corresponding values from Settings. The documented paid recipe rejects `OPENAI_BASE_URL` because desktop paid validation targets OpenAI directly. The focused workflow check uses one short local MKV and applies backend checkpoints through the real Workflow callback.
+The paid application checks are absent unless Cargo feature `paid-openai-test` is enabled, remain ignored with explicit cost warnings, and assert `LEO_RUN_PAID_OPENAI_TEST=1` before constructing temporary storage, recorder runtime, `OperatorState`, session, or provider. `OPENAI_API_KEY` and `ANALYSIS_MODEL` are paid-test-process inputs only; production gets the corresponding values from Settings. The documented paid recipe rejects `OPENAI_BASE_URL` because desktop paid validation targets OpenAI directly. The focused workflow check uses one short local MKV and applies backend checkpoints through the real `OperatorState` callback.
 
 The safe verification is compile-only:
 
@@ -306,7 +307,7 @@ Do not set `LEO_RUN_PAID_OPENAI_TEST=1`, execute either paid path, or send an ex
 
 The app emits compact human-readable logs to stderr and daily JSON lines to `<data-root>/logs/leo.jsonl.<date>`. The persisted `LogLevel` controls both. Before valid settings are available, and whenever file logging initialization fails, Leo attempts an `info`-level or configured-level stderr fallback so the shell can still report startup failure. The retained nonblocking writer guard flushes during normal desktop shutdown.
 
-Structured events cover settings state, preview startup, recorder attempts and cleanup, workflow transitions, discovery skips, gap planning, checkpoint saves, and analysis completion or failure. Logs must not contain API keys, RTSP credentials or full URLs, checklists, prompts, image bytes, or model request bodies. The provider-payload and Dioxus VNode tracing targets are permanently disabled even at `trace`.
+Structured events cover settings state, preview startup, recorder attempts and cleanup, operator-state transitions, discovery skips, gap planning, checkpoint saves, and analysis completion or failure. Logs must not contain API keys, RTSP credentials or full URLs, checklists, prompts, image bytes, or model request bodies. The provider-payload and Dioxus VNode tracing targets are permanently disabled even at `trace`.
 
 ## Current Limits
 

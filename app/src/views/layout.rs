@@ -1,7 +1,7 @@
 use crate::{
     Route, RuntimeAvailability,
+    operator::OperatorState,
     views::{Analyze, Monitor, Settings, Sidebar},
-    workflow::Workflow,
 };
 use dioxus::prelude::*;
 
@@ -14,30 +14,14 @@ pub fn Layout() -> Element {
     rsx! {
         div {
             class: "flex min-h-screen flex-col gap-2 p-2 lg:h-screen lg:flex-row",
-            aside {
-                id: "sidebar",
-                class: "flex shrink-0 flex-col bg-base-200 p-3 lg:w-80 lg:overflow-y-auto",
-                div {
-                    class: "shrink-0",
-                    PrimaryNavigation { route: route.clone() }
-                }
-
-                hr {
-                    class: "border-t shrink-0 my-4",
-                }
-
-                div {
-                    class: "min-h-0 flex-1 overflow-y-auto",
-                    Sidebar { route: route.clone() }
-                }
-            }
+            Sidebar { route: route.clone() }
             main {
                 id: "body",
                 class: "min-w-0 flex-1 overflow-y-auto",
                 if matches!(&availability, RuntimeAvailability::Ready { .. })
                     && !matches!(&route, Route::Settings {})
                 {
-                    WorkflowAlert {}
+                    OperatorAlert {}
                 }
                 RouteContent { route: route.clone(), availability }
             }
@@ -45,14 +29,14 @@ pub fn Layout() -> Element {
     }
 }
 
-/// Reads the ready-only Workflow context and renders its route-independent failure alert.
+/// Reads ready-only operator state and renders its route-independent failure alert.
 ///
 /// Keeping this context consumer behind a component boundary lets setup and failed shells render
 /// the same layout without installing operational contexts.
 #[component]
-fn WorkflowAlert() -> Element {
-    let workflow = use_context::<Signal<Workflow>>();
-    let message = workflow.read().message.clone();
+fn OperatorAlert() -> Element {
+    let operator = use_context::<Signal<OperatorState>>();
+    let message = operator.read().message.clone();
 
     rsx! {
         if let Some(message) = message {
@@ -61,49 +45,6 @@ fn WorkflowAlert() -> Element {
                 role: "alert",
                 aria_live: "assertive",
                 span { "{message}" }
-            }
-        }
-    }
-}
-
-#[component]
-fn PrimaryNavigation(route: Route) -> Element {
-    rsx! {
-        nav {
-            id: "navbutton",
-            class: "flex flex-wrap justify-center gap-2",
-            aria_label: "Primary navigation",
-            Link {
-                to: Route::Monitor {},
-                aria_current: if matches!(&route, Route::Monitor {}) { Some("page") } else { None },
-                class: if matches!(&route, Route::Monitor {}) {
-                    "btn btn-success"
-                } else {
-                    "btn"
-                },
-                "Monitor"
-            }
-
-            Link {
-                to: Route::Analyze {},
-                aria_current: if matches!(&route, Route::Analyze {}) { Some("page") } else { None },
-                class: if matches!(&route, Route::Analyze {}) {
-                    "btn btn-success"
-                } else {
-                    "btn"
-                },
-                "Analyze"
-            }
-
-            Link {
-                to: Route::Settings {},
-                aria_current: if matches!(&route, Route::Settings {}) { Some("page") } else { None },
-                class: if matches!(&route, Route::Settings {}) {
-                    "btn btn-success"
-                } else {
-                    "btn"
-                },
-                "Settings"
             }
         }
     }

@@ -1,13 +1,15 @@
+//! Errors returned by operator-state transitions and local session storage.
+
 use std::{io, path::PathBuf};
 
-/// Workflow transition or local session-storage failure.
+/// Operator-state transition or local session-storage failure.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("a session can only start while the workflow is idle")]
+    #[error("a session can only start while no session is active")]
     StartUnavailable,
     #[error("no cameras are configured; add a camera in Settings before starting a session")]
     NoCamerasConfigured,
-    #[error("a session can only stop while the workflow is active")]
+    #[error("a session can only stop while a session is active")]
     StopUnavailable,
     #[error("analysis is already running")]
     AnalysisRunning,
@@ -15,7 +17,7 @@ pub enum Error {
     AnalysisSessionNotSelected,
     #[error("the selected session is no longer complete")]
     AnalysisSessionIncomplete,
-    #[error("analysis can only start while the recording workflow is idle")]
+    #[error("analysis can only start while no session is active")]
     AnalysisRequiresIdleSession,
     #[error("the selected session has an invalid analysis checkpoint")]
     InvalidAnalysisCheckpoint,

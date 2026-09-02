@@ -3,16 +3,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use backend::recording::RecorderStatus;
 use dioxus::prelude::*;
 
-use crate::{
-    session_task,
-    workflow::{SessionRunState, Workflow},
-};
+use crate::operator::{self, OperatorState, SessionRunState};
 
 /// Renders recording lifecycle and selected-camera controls for the Monitor route.
 #[component]
 pub fn Sidebar() -> Element {
-    let mut workflow = use_context::<Signal<Workflow>>();
-    let state = workflow.read();
+    let mut operator_state = use_context::<Signal<OperatorState>>();
+    let state = operator_state.read();
     let cameras = state
         .cameras
         .iter()
@@ -86,9 +83,9 @@ pub fn Sidebar() -> Element {
                                 .ok()
                                 .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok());
                             if let Some(utc_ms) = utc_ms {
-                                session_task::spawn_start_session(workflow, utc_ms);
+                                operator::spawn_start_session(operator_state, utc_ms);
                             } else {
-                                workflow.write().set_transient_message(Some(
+                                operator_state.write().set_transient_message(Some(
                                     "The system clock cannot start a session.".into(),
                                 ));
                             }
@@ -183,7 +180,7 @@ pub fn Sidebar() -> Element {
                     button {
                         class: "btn btn-error w-full",
                         r#type: "button",
-                        onclick: move |_| session_task::spawn_stop_session(workflow),
+                        onclick: move |_| operator::spawn_stop_session(operator_state),
                         "Stop session"
                     }
                     div {
@@ -297,7 +294,7 @@ fn SelectedCameraControls(
     participating: bool,
     sample_every_ms: u64,
 ) -> Element {
-    let mut workflow = use_context::<Signal<Workflow>>();
+    let mut operator_state = use_context::<Signal<OperatorState>>();
     let initial_seconds = sample_every_ms / 1_000;
     let mut cadence = use_signal(move || initial_seconds.to_string());
     let input_id = format!("sampling-interval-{camera_id}");
@@ -321,8 +318,8 @@ fn SelectedCameraControls(
                 class: "btn btn-outline btn-sm w-full",
                 r#type: "button",
                 onclick: move |_| {
-                    let _ = session_task::set_participation(
-                        workflow,
+                    let _ = operator::set_participation(
+                        operator_state,
                         camera_id,
                         !participating,
                     );
@@ -334,9 +331,13 @@ fn SelectedCameraControls(
                 onsubmit: move |event| {
                     event.prevent_default();
                     if let Some(interval) = parse_sampling_interval(&cadence()) {
-                        let _ = session_task::set_sampling_interval(workflow, camera_id, interval);
+                        let _ = operator::set_sampling_interval(
+                            operator_state,
+                            camera_id,
+                            interval,
+                        );
                     } else {
-                        workflow.write().set_transient_message(Some(
+                        operator_state.write().set_transient_message(Some(
                             "Sampling interval must be a positive whole number of seconds.".into(),
                         ));
                     }
@@ -367,7 +368,7 @@ fn SelectedCameraControls(
 
 #[component]
 fn ElapsedTime() -> Element {
-    let workflow = use_context::<Signal<Workflow>>();
+    let operator = use_context::<Signal<OperatorState>>();
     let mut tick = use_signal(|| 0_u64);
     use_future(move || async move {
         loop {
@@ -377,7 +378,7 @@ fn ElapsedTime() -> Element {
     });
     let _ = tick();
     let elapsed = {
-        let state = workflow.read();
+        let state = operator.read();
         match &state.session {
             SessionRunState::Active { controller, .. } => controller.elapsed(),
             _ => Duration::ZERO,

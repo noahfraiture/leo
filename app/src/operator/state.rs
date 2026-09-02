@@ -1,3 +1,5 @@
+//! Route-independent operator state and its synchronous transitions.
+
 use std::{
     fs,
     num::NonZeroUsize,
@@ -57,7 +59,7 @@ pub struct StartSessionRequest {
     pub recorder: RecorderHandle,
 }
 
-/// Active resources moved out of Workflow before the recorder Stop await.
+/// Active resources moved out of [`OperatorState`] before the recorder Stop await.
 pub struct StopSessionRequest {
     pub directory: PathBuf,
     pub controller: SessionController,
@@ -72,8 +74,8 @@ pub struct FaultSessionRequest {
     pub message: String,
 }
 
-/// Shared route-independent recording and completed-session state.
-pub struct Workflow {
+/// Route-independent operator state for recording, completed sessions, and analysis.
+pub struct OperatorState {
     pub cameras: Vec<CameraState>,
     pub selected_camera_id: Option<u32>,
     pub session: SessionRunState,
@@ -92,7 +94,7 @@ pub struct Workflow {
     recorder: RecorderHandle,
 }
 
-impl Workflow {
+impl OperatorState {
     /// Builds initial camera state and discovers completed sessions from disk.
     pub fn new(
         cameras: Vec<CameraSettings>,
@@ -111,7 +113,7 @@ impl Workflow {
                 recorder_status: RecorderStatus::Stopped,
             })
             .collect();
-        let mut workflow = Self {
+        let mut operator = Self {
             cameras,
             selected_camera_id,
             session: SessionRunState::Idle,
@@ -127,8 +129,8 @@ impl Workflow {
             openai,
             recorder,
         };
-        workflow.refresh_sessions()?;
-        Ok(workflow)
+        operator.refresh_sessions()?;
+        Ok(operator)
     }
 
     /// Selects a configured camera and clears only non-fault action messages.
@@ -596,7 +598,7 @@ mod tests {
     use tempfile::TempDir;
     use uuid::Uuid;
 
-    use super::{Error, SessionRunState, Workflow};
+    use super::{Error, OperatorState, SessionRunState};
     use crate::settings::CameraSettings;
 
     const START_UTC_MS: i64 = 1_786_552_800_000;
@@ -604,7 +606,7 @@ mod tests {
     struct Harness {
         _temporary: TempDir,
         runtime: Option<RecorderRuntime>,
-        workflow: Workflow,
+        workflow: OperatorState,
     }
 
     impl Harness {
@@ -638,7 +640,7 @@ mod tests {
                 executable,
             )
             .expect("test recorder runtime should start");
-            let workflow = Workflow::new(
+            let workflow = OperatorState::new(
                 cameras,
                 temporary.path().join("sessions"),
                 recorder,
@@ -691,7 +693,7 @@ mod tests {
         ]
     }
 
-    fn start_active(workflow: &mut Workflow) -> PathBuf {
+    fn start_active(workflow: &mut OperatorState) -> PathBuf {
         let request = workflow
             .begin_start(START_UTC_MS)
             .expect("idle workflow should begin starting");
@@ -820,15 +822,15 @@ mod tests {
         directory
     }
 
-    fn begin_analysis_error(workflow: &mut Workflow, checklist: &str) -> Error {
+    fn begin_analysis_error(workflow: &mut OperatorState, checklist: &str) -> Error {
         let Err(error) = workflow.begin_analysis(checklist.into()) else {
             panic!("analysis transition should be rejected");
         };
         error
     }
 
-    fn saved_checkpoint(workflow: &Workflow, session_id: Uuid) -> &AnalysisCheckpoint {
-        workflow
+    fn saved_checkpoint(operator: &OperatorState, session_id: Uuid) -> &AnalysisCheckpoint {
+        operator
             .sessions
             .iter()
             .find(|row| row.stored.session.id == session_id)

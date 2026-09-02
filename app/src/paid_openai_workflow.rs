@@ -16,7 +16,7 @@ use backend::{
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::{settings::CameraSettings, workflow::Workflow};
+use crate::{operator::OperatorState, settings::CameraSettings};
 
 #[tokio::test]
 #[ignore = "costs money; requires explicit approval and LEO_RUN_PAID_OPENAI_TEST=1"]
@@ -49,7 +49,7 @@ async fn paid_openai_analyzes_one_local_application_session() {
         stop_timeout: Duration::from_secs(5),
     })
     .expect("paid test requires ffmpeg and ffprobe");
-    let mut workflow = Workflow::new(
+    let mut workflow = OperatorState::new(
         camera_settings(),
         sessions_root,
         handle,

@@ -1,16 +1,22 @@
+//! Root-scoped analysis execution and checkpoint projection.
+
 use backend::analysis::AnalyzeSession;
 use dioxus::prelude::{Signal, WritableExt};
 use uuid::Uuid;
 
-use crate::workflow::Workflow;
+use super::OperatorState;
 
 /// Runs one analysis independently of route lifetimes and projects durable snapshots.
-pub fn spawn_analysis(mut workflow: Signal<Workflow>, request: AnalyzeSession, session_id: Uuid) {
+pub fn spawn_analysis(
+    mut operator: Signal<OperatorState>,
+    request: AnalyzeSession,
+    session_id: Uuid,
+) {
     tracing::info!(%session_id, "analysis started");
     dioxus::dioxus_core::spawn_forever(async move {
-        let mut checkpoint_workflow = workflow;
+        let mut checkpoint_operator = operator;
         let result = backend::analysis::analyze_session(request, move |checkpoint| {
-            checkpoint_workflow.write().apply_checkpoint(checkpoint);
+            checkpoint_operator.write().apply_checkpoint(checkpoint);
         })
         .await;
 
@@ -23,7 +29,7 @@ pub fn spawn_analysis(mut workflow: Signal<Workflow>, request: AnalyzeSession, s
             ),
             Err(error) => {
                 tracing::error!(%session_id, error = %error, "analysis failed");
-                workflow
+                operator
                     .write()
                     .analysis_failed(session_id, error.to_string());
             }
@@ -48,7 +54,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::spawn_analysis;
-    use crate::{settings::CameraSettings, workflow::Workflow};
+    use crate::{operator::OperatorState, settings::CameraSettings};
 
     struct Presentation {
         completed: usize,
@@ -59,7 +65,7 @@ mod tests {
         checklist: Vec<ChecklistProgress>,
     }
 
-    fn test_workflow() -> (tempfile::TempDir, RecorderRuntime, Workflow) {
+    fn test_workflow() -> (tempfile::TempDir, RecorderRuntime, OperatorState) {
         let temporary = tempfile::tempdir().expect("temporary root should be created");
         let executable = temporary.path().join("successful-preflight");
         fs::write(&executable, "#!/bin/sh\nexit 0\n")
@@ -76,7 +82,7 @@ mod tests {
             executable,
         )
         .expect("test recorder runtime should start");
-        let workflow = Workflow::new(
+        let workflow = OperatorState::new(
             [1_u32, 2]
                 .into_iter()
                 .map(|id| CameraSettings {
@@ -97,7 +103,7 @@ mod tests {
         (temporary, runtime, workflow)
     }
 
-    fn write_completed_session(workflow: &mut Workflow, session_id: Uuid) {
+    fn write_completed_session(workflow: &mut OperatorState, session_id: Uuid) {
         let directory = workflow.session_root.join("completed");
         fs::create_dir_all(&directory).expect("session directory should be created");
         let events = [
@@ -179,7 +185,7 @@ mod tests {
         }
     }
 
-    fn project(workflow: &Workflow, session_id: Uuid) -> Presentation {
+    fn project(workflow: &OperatorState, session_id: Uuid) -> Presentation {
         let checkpoint = workflow
             .sessions
             .iter()
@@ -215,7 +221,7 @@ mod tests {
 
     #[test]
     fn checkpoint_callback_outlives_recreated_presentation_and_retry() {
-        let _: fn(Signal<Workflow>, AnalyzeSession, Uuid) = spawn_analysis;
+        let _: fn(Signal<OperatorState>, AnalyzeSession, Uuid) = spawn_analysis;
         let (_temporary, runtime, mut workflow) = test_workflow();
         let session_id = Uuid::from_u128(41);
         write_completed_session(&mut workflow, session_id);

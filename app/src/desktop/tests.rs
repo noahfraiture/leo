@@ -11,11 +11,10 @@ use backend::{
     session::SessionController,
 };
 
-use super::bootstrap::{InitialWorkflow, RecorderBootstrap, initialize_workflow_for_test};
+use super::bootstrap::{InitialOperatorState, RecorderBootstrap, initialize_operator_for_test};
 use crate::{
-    session_task::handle_recorder_event,
+    operator::{OperatorState, SessionRunState, handle_recorder_event},
     settings::{CameraSettings, Settings, SettingsStore},
-    workflow::{SessionRunState, Workflow},
 };
 
 fn camera_settings() -> Vec<CameraSettings> {
@@ -94,11 +93,11 @@ fn workflow_bootstrap_reports_catalogue_io_without_taking_receiver() {
     fs::write(&config.sessions_root, b"not a directory")
         .expect("catalogue root should become invalid after startup validation");
 
-    let Err(error) = initialize_workflow_for_test(&config, &recorder) else {
-        panic!("invalid catalogue should make Workflow unavailable");
+    let Err(error) = initialize_operator_for_test(&config, &recorder) else {
+        panic!("invalid catalogue should make operator state unavailable");
     };
 
-    assert!(error.contains("Session workflow is unavailable"));
+    assert!(error.contains("Operator state is unavailable"));
     assert!(
         recorder
             .events
@@ -125,8 +124,8 @@ fn workflow_bootstrap_copies_active_analysis_batching_settings() {
         })
         .expect("test settings should resolve");
 
-    let InitialWorkflow(initial) =
-        initialize_workflow_for_test(&config, &recorder).expect("workflow should initialize");
+    let InitialOperatorState(initial) =
+        initialize_operator_for_test(&config, &recorder).expect("operator state should initialize");
     let workflow = initial
         .lock()
         .expect("initial workflow mutex should not be poisoned")
@@ -141,7 +140,7 @@ fn workflow_bootstrap_copies_active_analysis_batching_settings() {
 #[test]
 fn root_event_dispatch_updates_reconnecting_and_claims_one_fatal_cleanup() {
     let (temporary, runtime, recorder) = test_recorder();
-    let mut workflow = Workflow::new(
+    let mut workflow = OperatorState::new(
         camera_settings(),
         temporary.path().join("sessions"),
         recorder.handle.clone(),

@@ -6,9 +6,9 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crate::{
     Route,
     logging::{self, LogGuard},
+    operator::OperatorState,
     preview::{Bridge, CameraSource, PreviewState, bridge},
     settings::{LogLevel, ResolvedSettings, Settings as ApplicationSettings, SettingsStore},
-    workflow::Workflow,
 };
 
 /// Recorder handle and single event receiver handed from desktop startup to the ready UI root.
@@ -18,9 +18,9 @@ pub struct RecorderBootstrap {
     pub events: Arc<Mutex<Option<UnboundedReceiver<RecorderEvent>>>>,
 }
 
-/// Single workflow value transferred into Dioxus's root scope after startup.
+/// Single operator-state value transferred into Dioxus's root scope after startup.
 #[derive(Clone)]
-pub struct InitialWorkflow(pub Arc<Mutex<Option<Workflow>>>);
+pub struct InitialOperatorState(pub Arc<Mutex<Option<OperatorState>>>);
 
 /// Operational startup result kept separate from the always-available shell.
 #[derive(Clone)]
@@ -29,7 +29,7 @@ pub enum Bootstrap {
         config: Box<ResolvedSettings>,
         preview: PreviewState,
         recorder: RecorderBootstrap,
-        workflow: InitialWorkflow,
+        operator: InitialOperatorState,
     },
     SetupRequired,
     Failed {
@@ -45,14 +45,17 @@ pub struct InitialSettings {
     pub initial_route: Route,
 }
 
-/// Process-owning resources that must outlive the desktop event loop.
-pub struct RuntimeOwners {
+/// Process and logging guards retained by the native desktop event loop.
+///
+/// Dioxus's desktop launcher never returns, so normal stack cleanup is unreachable. The event
+/// handler owns these guards and shuts them down explicitly when the native loop is destroyed.
+pub struct DesktopRuntime {
     recorder: Option<RecorderRuntime>,
     preview: Option<Bridge>,
     log: Option<LogGuard>,
 }
 
-impl RuntimeOwners {
+impl DesktopRuntime {
     fn new() -> Self {
         Self {
             recorder: None,
@@ -88,24 +91,24 @@ impl RuntimeOwners {
 pub struct Startup {
     pub bootstrap: Bootstrap,
     pub settings: InitialSettings,
-    pub owners: RuntimeOwners,
+    pub runtime: DesktopRuntime,
 }
 
 /// Loads settings and prepares every startup-only runtime dependency.
 pub fn prepare(store: SettingsStore) -> Startup {
-    let mut owners = RuntimeOwners::new();
+    let mut runtime = DesktopRuntime::new();
     let loaded = store
         .load()
         .unwrap_or_else(|error| panic!("application settings could not be loaded: {error}"));
     let (bootstrap, settings) = match loaded {
         None => missing_settings(store),
-        Some(config) => loaded_settings(store, config, &mut owners),
+        Some(config) => loaded_settings(store, config, &mut runtime),
     };
 
     Startup {
         bootstrap,
         settings,
-        owners,
+        runtime,
     }
 }
 
@@ -125,18 +128,18 @@ fn missing_settings(store: SettingsStore) -> (Bootstrap, InitialSettings) {
 fn loaded_settings(
     store: SettingsStore,
     config: ResolvedSettings,
-    owners: &mut RuntimeOwners,
+    runtime: &mut DesktopRuntime,
 ) -> (Bootstrap, InitialSettings) {
     let settings = InitialSettings {
         store,
         draft: config.settings.clone(),
         initial_route: Route::Monitor {},
     };
-    let bootstrap = prepare_runtime(config, owners);
+    let bootstrap = prepare_runtime(config, runtime);
     (bootstrap, settings)
 }
 
-fn prepare_runtime(config: ResolvedSettings, owners: &mut RuntimeOwners) -> Bootstrap {
+fn prepare_runtime(config: ResolvedSettings, runtime: &mut DesktopRuntime) -> Bootstrap {
     let log_level = config.settings.log_level;
     let log_guard = match logging::init(&config.logs_root, log_level) {
         Ok(log_guard) => log_guard,
@@ -148,10 +151,10 @@ fn prepare_runtime(config: ResolvedSettings, owners: &mut RuntimeOwners) -> Boot
             };
         }
     };
-    owners.log = Some(log_guard);
+    runtime.log = Some(log_guard);
     tracing::info!("startup configuration loaded");
 
-    let (runtime, handle, events) = match RecorderRuntime::spawn(config.recorder_settings) {
+    let (runtime_owner, handle, events) = match RecorderRuntime::spawn(config.recorder_settings) {
         Ok(recorder) => recorder,
         Err(error) => {
             tracing::error!(error = %error, "recorder preflight failed");
@@ -160,34 +163,34 @@ fn prepare_runtime(config: ResolvedSettings, owners: &mut RuntimeOwners) -> Boot
             };
         }
     };
-    owners.recorder = Some(runtime);
+    runtime.recorder = Some(runtime_owner);
     let recorder = RecorderBootstrap {
         handle,
         events: Arc::new(Mutex::new(Some(events))),
     };
-    let workflow = match initialize_workflow(&config, &recorder) {
-        Ok(workflow) => workflow,
+    let operator = match initialize_operator(&config, &recorder) {
+        Ok(operator) => operator,
         Err(message) => {
-            tracing::error!("session workflow initialization failed");
+            tracing::error!("operator state initialization failed");
             return Bootstrap::Failed { message };
         }
     };
     let (preview, bridge) = prepare_preview(&config);
-    owners.preview = bridge;
+    runtime.preview = bridge;
 
     Bootstrap::Ready {
         config: Box::new(config),
         preview,
         recorder,
-        workflow,
+        operator,
     }
 }
 
-fn initialize_workflow(
+fn initialize_operator(
     config: &ResolvedSettings,
     recorder: &RecorderBootstrap,
-) -> Result<InitialWorkflow, String> {
-    Workflow::new(
+) -> Result<InitialOperatorState, String> {
+    OperatorState::new(
         config.settings.cameras.clone(),
         config.sessions_root.clone(),
         recorder.handle.clone(),
@@ -195,8 +198,8 @@ fn initialize_workflow(
         config.analysis_frame_sets_per_prompt,
         config.analysis_overlap_frame_sets,
     )
-    .map(|workflow| InitialWorkflow(Arc::new(Mutex::new(Some(workflow)))))
-    .map_err(|_| "Session workflow is unavailable.".into())
+    .map(|operator| InitialOperatorState(Arc::new(Mutex::new(Some(operator)))))
+    .map_err(|_| "Operator state is unavailable.".into())
 }
 
 fn prepare_preview(config: &ResolvedSettings) -> (PreviewState, Option<Bridge>) {
@@ -234,9 +237,9 @@ fn prepare_preview(config: &ResolvedSettings) -> (PreviewState, Option<Bridge>) 
 }
 
 #[cfg(all(test, unix))]
-pub fn initialize_workflow_for_test(
+pub fn initialize_operator_for_test(
     config: &ResolvedSettings,
     recorder: &RecorderBootstrap,
-) -> Result<InitialWorkflow, String> {
-    initialize_workflow(config, recorder)
+) -> Result<InitialOperatorState, String> {
+    initialize_operator(config, recorder)
 }
