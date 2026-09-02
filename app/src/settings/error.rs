@@ -1,19 +1,10 @@
 use std::path::PathBuf;
 
-/// Platform resolution, validation, or durable settings-storage failure.
+/// Validation or settings-storage failure.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("standard {category} directory is unavailable")]
-    StandardDirectoryUnavailable { category: &'static str },
-    #[error("{category} path must be absolute: {path}")]
-    NonAbsolutePath {
-        category: &'static str,
-        path: PathBuf,
-    },
     #[error("settings are invalid")]
     InvalidSettings(#[source] ValidationErrors),
-    #[error("settings path has no parent directory: {path}")]
-    SettingsPathWithoutParent { path: PathBuf },
     #[error("failed to read settings file at {path}")]
     ReadSettings {
         path: PathBuf,

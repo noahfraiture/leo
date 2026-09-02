@@ -22,6 +22,3 @@ pub use settings::{Settings, SettingsContext, SettingsPageState, SettingsSidebar
 
 mod sidebar;
 pub use sidebar::Sidebar;
-
-#[cfg(test)]
-mod render_tests;

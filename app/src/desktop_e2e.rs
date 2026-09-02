@@ -113,7 +113,8 @@ pub fn DesktopE2eDriver() -> Element {
             tracing::error!(path = %ready_path.display(), %error, "desktop E2E ready handshake failed");
         }
 
-        let openai = resolved.openai.as_ref();
+        let openai = resolved.settings.openai_config();
+        let openai = openai.as_ref();
         let base_url = openai.and_then(|config| config.base_url.as_deref());
         let real_openai = std::env::var("LEO_E2E_REAL_OPENAI").ok();
         let paid_openai = std::env::var("LEO_RUN_PAID_OPENAI_TEST").ok();

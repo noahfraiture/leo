@@ -7,23 +7,19 @@ use std::{
     time::Duration,
 };
 
-use backend::{analysis::OpenAiConfig, recording::RecorderSettings};
+use backend::recording::RecorderSettings;
 
-use super::{Error, LogLevel, Settings};
+use super::{Error, Settings};
 
 /// Validated persisted settings and their runtime-only derived values.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ResolvedSettings {
     pub settings: Settings,
-    pub settings_path: PathBuf,
-    pub data_root: PathBuf,
     pub sessions_root: PathBuf,
     pub logs_root: PathBuf,
     pub recorder_settings: RecorderSettings,
     pub analysis_frame_sets_per_prompt: NonZeroUsize,
     pub analysis_overlap_frame_sets: usize,
-    pub openai: Option<OpenAiConfig>,
-    pub log_level: LogLevel,
 }
 
 /// Platform or explicitly located application settings storage.
@@ -35,12 +31,9 @@ pub struct SettingsStore {
 
 impl SettingsStore {
     /// Resolves Leo's settings file and default data root for the current platform.
-    pub fn platform() -> Result<Self, Error> {
-        let config_dir = dirs::config_dir().ok_or(Error::StandardDirectoryUnavailable {
-            category: "configuration",
-        })?;
-        let data_dir =
-            dirs::data_dir().ok_or(Error::StandardDirectoryUnavailable { category: "data" })?;
+    pub fn platform() -> Self {
+        let config_dir = dirs::config_dir().expect("platform configuration directory is required");
+        let data_dir = dirs::data_dir().expect("platform data directory is required");
         let application_directory = if cfg!(target_os = "linux") {
             "leo"
         } else {
@@ -58,23 +51,23 @@ impl SettingsStore {
     }
 
     /// Creates a store at explicit absolute paths, primarily for isolated launchers and tests.
-    pub fn new(settings_path: PathBuf, default_data_root: PathBuf) -> Result<Self, Error> {
-        if !settings_path.is_absolute() {
-            return Err(Error::NonAbsolutePath {
-                category: "settings file",
-                path: settings_path,
-            });
-        }
-        if !default_data_root.is_absolute() {
-            return Err(Error::NonAbsolutePath {
-                category: "default data root",
-                path: default_data_root,
-            });
-        }
-        Ok(Self {
+    pub fn new(settings_path: PathBuf, default_data_root: PathBuf) -> Self {
+        assert!(
+            settings_path.is_absolute(),
+            "settings path must be absolute"
+        );
+        assert!(
+            settings_path.parent().is_some(),
+            "settings path must have a parent"
+        );
+        assert!(
+            default_data_root.is_absolute(),
+            "default data root must be absolute"
+        );
+        Self {
             settings_path,
             default_data_root,
-        })
+        }
     }
 
     /// Validates settings and derives paths and runtime configuration without I/O.
@@ -91,8 +84,6 @@ impl SettingsStore {
             retry_delay: Duration::from_secs(1),
             stop_timeout: Duration::from_secs(5),
         };
-        let openai = settings.openai_config();
-        let log_level = settings.log_level;
         let analysis_frame_sets_per_prompt = NonZeroUsize::new(
             usize::try_from(settings.analysis_frame_sets_per_prompt)
                 .expect("validated analysis frame-set count should fit usize"),
@@ -102,15 +93,11 @@ impl SettingsStore {
             .expect("validated analysis overlap should fit usize");
         Ok(ResolvedSettings {
             settings,
-            settings_path: self.settings_path.clone(),
-            data_root,
             sessions_root,
             logs_root,
             recorder_settings,
             analysis_frame_sets_per_prompt,
             analysis_overlap_frame_sets,
-            openai,
-            log_level,
         })
     }
 
@@ -131,29 +118,24 @@ impl SettingsStore {
             path: self.settings_path.clone(),
         })?;
         let resolved = self.resolve(settings)?;
-        prepare_directories(&resolved)?;
+        prepare_directories(&resolved, &self.settings_path)?;
         Ok(Some(resolved))
     }
 
     /// Validates settings, creates their directories, and writes the settings file.
     pub fn save(&self, settings: &Settings) -> Result<(), Error> {
         let resolved = self.resolve(settings.clone())?;
-        prepare_directories(&resolved)?;
+        prepare_directories(&resolved, &self.settings_path)?;
         write_settings(settings, &self.settings_path)
     }
 }
 
-fn prepare_directories(resolved: &ResolvedSettings) -> Result<(), Error> {
-    let settings_parent =
-        resolved
-            .settings_path
-            .parent()
-            .ok_or_else(|| Error::SettingsPathWithoutParent {
-                path: resolved.settings_path.clone(),
-            })?;
+fn prepare_directories(resolved: &ResolvedSettings, settings_path: &Path) -> Result<(), Error> {
+    let settings_parent = settings_path
+        .parent()
+        .expect("settings store paths always have a parent");
     for directory in [
         settings_parent,
-        &resolved.data_root,
         &resolved.sessions_root,
         &resolved.logs_root,
     ] {
@@ -203,7 +185,7 @@ mod tests {
     use crate::settings::{CameraSettings, LogLevel, OpenAiSettings, Settings};
 
     fn store(root: &Path) -> SettingsStore {
-        SettingsStore::new(root.join("config/settings.json"), root.join("default-data")).unwrap()
+        SettingsStore::new(root.join("config/settings.json"), root.join("default-data"))
     }
 
     fn populated_settings(data_root: PathBuf) -> Settings {
@@ -250,18 +232,15 @@ mod tests {
         let resolved = store.load().unwrap().expect("saved settings should load");
 
         assert!(resolved.settings == settings);
-        assert_eq!(resolved.settings_path, store.settings_path);
-        assert_eq!(resolved.data_root, root.path().join("selected-data"));
-        assert_eq!(resolved.sessions_root, resolved.data_root.join("sessions"));
-        assert_eq!(resolved.logs_root, resolved.data_root.join("logs"));
+        let data_root = root.path().join("selected-data");
+        assert_eq!(resolved.sessions_root, data_root.join("sessions"));
+        assert_eq!(resolved.logs_root, data_root.join("logs"));
         assert_eq!(
             resolved.recorder_settings.io_timeout,
             Duration::from_secs(23)
         );
         assert_eq!(resolved.analysis_frame_sets_per_prompt.get(), 7);
         assert_eq!(resolved.analysis_overlap_frame_sets, 2);
-        assert!(resolved.openai == settings.openai_config());
-        assert_eq!(resolved.log_level, LogLevel::Trace);
         let bytes = fs::read(&store.settings_path).unwrap();
         assert!(bytes.ends_with(b"}\n"));
     }
@@ -293,19 +272,6 @@ mod tests {
             Err(Error::InvalidSettings(_))
         ));
         assert_eq!(fs::read(&store.settings_path).unwrap(), b"old settings\n");
-    }
-
-    #[test]
-    fn constructor_requires_absolute_paths() {
-        let root = tempfile::tempdir().unwrap();
-        assert!(matches!(
-            SettingsStore::new(PathBuf::from("settings.json"), root.path().join("data")),
-            Err(Error::NonAbsolutePath { .. })
-        ));
-        assert!(matches!(
-            SettingsStore::new(root.path().join("settings.json"), PathBuf::from("data")),
-            Err(Error::NonAbsolutePath { .. })
-        ));
     }
 
     #[test]
