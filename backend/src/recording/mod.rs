@@ -17,11 +17,16 @@ pub use recorder::{
 };
 pub use segment::{RecordingSegment, list_segments};
 
+#[cfg(all(test, unix))]
+static PROCESS_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Prevents fake recorder processes from exhausting the host scheduler during parallel tests.
 #[cfg(all(test, unix))]
-fn process_test_guard() -> std::sync::MutexGuard<'static, ()> {
-    static PROCESS_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    PROCESS_TEST
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+async fn process_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    PROCESS_TEST.lock().await
+}
+
+#[cfg(all(test, unix))]
+fn blocking_process_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    PROCESS_TEST.blocking_lock()
 }

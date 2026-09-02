@@ -322,7 +322,7 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
 
 #[test]
 fn spawn_rejects_missing_or_failing_ffmpeg_and_ffprobe() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let directory = tempfile::tempdir().unwrap();
     let success = preflight_executable(&directory, "preflight-success", 0);
     let failure = preflight_executable(&directory, "preflight-failure", 23);
@@ -347,7 +347,7 @@ fn spawn_rejects_missing_or_failing_ffmpeg_and_ffprobe() {
 
 #[test]
 fn hanging_preflight_is_killed_reaped_and_times_out() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let directory = tempfile::tempdir().unwrap();
     let hanging = write_script(
         &directory,
@@ -372,7 +372,7 @@ exec sleep 30"#,
 
 #[test]
 fn spawn_rejects_zero_or_unrepresentable_settings() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let directory = tempfile::tempdir().unwrap();
     let executable = preflight_executable(&directory, "preflight-settings", 0);
     let valid = recorder_settings();
@@ -411,7 +411,7 @@ fn spawn_rejects_zero_or_unrepresentable_settings() {
 
 #[tokio::test]
 async fn start_rejects_empty_duplicate_zero_and_non_rtsp_cameras() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::process_test_guard().await;
     let directory = tempfile::tempdir().unwrap();
     let executable = preflight_executable(&directory, "preflight-cameras", 0);
     let (runtime, handle, _events) =
@@ -470,7 +470,7 @@ async fn start_rejects_empty_duplicate_zero_and_non_rtsp_cameras() {
 
 #[tokio::test]
 async fn start_rejects_missing_symlinked_and_non_directory_output_paths() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::process_test_guard().await;
     let directory = tempfile::tempdir().unwrap();
     let executable = preflight_executable(&directory, "preflight-paths", 0);
     let (runtime, handle, _events) =
@@ -523,7 +523,7 @@ async fn start_rejects_missing_symlinked_and_non_directory_output_paths() {
 
 #[tokio::test]
 async fn start_waits_for_every_camera() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::process_test_guard().await;
     let directory = tempfile::tempdir().unwrap();
     let ffmpeg = startup_ffmpeg(&directory, "startup-all");
     let ffprobe = preflight_executable(&directory, "startup-all-probe", 0);
@@ -569,7 +569,7 @@ async fn start_waits_for_every_camera() {
 
 #[tokio::test]
 async fn one_startup_failure_stops_and_reaps_ready_cameras() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::process_test_guard().await;
     let directory = tempfile::tempdir().unwrap();
     let ffmpeg = startup_ffmpeg(&directory, "startup-rollback");
     let ffprobe = preflight_executable(&directory, "startup-rollback-probe", 0);
@@ -616,7 +616,7 @@ async fn one_startup_failure_stops_and_reaps_ready_cameras() {
 
 #[test]
 fn startup_cleanup_failure_is_reported_distinctly() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let shutdown = Arc::new(AtomicBool::new(false));
     let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let recorders = RecorderSet {
@@ -646,7 +646,7 @@ fn startup_cleanup_failure_is_reported_distinctly() {
 
 #[tokio::test]
 async fn failure_after_successful_start_reply_is_faulted() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::process_test_guard().await;
     let directory = tempfile::tempdir().unwrap();
     let ffmpeg = startup_ffmpeg(&directory, "startup-published-failure");
     let ffprobe = runtime_ffprobe(&directory, "startup-published-failure-probe", "printf '{'");
@@ -679,7 +679,7 @@ async fn failure_after_successful_start_reply_is_faulted() {
 
 #[tokio::test]
 async fn duplicate_start_and_stop_commands_are_rejected() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::process_test_guard().await;
     let directory = tempfile::tempdir().unwrap();
     let ffmpeg = startup_ffmpeg(&directory, "startup-duplicates");
     let ffprobe = preflight_executable(&directory, "startup-duplicates-probe", 0);
@@ -700,7 +700,7 @@ async fn duplicate_start_and_stop_commands_are_rejected() {
 
 #[tokio::test]
 async fn ordinary_exit_finalizes_and_emits_reconnecting() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::process_test_guard().await;
     let directory = tempfile::tempdir().unwrap();
     let ffmpeg = supervision_ffmpeg(&directory, "supervision-ordinary");
     let ffprobe = valid_runtime_ffprobe(&directory, "supervision-ordinary-probe");
@@ -729,7 +729,7 @@ async fn ordinary_exit_finalizes_and_emits_reconnecting() {
 
 #[tokio::test]
 async fn retry_uses_a_new_partial_path_and_returns_to_recording() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::process_test_guard().await;
     let directory = tempfile::tempdir().unwrap();
     let ffmpeg = supervision_ffmpeg(&directory, "supervision-retry");
     let ffprobe = valid_runtime_ffprobe(&directory, "supervision-retry-probe");
@@ -768,7 +768,7 @@ async fn retry_uses_a_new_partial_path_and_returns_to_recording() {
 
 #[tokio::test]
 async fn storage_probe_failure_emits_faulted() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::process_test_guard().await;
     let directory = tempfile::tempdir().unwrap();
     let ffmpeg = supervision_ffmpeg(&directory, "supervision-storage");
     let ffprobe = valid_runtime_ffprobe(&directory, "supervision-storage-probe");
@@ -807,7 +807,7 @@ async fn storage_probe_failure_emits_faulted() {
 
 #[tokio::test]
 async fn stop_finalizes_and_reaps_every_camera_concurrently() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::process_test_guard().await;
     let directory = tempfile::tempdir().unwrap();
     let ffmpeg = supervision_ffmpeg(&directory, "supervision-concurrent");
     let ffprobe = runtime_ffprobe(
@@ -879,7 +879,7 @@ cat "$0.stdout""#,
 
 #[tokio::test]
 async fn hanging_stop_probe_times_out_without_leaking_a_process() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::process_test_guard().await;
     let directory = tempfile::tempdir().unwrap();
     let ffmpeg = supervision_ffmpeg(&directory, "supervision-hanging-probe");
     let ffprobe = runtime_ffprobe(
@@ -922,7 +922,7 @@ exec sleep 30"#,
 
 #[test]
 fn shutdown_interrupts_initial_readiness_and_reaps_children() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let directory = tempfile::tempdir().unwrap();
     let ffmpeg = write_script(
         &directory,
@@ -964,7 +964,7 @@ exec sleep 30"#,
 
 #[test]
 fn shutdown_interrupts_reconnect_delay() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let directory = tempfile::tempdir().unwrap();
     let ffmpeg = supervision_ffmpeg(&directory, "shutdown-reconnect-delay");
     let ffprobe = valid_runtime_ffprobe(&directory, "shutdown-reconnect-delay-probe");
@@ -1002,7 +1002,7 @@ fn shutdown_interrupts_reconnect_delay() {
 
 #[test]
 fn shutdown_interrupts_ffprobe_and_reaps_it() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let directory = tempfile::tempdir().unwrap();
     let ffmpeg = supervision_ffmpeg(&directory, "shutdown-active-probe");
     let ffprobe = runtime_ffprobe(
@@ -1039,7 +1039,7 @@ exec sleep 30"#,
 
 #[test]
 fn ffmpeg_command_uses_tcp_timeout_video_copy_and_matroska() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let directory = tempfile::tempdir().unwrap();
     let ffmpeg = write_script(
         &directory,
@@ -1109,7 +1109,7 @@ printf '%s' "$quit" > "$0.quit""#
 
 #[test]
 fn timeout_microseconds_are_checked_before_command_creation() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let directory = tempfile::tempdir().unwrap();
     let ffmpeg = write_script(
         &directory,
@@ -1130,7 +1130,7 @@ fn timeout_microseconds_are_checked_before_command_creation() {
 
 #[test]
 fn recorder_errors_and_events_never_expose_rtsp_credentials() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let directory = tempfile::tempdir().unwrap();
     let ffmpeg = write_script(
         &directory,
@@ -1167,7 +1167,7 @@ exec sleep 30"#,
 
 #[test]
 fn first_qualifying_progress_freezes_media_timeline_zero() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let directory = tempfile::tempdir().unwrap();
     let ffmpeg = write_script(
         &directory,
@@ -1199,7 +1199,7 @@ printf '%s\r' '[info] frame=    1 fps=1.0 q=-1.0 size=       1kB time=00:00:02.5
 
 #[test]
 fn later_progress_does_not_move_media_timeline_zero() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let directory = tempfile::tempdir().unwrap();
     let ffmpeg = write_script(
         &directory,
@@ -1243,7 +1243,7 @@ printf '%s\r' '[info] frame=    2 fps=1.0 q=-1.0 size=       2kB time=00:00:05.0
 
 #[test]
 fn progress_time_rejects_negative_and_non_finite_values() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     for value in ["-00:00:00.000", "-0.0000001", "01:-01:00", "NaN", "inf"] {
         assert!(parse_progress_time(value).is_none(), "accepted {value}");
     }
@@ -1255,7 +1255,7 @@ fn progress_time_rejects_negative_and_non_finite_values() {
 
 #[test]
 fn readiness_requires_a_frame_and_nonempty_regular_output() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let directory = tempfile::tempdir().unwrap();
     let cases = [
         (
@@ -1334,7 +1334,7 @@ printf '%s\r' '{PROGRESS_ONE_SECOND}' >&2"#
 
 #[test]
 fn graceful_stop_sends_q_and_reaps() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let directory = tempfile::tempdir().unwrap();
     let ffmpeg = write_script(
         &directory,
@@ -1380,7 +1380,7 @@ printf '%s' "$quit" > "$0.quit""#
 
 #[test]
 fn stop_timeout_kills_and_reaps() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let directory = tempfile::tempdir().unwrap();
     let ffmpeg = write_script(
         &directory,
@@ -1411,7 +1411,7 @@ exec sleep 30"#,
 
 #[test]
 fn positive_container_start_adjusts_segment_bounds() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let directory = tempfile::tempdir().unwrap();
     let partial_path = directory.path().join(".attempt-positive.partial.mkv");
     fs::write(&partial_path, b"media").unwrap();
@@ -1448,7 +1448,7 @@ fn positive_container_start_adjusts_segment_bounds() {
 
 #[test]
 fn reconnect_start_is_clamped_to_previous_end() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let directory = tempfile::tempdir().unwrap();
     let partial_path = directory.path().join(".attempt-reconnect.partial.mkv");
     fs::write(&partial_path, b"media").unwrap();
@@ -1473,7 +1473,7 @@ fn reconnect_start_is_clamped_to_previous_end() {
 
 #[test]
 fn valid_attempt_is_promoted_without_overwrite() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let directory = tempfile::tempdir().unwrap();
     let ffprobe = fake_ffprobe(&directory, "ffprobe-promote", &valid_probe("0", "1"), 0);
     let shutdown = AtomicBool::new(false);
@@ -1515,7 +1515,7 @@ fn valid_attempt_is_promoted_without_overwrite() {
 
 #[test]
 fn empty_attempt_is_removed() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let directory = tempfile::tempdir().unwrap();
     let partial_path = directory.path().join(".attempt-empty.partial.mkv");
     fs::write(&partial_path, []).unwrap();
@@ -1544,7 +1544,7 @@ exit 99"#,
 
 #[test]
 fn invalid_nonempty_attempt_is_retained() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let directory = tempfile::tempdir().unwrap();
     let partial_path = directory.path().join(".attempt-invalid.partial.mkv");
     fs::write(&partial_path, b"invalid media").unwrap();

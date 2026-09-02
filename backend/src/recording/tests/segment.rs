@@ -90,7 +90,7 @@ fn write_segment(camera: &Path, name: &str) -> PathBuf {
 
 #[test]
 fn probe_rounds_start_down_and_duration_up() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let directory = tempfile::tempdir().unwrap();
     let output = json!({
         "streams": [{"index": 4}],
@@ -116,7 +116,7 @@ fn probe_rounds_start_down_and_duration_up() {
 
 #[test]
 fn probe_rejects_non_finite_non_positive_and_multiple_video_streams() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let directory = tempfile::tempdir().unwrap();
     let input = input_path(&directory);
     let shutdown = AtomicBool::new(false);
@@ -158,7 +158,7 @@ fn probe_rejects_non_finite_non_positive_and_multiple_video_streams() {
 
 #[test]
 fn successful_malformed_probe_json_is_fatal() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let directory = tempfile::tempdir().unwrap();
     let input = input_path(&directory);
     let ffprobe = fake_ffprobe(&directory, "{", 0, &[&input]);
@@ -176,7 +176,7 @@ fn successful_malformed_probe_json_is_fatal() {
 
 #[test]
 fn unsuccessful_probe_is_invalid_media() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let directory = tempfile::tempdir().unwrap();
     let input = input_path(&directory);
     let ffprobe = fake_ffprobe(&directory, &valid_probe("0", "1"), 23, &[&input]);
@@ -194,7 +194,7 @@ fn unsuccessful_probe_is_invalid_media() {
 
 #[test]
 fn hanging_probe_is_killed_reaped_and_times_out() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let directory = tempfile::tempdir().unwrap();
     let ffprobe = write_script(
         &directory,
@@ -222,7 +222,7 @@ exec sleep 30"#,
 
 #[test]
 fn list_segments_ignores_partial_and_unrelated_files() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let recordings = tempfile::tempdir().unwrap();
     let camera = camera_directory(recordings.path(), 1);
     let accepted = write_segment(&camera, "1000.mkv");
@@ -251,7 +251,7 @@ fn list_segments_ignores_partial_and_unrelated_files() {
 
 #[test]
 fn list_segments_accepts_an_existing_empty_camera_directory() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let recordings = tempfile::tempdir().unwrap();
     camera_directory(recordings.path(), 1);
     let probe_directory = tempfile::tempdir().unwrap();
@@ -264,7 +264,7 @@ fn list_segments_accepts_an_existing_empty_camera_directory() {
 
 #[test]
 fn list_segments_rejects_missing_camera_directory() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let recordings = tempfile::tempdir().unwrap();
     let probe_directory = tempfile::tempdir().unwrap();
     let ffprobe = fake_ffprobe(&probe_directory, &valid_probe("0", "1"), 0, &[]);
@@ -279,7 +279,7 @@ fn list_segments_rejects_missing_camera_directory() {
 
 #[test]
 fn list_segments_rejects_duplicate_camera_ids() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let probe_directory = tempfile::tempdir().unwrap();
     let ffprobe = fake_ffprobe(&probe_directory, &valid_probe("0", "1"), 0, &[]);
 
@@ -290,7 +290,7 @@ fn list_segments_rejects_duplicate_camera_ids() {
 
 #[test]
 fn list_segments_rejects_empty_and_zero_camera_ids() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let probe_directory = tempfile::tempdir().unwrap();
     let ffprobe = fake_ffprobe(&probe_directory, &valid_probe("0", "1"), 0, &[]);
 
@@ -306,7 +306,7 @@ fn list_segments_rejects_empty_and_zero_camera_ids() {
 
 #[test]
 fn list_segments_rejects_overlapping_intervals() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let overlapping = tempfile::tempdir().unwrap();
     let camera = camera_directory(overlapping.path(), 1);
     let overlapping_first = write_segment(&camera, "1000.mkv");
@@ -343,7 +343,7 @@ fn list_segments_rejects_overlapping_intervals() {
 
 #[test]
 fn list_segments_rejects_duplicate_parsed_starts() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let recordings = tempfile::tempdir().unwrap();
     let camera = camera_directory(recordings.path(), 1);
     let first = write_segment(&camera, "1000.mkv");
@@ -363,7 +363,7 @@ fn list_segments_rejects_duplicate_parsed_starts() {
 
 #[test]
 fn list_segments_sorts_by_camera_and_start() {
-    let _process_test = crate::recording::process_test_guard();
+    let _process_test = crate::recording::blocking_process_test_guard();
     let recordings = tempfile::tempdir().unwrap();
     let camera_2 = camera_directory(recordings.path(), 2);
     let camera_1 = camera_directory(recordings.path(), 1);
