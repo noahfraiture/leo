@@ -58,6 +58,17 @@ pub enum SettingsField {
     OpenAiBaseUrl,
 }
 
+/// Reports whether validation found an editable error for one camera.
+pub fn camera_has_error(errors: &HashMap<SettingsField, String>, camera_id: u32) -> bool {
+    [
+        SettingsField::CameraName(camera_id),
+        SettingsField::CameraRtspUrl(camera_id),
+        SettingsField::CameraSampleEvery(camera_id),
+    ]
+    .iter()
+    .any(|field| errors.contains_key(field))
+}
+
 /// Editable draft plus validation and save status.
 #[derive(Clone)]
 pub struct SettingsPageState {
