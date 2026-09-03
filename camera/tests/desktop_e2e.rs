@@ -1,8 +1,8 @@
 #![cfg(all(unix, target_os = "macos"))]
 
 use std::{
-    env, ffi::OsStr, fs, os::unix::fs::PermissionsExt, path::Path, process::Command,
-    sync::atomic::Ordering, time::Duration,
+    env, ffi::OsStr, fs, net::TcpListener, os::unix::fs::PermissionsExt, path::Path,
+    process::Command, sync::atomic::Ordering, time::Duration,
 };
 
 use backend::{
@@ -24,6 +24,7 @@ use support::{
 
 const COMPLETE_ANALYSIS_SCENARIO: &str = "complete-analysis";
 const ANALYSIS_RECOVERY_SCENARIO: &str = "analysis-recovery";
+const RECORD_WITHOUT_PREVIEW_SCENARIO: &str = "record-without-preview";
 const DEFAULT_FRAME_SETS_PER_PROMPT: usize = 5;
 
 fn direct_openai_endpoint(base_url: Option<&OsStr>) -> Result<(), &'static str> {
@@ -307,6 +308,85 @@ fn desktop_analysis_resumes_after_transient_provider_failure() {
     assert!(application_log.contains("analysis failed"));
     assert!(application_log.contains("analysis resumed"));
     assert!(application_log.contains("analysis completed"));
+    assert!(!application_log.contains("recorder runtime shutdown failed"));
+    assert!(!application_log.contains("preview stop failed"));
+}
+
+#[test]
+#[ignore = "requires a macOS GUI session, MediaMTX, FFmpeg, and FFprobe"]
+fn desktop_recording_remains_usable_without_preview() {
+    let _occupied_preview_port =
+        TcpListener::bind(("127.0.0.1", 8889)).expect("occupy preview TCP port 8889");
+    let settings_directory = tempfile::tempdir().expect("create desktop E2E settings directory");
+    let root = tempfile::tempdir().expect("create desktop E2E root");
+    let logs = root.path().join("process-logs");
+    fs::create_dir(&logs).expect("create process log directory");
+    let data_root = root.path().join("data");
+    fs::create_dir(&data_root).expect("create E2E data root");
+
+    let (camera_1_rtsp, mut camera_1) = start_camera("camera 1", &fixture("salon-1.mp4"), &logs);
+    let (camera_2_rtsp, mut camera_2) = start_camera("camera 2", &fixture("salon-2.mp4"), &logs);
+    let mock_openai = MockOpenAi::start();
+    let mock_base_url = format!("http://{}/v1", mock_openai.address);
+    let settings_path = write_desktop_settings(
+        settings_directory.path(),
+        &data_root,
+        [camera_1_rtsp, camera_2_rtsp],
+        DEFAULT_FRAME_SETS_PER_PROMPT,
+        "local-e2e-key",
+        "local-e2e-model",
+        Some(&mock_base_url),
+    );
+
+    let driver_ready = root.path().join("driver-ready");
+    let driver_result = root.path().join("driver-result");
+    let mut app = start_desktop_app(
+        &settings_path,
+        &driver_ready,
+        &driver_result,
+        RECORD_WITHOUT_PREVIEW_SCENARIO,
+        true,
+        &logs,
+    );
+    let result = wait_for_desktop_result(&mut app, &driver_ready, &driver_result);
+    assert_eq!(
+        result,
+        "ok\nrecording completed without preview",
+        "{}",
+        app.diagnostics()
+    );
+
+    let camera_1_status = camera_1.stop(SHUTDOWN_TIMEOUT);
+    let camera_2_status = camera_2.stop(SHUTDOWN_TIMEOUT);
+    assert!(camera_1_status.success(), "camera 1: {camera_1_status}");
+    assert!(camera_2_status.success(), "camera 2: {camera_2_status}");
+    camera_1.assert_process_group_exited(SHUTDOWN_TIMEOUT);
+    camera_2.assert_process_group_exited(SHUTDOWN_TIMEOUT);
+
+    let sessions = list_sessions(&data_root.join("sessions")).expect("list E2E sessions");
+    assert_eq!(sessions.len(), 1, "expected one completed E2E session");
+    let stored = &sessions[0];
+    let marker = fs::symlink_metadata(stored.directory.join("recording-complete"))
+        .expect("read E2E completion marker");
+    assert!(marker.file_type().is_file());
+    assert_eq!(marker.len(), 0);
+    let segments = list_segments(&stored.directory.join("recordings"), &[1, 2])
+        .expect("discover E2E recording segments");
+    assert!(segments.iter().any(|segment| segment.camera_id == 1));
+    assert!(segments.iter().any(|segment| segment.camera_id == 2));
+    assert!(
+        mock_openai
+            .requests
+            .lock()
+            .expect("mock requests mutex")
+            .is_empty(),
+        "record-only scenario should not call the analysis provider"
+    );
+
+    let application_log = read_application_log(&data_root.join("logs"));
+    assert!(application_log.contains("preview unavailable"));
+    assert!(application_log.contains("preview port 127.0.0.1:8889 is unavailable"));
+    assert!(application_log.contains("recorder runtime stopped"));
     assert!(!application_log.contains("recorder runtime shutdown failed"));
     assert!(!application_log.contains("preview stop failed"));
 }

@@ -143,11 +143,28 @@ const recoverAnalysis = async () => {
     return `ok\n${partialProgress}\n${renderedSummary}`;
 };
 
+const recordWithoutPreview = async () => {
+    await waitFor(
+        () => Array.from(document.querySelectorAll('[role="alert"]')).find((candidate) => {
+            const message = candidate.textContent;
+            return message.includes("Live preview is unavailable")
+                && message.includes("free the preview ports");
+        }),
+        "preview failure guidance",
+    );
+    await startSession();
+    await sleep(3000);
+    await stopSession();
+    return "ok\nrecording completed without preview";
+};
+
 (async () => {
     if (scenario === "complete-analysis") {
         dioxus.send(await completeAnalysis());
     } else if (scenario === "analysis-recovery") {
         dioxus.send(await recoverAnalysis());
+    } else if (scenario === "record-without-preview") {
+        dioxus.send(await recordWithoutPreview());
     } else {
         throw new Error(`Unknown desktop E2E scenario: ${scenario}`);
     }

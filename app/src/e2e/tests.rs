@@ -1,8 +1,8 @@
 use backend::analysis::OpenAiConfig;
 
 use super::{
-    ANALYSIS_RECOVERY_SCENARIO, COMPLETE_ANALYSIS_SCENARIO, loopback_proxy_is_bypassed,
-    provider_configuration_is_safe, selected_driver_scenario,
+    ANALYSIS_RECOVERY_SCENARIO, COMPLETE_ANALYSIS_SCENARIO, RECORD_WITHOUT_PREVIEW_SCENARIO,
+    loopback_proxy_is_bypassed, provider_configuration_is_safe, selected_driver_scenario,
 };
 
 fn openai_config(api_key: &str, model: &str, base_url: Option<&str>) -> OpenAiConfig {
@@ -117,6 +117,10 @@ fn desktop_driver_defaults_to_the_complete_flow_and_rejects_unknown_scenarios() 
     assert_eq!(
         selected_driver_scenario(Some(ANALYSIS_RECOVERY_SCENARIO)),
         Some(ANALYSIS_RECOVERY_SCENARIO)
+    );
+    assert_eq!(
+        selected_driver_scenario(Some(RECORD_WITHOUT_PREVIEW_SCENARIO)),
+        Some(RECORD_WITHOUT_PREVIEW_SCENARIO)
     );
     assert_eq!(selected_driver_scenario(Some("unknown")), None);
 }

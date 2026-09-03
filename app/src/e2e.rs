@@ -18,6 +18,7 @@ pub fn launch(settings_path: PathBuf) {
 
 const COMPLETE_ANALYSIS_SCENARIO: &str = "complete-analysis";
 const ANALYSIS_RECOVERY_SCENARIO: &str = "analysis-recovery";
+const RECORD_WITHOUT_PREVIEW_SCENARIO: &str = "record-without-preview";
 const DRIVER_SCRIPT: &str = include_str!("e2e/driver.js");
 
 /// Drives the mounted production UI when the E2E result paths are configured.
@@ -94,6 +95,7 @@ fn selected_driver_scenario(configured: Option<&str>) -> Option<&'static str> {
     match configured.unwrap_or(COMPLETE_ANALYSIS_SCENARIO) {
         COMPLETE_ANALYSIS_SCENARIO => Some(COMPLETE_ANALYSIS_SCENARIO),
         ANALYSIS_RECOVERY_SCENARIO => Some(ANALYSIS_RECOVERY_SCENARIO),
+        RECORD_WITHOUT_PREVIEW_SCENARIO => Some(RECORD_WITHOUT_PREVIEW_SCENARIO),
         _ => None,
     }
 }

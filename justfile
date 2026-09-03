@@ -34,6 +34,7 @@ test-e2e:
     nix develop --command cargo test -p camera --test rtsp_stream host_recorder_reconnects_into_a_second_segment -- --ignored --exact --nocapture
     LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 nix develop --command cargo test -p camera --features desktop-e2e --test desktop_e2e desktop_operator_flow_records_two_cameras_and_analyzes -- --ignored --exact --nocapture --test-threads=1
     LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 nix develop --command cargo test -p camera --features desktop-e2e --test desktop_e2e desktop_analysis_resumes_after_transient_provider_failure -- --ignored --exact --nocapture --test-threads=1
+    LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 nix develop --command cargo test -p camera --features desktop-e2e --test desktop_e2e desktop_recording_remains_usable_without_preview -- --ignored --exact --nocapture --test-threads=1
 
 # Run all three real-OpenAI checks only after explicit caller opt-in.
 test-paid:
