@@ -10,7 +10,7 @@ Use the smallest check supported by the resources currently available. Run comma
 just test-unit test-e2e
 ```
 
-This is a free, local-only check. **Pass:** both recipes exit successfully. They cover unit behavior, local media, recorder reconnect, the mock provider, and the desktop end-to-end flow.
+This is a free, local-only check. **Pass:** both recipes exit successfully. They cover unit behavior, local media, recorder reconnect, the mock provider, and the desktop happy, analysis-recovery, and preview-degraded workflows.
 
 ## 2. Local real provider
 
@@ -37,4 +37,16 @@ LEO_RUN_PAID_OPENAI_TEST=1 LEO_E2E_REAL_OPENAI=1 just test-paid
 
 **Pass:** every observation succeeds. Open one focused issue with a short reproduction for each failure.
 
-Hardware being unavailable is `Not run`; it does not invalidate either local check. Keep credentials and complete RTSP URLs out of reports and logs. Full-duration soak, exact gap arithmetic, process snapshots, power-loss drills, SSD removal, and exhaustive failure injection are outside this smoke checklist.
+### Optional external-storage-loss drill
+
+This is an exploratory recovery check, not part of the required smoke gate. Use only a disposable external volume whose contents can be lost; an operating system may refuse a normal eject while FFmpeg has files open, and a forced removal can corrupt the volume.
+
+1. Configure the disposable volume as the data root, restart Leo, start a session, and wait until every camera reports `Recording`.
+2. Disconnect or unmount the volume while recording. Do not do this with the real working volume.
+3. Confirm Leo reports a session fault and does not return to a normal completed-session state. Record the visible message and timing without credentials or complete RTSP URLs.
+4. Quit Leo, reconnect the same volume, and inspect the original session directory. It must not contain `recording-complete`; retain whatever event and partial-media files the operating system successfully persisted for diagnosis.
+5. With the configured data root mounted again, restart Leo and complete a new short session. Leo does not hot-recover or make the interrupted session analyzable.
+
+The important safety property is that uncertain storage is never presented as a completed recording. If the operating system refuses the removal, record the drill as `Not run` rather than forcing a non-disposable device.
+
+Hardware being unavailable is `Not run`; it does not invalidate either local check. Keep credentials and complete RTSP URLs out of reports and logs. Full-duration soak, exact gap arithmetic, process snapshots, power-loss drills, and exhaustive failure injection remain outside this smoke checklist.

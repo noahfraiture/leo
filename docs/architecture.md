@@ -235,7 +235,7 @@ Frame extraction removes its temporary JPEG after reading the bytes. There are n
 
 ## End-To-End Coverage
 
-Leo has focused integration slices plus one opt-in macOS desktop E2E. That E2E is explicitly a two-fixture test scenario: it starts both fixture-camera binaries, launches the production WKWebView application entry point, drives the rendered controls from Start through Analyze, and validates the resulting durable files. It does not constrain production camera count.
+Leo has focused integration slices plus three opt-in macOS desktop E2E scenarios. They use the same explicit two-fixture setup: both fixture-camera binaries and the production WKWebView application entry point. The scenarios cover the complete Start-through-Analyze flow, resuming a partial checkpoint after one provider failure, and recording when preview startup fails. The fixed setup does not constrain production camera count.
 
 | Coverage | What is real | What is substituted or absent |
 | --- | --- | --- |
@@ -243,12 +243,12 @@ Leo has focused integration slices plus one opt-in macOS desktop E2E. That E2E i
 | Dioxus SSR render tests | Monitor and Analyze controls plus projections of prepared operator states on both routes. | No DOM-event dispatch, native webview, browser media stack, or mouse automation; operator actions are covered separately by state and task tests. |
 | Virtual-camera and recorder checks | MediaMTX, RTSP/TCP, two simultaneous readers, FFmpeg stream copy, playable MKV output, reconnect, and process cleanup. | Fixture video replaces physical cameras. |
 | Local analysis check | Completed session directory, real FFprobe/FFmpeg extraction, gap-aware planning, durable callbacks, and checkpoint output. | A deterministic Rig mock replaces the model provider. |
-| Full desktop E2E | Two fixture-camera processes, both MediaMTX layers, live WKWebView previews, Dioxus event handlers, FFmpeg recording, Stop finalization, session discovery, production OpenAI HTTP transport, local extraction, results UI, and shutdown. | The fixed pair is a test setup; fixture video and a loopback OpenAI-compatible server are the default, and DOM events are programmatic rather than OS pointer events. |
+| Desktop E2E scenarios | Two fixture-camera processes, WKWebView and Dioxus event handlers, FFmpeg recording, Stop finalization, session discovery, local extraction, production OpenAI HTTP transport, checkpoint recovery, degraded preview handling, results UI, and shutdown. | The fixed pair is a test setup; fixture video and a loopback OpenAI-compatible server are the default, and DOM events are programmatic rather than OS pointer events. |
 | Paid evaluation compile check | The feature-gated application path type-checks through the real `OperatorState` callback. | It does not run or contact OpenAI without separate approval. |
 
 The desktop E2E creates a strict owner-only temporary settings file and injects its explicit path through a feature-gated launcher; this is a test seam, not a production override. Provider variables are removed from the app child. The mounted driver reads the ready-only active `ResolvedSettings` context and permits only a numeric loopback provider or real mode with both paid gates, which keeps its safety decision aligned with the runtime actually under test.
 
-Packaged-app pointer automation, physical-camera acceptance, and external-SSD failure handling remain separate work. The desktop E2E has a doubly gated real-OpenAI mode for manual output judgment.
+Packaged-app pointer automation and physical-camera acceptance remain separate work. External-storage loss has an optional manual drill in the [validation checklist](validation.md); hot recovery is not implemented. The complete desktop scenario has a doubly gated real-OpenAI mode for manual output judgment.
 
 ## Virtual Cameras
 
@@ -283,10 +283,12 @@ nix develop --command cargo test -p camera --test rtsp_stream host_recorder_reco
 nix develop --command cargo test -p camera --test rtsp_stream host_recorder_reconnects_into_a_second_segment -- --ignored --exact --nocapture
 ```
 
-The full local desktop flow is also an exact ignored Cargo test:
+The three local desktop scenarios are also exact ignored Cargo tests:
 
 ```bash
 LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 cargo test -p camera --features desktop-e2e --test desktop_e2e desktop_operator_flow_records_two_cameras_and_analyzes -- --ignored --exact --nocapture --test-threads=1
+LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 cargo test -p camera --features desktop-e2e --test desktop_e2e desktop_analysis_resumes_after_transient_provider_failure -- --ignored --exact --nocapture --test-threads=1
+LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 cargo test -p camera --features desktop-e2e --test desktop_e2e desktop_recording_remains_usable_without_preview -- --ignored --exact --nocapture --test-threads=1
 ```
 
 ## Paid Evaluation Gates
@@ -299,7 +301,7 @@ The safe verification is compile-only:
 cargo test -p app --features paid-openai-evaluations openai_evaluations::natural_fixture_exercises_application_checkpoint_flow --no-run
 ```
 
-The desktop E2E uses a loopback mock unless both `LEO_E2E_REAL_OPENAI=1` and `LEO_RUN_PAID_OPENAI_TEST=1` are set. These variables are test gates, not app configuration. Mock mode disables inherited HTTP proxies so fixture images remain on loopback. The mounted driver independently permits only a numeric loopback base URL or real mode with both gates, no base override, and nonblank credentials. Real mode preserves its session for inspection under `target/desktop-e2e-real/` or `LEO_E2E_OUTPUT_DIR`. A successful run also proves the app and fixture-camera process groups have no surviving children and that recorder and preview shutdown logged success.
+The complete desktop scenario uses a loopback mock unless both `LEO_E2E_REAL_OPENAI=1` and `LEO_RUN_PAID_OPENAI_TEST=1` are set; the recovery scenario always uses a loopback failure, and the preview-degraded scenario makes no provider request. These variables are test gates, not app configuration. Mock mode disables inherited HTTP proxies so fixture images remain on loopback. The mounted driver independently permits only a numeric loopback base URL or real mode with both gates, no base override, and nonblank credentials. Real mode preserves its session for inspection under `target/desktop-e2e-real/` or `LEO_E2E_OUTPUT_DIR`. Every successful scenario proves the app and fixture-camera process groups have no surviving children. The preview-enabled scenarios also prove clean preview shutdown; the degraded scenario proves recording completes without a preview bridge.
 
 Do not set `LEO_RUN_PAID_OPENAI_TEST=1`, execute either paid path, or send an external provider request without separate explicit approval. Normal suites, the mock desktop E2E, and the five exact local media checks do not perform paid work.
 
