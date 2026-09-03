@@ -11,12 +11,21 @@ use std::{
     },
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use axum::{Json, Router, extract::State, routing::post};
+use axum::{
+    Json, Router,
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::post,
+};
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 
@@ -37,6 +46,7 @@ pub fn write_desktop_settings(
     directory: &Path,
     data_root: &Path,
     camera_addresses: [SocketAddr; 2],
+    analysis_frame_sets_per_prompt: usize,
     api_key: &str,
     model: &str,
     base_url: Option<&str>,
@@ -69,7 +79,7 @@ pub fn write_desktop_settings(
         "cameras": cameras,
         "dataRoot": data_root,
         "recorderTimeoutSecs": 10,
-        "analysisFrameSetsPerPrompt": 5,
+        "analysisFrameSetsPerPrompt": analysis_frame_sets_per_prompt,
         "analysisOverlapFrameSets": 0,
         "openai": {
             "apiKey": api_key,
@@ -161,6 +171,7 @@ pub fn start_desktop_app(
     settings_path: &Path,
     driver_ready: &Path,
     driver_result: &Path,
+    scenario: &str,
     uses_mock_provider: bool,
     logs: &Path,
 ) -> ProcessGuard {
@@ -168,7 +179,8 @@ pub fn start_desktop_app(
     command
         .arg(settings_path)
         .env("LEO_DESKTOP_E2E_READY", driver_ready)
-        .env("LEO_DESKTOP_E2E_RESULT", driver_result);
+        .env("LEO_DESKTOP_E2E_RESULT", driver_result)
+        .env("LEO_DESKTOP_E2E_SCENARIO", scenario);
     for variable in [
         "LEO_CAMERA_CONFIG",
         "LEO_DATA_DIR",
@@ -364,19 +376,34 @@ pub fn redacted_requests(requests: &[Value]) -> String {
 pub struct MockOpenAi {
     pub address: SocketAddr,
     pub requests: Arc<Mutex<Vec<Value>>>,
+    pub failed_requests: Arc<AtomicUsize>,
     shutdown: Option<oneshot::Sender<()>>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl MockOpenAi {
     pub fn start() -> Self {
+        Self::start_with_failure(None)
+    }
+
+    pub fn fail_once_on_request(request_number: usize) -> Self {
+        assert!(request_number > 0, "mock request numbers start at one");
+        Self::start_with_failure(Some(request_number))
+    }
+
+    fn start_with_failure(fail_on_request: Option<usize>) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind mock OpenAI server");
         listener
             .set_nonblocking(true)
             .expect("make mock OpenAI listener nonblocking");
         let address = listener.local_addr().expect("read mock OpenAI address");
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let state = Arc::clone(&requests);
+        let failed_requests = Arc::new(AtomicUsize::new(0));
+        let state = MockOpenAiState {
+            requests: Arc::clone(&requests),
+            fail_on_request,
+            failed_requests: Arc::clone(&failed_requests),
+        };
         let (shutdown, stopped) = oneshot::channel();
         let thread = thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().expect("start mock OpenAI runtime");
@@ -397,6 +424,7 @@ impl MockOpenAi {
         Self {
             address,
             requests,
+            failed_requests,
             shutdown: Some(shutdown),
             thread: Some(thread),
         }
@@ -414,11 +442,35 @@ impl Drop for MockOpenAi {
     }
 }
 
+#[derive(Clone)]
+struct MockOpenAiState {
+    requests: Arc<Mutex<Vec<Value>>>,
+    fail_on_request: Option<usize>,
+    failed_requests: Arc<AtomicUsize>,
+}
+
 async fn mock_response(
-    State(requests): State<Arc<Mutex<Vec<Value>>>>,
+    State(state): State<MockOpenAiState>,
     Json(request): Json<Value>,
-) -> Json<Value> {
-    requests.lock().expect("mock requests mutex").push(request);
+) -> Response {
+    let request_number = {
+        let mut requests = state.requests.lock().expect("mock requests mutex");
+        requests.push(request);
+        requests.len()
+    };
+    if state.fail_on_request == Some(request_number) {
+        state.failed_requests.fetch_add(1, Ordering::SeqCst);
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": {
+                    "message": "transient mock provider failure",
+                    "type": "server_error"
+                }
+            })),
+        )
+            .into_response();
+    }
     let response = json!({
         "observations": [{
             "timestamp": "00:00:00.000",
@@ -455,6 +507,7 @@ async fn mock_response(
         }],
         "tools": []
     }))
+    .into_response()
 }
 
 pub struct ProcessGuard {

@@ -1,7 +1,8 @@
 #![cfg(all(unix, target_os = "macos"))]
 
 use std::{
-    env, ffi::OsStr, fs, os::unix::fs::PermissionsExt, path::Path, process::Command, time::Duration,
+    env, ffi::OsStr, fs, os::unix::fs::PermissionsExt, path::Path, process::Command,
+    sync::atomic::Ordering, time::Duration,
 };
 
 use backend::{
@@ -20,6 +21,10 @@ use support::{
     request_contains_camera_frame, required_environment, start_camera, start_desktop_app,
     wait_for_desktop_result, write_desktop_settings,
 };
+
+const COMPLETE_ANALYSIS_SCENARIO: &str = "complete-analysis";
+const ANALYSIS_RECOVERY_SCENARIO: &str = "analysis-recovery";
+const DEFAULT_FRAME_SETS_PER_PROMPT: usize = 5;
 
 fn direct_openai_endpoint(base_url: Option<&OsStr>) -> Result<(), &'static str> {
     if base_url.is_some() {
@@ -92,6 +97,7 @@ fn desktop_operator_flow_records_two_cameras_and_analyzes() {
             settings_directory.path(),
             &data_root,
             [camera_1_rtsp, camera_2_rtsp],
+            DEFAULT_FRAME_SETS_PER_PROMPT,
             api_key,
             model,
             None,
@@ -101,6 +107,7 @@ fn desktop_operator_flow_records_two_cameras_and_analyzes() {
             settings_directory.path(),
             &data_root,
             [camera_1_rtsp, camera_2_rtsp],
+            DEFAULT_FRAME_SETS_PER_PROMPT,
             "local-e2e-key",
             "local-e2e-model",
             Some(
@@ -117,6 +124,7 @@ fn desktop_operator_flow_records_two_cameras_and_analyzes() {
         &settings_path,
         &driver_ready,
         &driver_result,
+        COMPLETE_ANALYSIS_SCENARIO,
         mock_openai.is_some(),
         &logs,
     );
@@ -198,6 +206,112 @@ fn desktop_operator_flow_records_two_cameras_and_analyzes() {
 }
 
 #[test]
+#[ignore = "requires a macOS GUI session, MediaMTX, FFmpeg, and FFprobe"]
+fn desktop_analysis_resumes_after_transient_provider_failure() {
+    assert_preview_ports_available();
+    let settings_directory = tempfile::tempdir().expect("create desktop E2E settings directory");
+    let root = tempfile::tempdir().expect("create desktop E2E root");
+    let logs = root.path().join("process-logs");
+    fs::create_dir(&logs).expect("create process log directory");
+    let data_root = root.path().join("data");
+    fs::create_dir(&data_root).expect("create E2E data root");
+
+    let (camera_1_rtsp, mut camera_1) = start_camera("camera 1", &fixture("salon-1.mp4"), &logs);
+    let (camera_2_rtsp, mut camera_2) = start_camera("camera 2", &fixture("salon-2.mp4"), &logs);
+    let mock_openai = MockOpenAi::fail_once_on_request(2);
+    let mock_base_url = format!("http://{}/v1", mock_openai.address);
+    let settings_path = write_desktop_settings(
+        settings_directory.path(),
+        &data_root,
+        [camera_1_rtsp, camera_2_rtsp],
+        1,
+        "local-e2e-key",
+        "local-e2e-model",
+        Some(&mock_base_url),
+    );
+
+    let driver_ready = root.path().join("driver-ready");
+    let driver_result = root.path().join("driver-result");
+    let mut app = start_desktop_app(
+        &settings_path,
+        &driver_ready,
+        &driver_result,
+        ANALYSIS_RECOVERY_SCENARIO,
+        true,
+        &logs,
+    );
+    let result = wait_for_desktop_result(&mut app, &driver_ready, &driver_result);
+    let mut result_lines = result.lines();
+    assert_eq!(
+        result_lines.next(),
+        Some("ok"),
+        "{result}\n{}",
+        app.diagnostics()
+    );
+    let partial_progress = result_lines
+        .next()
+        .unwrap_or_else(|| panic!("driver did not report partial progress: {result}"));
+    let rendered_summary = result_lines
+        .next()
+        .unwrap_or_else(|| panic!("driver did not report the final summary: {result}"));
+    assert_eq!(
+        result_lines.next(),
+        None,
+        "unexpected driver output: {result}"
+    );
+
+    let camera_1_status = camera_1.stop(SHUTDOWN_TIMEOUT);
+    let camera_2_status = camera_2.stop(SHUTDOWN_TIMEOUT);
+    assert!(camera_1_status.success(), "camera 1: {camera_1_status}");
+    assert!(camera_2_status.success(), "camera 2: {camera_2_status}");
+    camera_1.assert_process_group_exited(SHUTDOWN_TIMEOUT);
+    camera_2.assert_process_group_exited(SHUTDOWN_TIMEOUT);
+
+    let sessions = list_sessions(&data_root.join("sessions")).expect("list E2E sessions");
+    assert_eq!(sessions.len(), 1, "expected one completed E2E session");
+    let stored = &sessions[0];
+    let checkpoint =
+        AnalysisCheckpoint::read(&stored.directory.join("analysis.json"), stored.session.id)
+            .expect("read resumed E2E analysis checkpoint");
+    assert!(
+        checkpoint.total_batches > 1,
+        "recovery scenario needs more than one batch"
+    );
+    assert_eq!(checkpoint.responses.len(), checkpoint.total_batches);
+    assert_eq!(
+        partial_progress,
+        format!(
+            "Analysis progress: 1 of {} batches",
+            checkpoint.total_batches
+        )
+    );
+    assert_eq!(rendered_summary, "E2E mock analysis complete.");
+    assert_eq!(mock_openai.failed_requests.load(Ordering::SeqCst), 1);
+
+    let requests = mock_openai.requests.lock().expect("mock requests mutex");
+    assert_eq!(
+        requests.len(),
+        checkpoint.total_batches + 1,
+        "only the failed provider request should be repeated"
+    );
+    assert_ne!(
+        requests[0], requests[1],
+        "the first batch must not be retried"
+    );
+    assert_eq!(
+        requests[1], requests[2],
+        "Resume should retry the failed batch from the saved prefix"
+    );
+
+    let application_log = read_application_log(&data_root.join("logs"));
+    assert!(application_log.contains("analysis failed"));
+    assert!(application_log.contains("analysis resumed"));
+    assert!(application_log.contains("analysis completed"));
+    assert!(!application_log.contains("recorder runtime shutdown failed"));
+    assert!(!application_log.contains("preview stop failed"));
+}
+
+#[test]
 fn desktop_settings_file_is_strict_private_and_complete() {
     let settings_directory = tempfile::tempdir().expect("create settings directory");
     let data_directory = tempfile::tempdir().expect("create data directory");
@@ -213,6 +327,7 @@ fn desktop_settings_file_is_strict_private_and_complete() {
         settings_directory.path(),
         &data_root,
         camera_addresses,
+        DEFAULT_FRAME_SETS_PER_PROMPT,
         "local-e2e-key",
         "local-e2e-model",
         Some(mock_base_url),

@@ -1,3 +1,4 @@
+const scenario = await dioxus.recv();
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 const waitFor = async (predicate, description, timeout = 30000) => {
@@ -23,20 +24,22 @@ const input = (element, value) => {
     element.dispatchEvent(new Event("input", { bubbles: true }));
 };
 
-(async () => {
-    await waitFor(() => ["camera-0-video", "camera-1-video"].every((id) => {
-        const video = document.getElementById(id);
-        const tracks = video?.srcObject?.getVideoTracks?.() ?? [];
-        return video && video.videoWidth > 0 && tracks.some((track) => track.readyState === "live");
-    }), "two live previews", 45000);
+const waitForLivePreviews = () => waitFor(() => ["camera-0-video", "camera-1-video"].every((id) => {
+    const video = document.getElementById(id);
+    const tracks = video?.srcObject?.getVideoTracks?.() ?? [];
+    return video && video.videoWidth > 0 && tracks.some((track) => track.readyState === "live");
+}), "two live previews", 45000);
 
+const startSession = async () => {
     (await waitFor(() => button("Start session"), "Start session button")).click();
     await waitFor(() => document.body.innerText.includes("Session active"), "active session", 45000);
     await waitFor(
         () => document.querySelectorAll('[aria-label$="recorder status: Recording"]').length === 2,
         "two recording statuses",
     );
+};
 
+const changeFirstCameraCadence = async () => {
     const cadence = await waitFor(
         () => document.getElementById("sampling-interval-1"),
         "camera one cadence input",
@@ -46,11 +49,14 @@ const input = (element, value) => {
         bubbles: true,
         cancelable: true,
     }));
-    await sleep(3000);
+};
 
+const stopSession = async () => {
     (await waitFor(() => button("Stop session"), "Stop session button")).click();
     await waitFor(() => document.body.innerText.includes("Session idle"), "idle session", 45000);
+};
 
+const openAnalysis = async () => {
     const analyze = await waitFor(
         () => Array.from(document.querySelectorAll("a"))
             .find((candidate) => candidate.textContent.trim() === "Analyze"),
@@ -71,21 +77,80 @@ const input = (element, value) => {
             "analysis checklist",
         );
     }
+    return checklist;
+};
+
+const beginAnalysis = async () => {
+    const checklist = await openAnalysis();
     input(checklist, "Keep movement controlled");
     (await waitFor(() => button("Analyze"), "Analyze action")).click();
+};
 
+const waitForCompletedAnalysis = async () => {
     await waitFor(
         () => document.querySelector('button[aria-label*="status: Complete"]'),
         "completed analysis",
         90000,
     );
     await waitFor(() => document.getElementById("analysis-results-title"), "analysis results");
-    const renderedSummary = await waitFor(
+    return waitFor(
         () => document.querySelector('[aria-labelledby="sequence-summary-title"] p')
             ?.textContent.trim() || null,
         "rendered sequence summary",
     );
-    dioxus.send(`ok\n${renderedSummary}`);
+};
+
+const waitForFailedPartialAnalysis = async () => {
+    await waitFor(
+        () => document.querySelector('button[aria-label*="status: Failed"]'),
+        "failed analysis",
+        90000,
+    );
+    await waitFor(
+        () => document.querySelector('[role="alert"]')?.textContent.trim() || null,
+        "visible analysis error",
+    );
+    return waitFor(() => {
+        const progress = document.querySelector('[aria-label^="Analysis progress: "]');
+        const label = progress?.getAttribute("aria-label");
+        const match = label?.match(/^Analysis progress: (\d+) of (\d+) batches$/);
+        return match && Number(match[1]) > 0 && Number(match[1]) < Number(match[2])
+            ? label
+            : null;
+    }, "saved partial analysis progress");
+};
+
+const completeAnalysis = async () => {
+    await waitForLivePreviews();
+    await startSession();
+    await changeFirstCameraCadence();
+    await sleep(3000);
+    await stopSession();
+    await beginAnalysis();
+    const renderedSummary = await waitForCompletedAnalysis();
+    return `ok\n${renderedSummary}`;
+};
+
+const recoverAnalysis = async () => {
+    await waitForLivePreviews();
+    await startSession();
+    await sleep(4000);
+    await stopSession();
+    await beginAnalysis();
+    const partialProgress = await waitForFailedPartialAnalysis();
+    (await waitFor(() => button("Resume"), "Resume action")).click();
+    const renderedSummary = await waitForCompletedAnalysis();
+    return `ok\n${partialProgress}\n${renderedSummary}`;
+};
+
+(async () => {
+    if (scenario === "complete-analysis") {
+        dioxus.send(await completeAnalysis());
+    } else if (scenario === "analysis-recovery") {
+        dioxus.send(await recoverAnalysis());
+    } else {
+        throw new Error(`Unknown desktop E2E scenario: ${scenario}`);
+    }
 })().catch((error) => {
     dioxus.send(`error: ${error?.stack ?? error}`);
 });

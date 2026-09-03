@@ -16,6 +16,8 @@ pub fn launch(settings_path: PathBuf) {
     crate::desktop::launch_with_store(SettingsStore::new(settings_path, default_data_root));
 }
 
+const COMPLETE_ANALYSIS_SCENARIO: &str = "complete-analysis";
+const ANALYSIS_RECOVERY_SCENARIO: &str = "analysis-recovery";
 const DRIVER_SCRIPT: &str = include_str!("e2e/driver.js");
 
 /// Drives the mounted production UI when the E2E result paths are configured.
@@ -29,6 +31,15 @@ pub fn DesktopE2eDriver() -> Element {
         if let Err(error) = fs::write(&ready_path, b"ready\n") {
             tracing::error!(path = %ready_path.display(), %error, "desktop E2E ready handshake failed");
         }
+
+        let configured_scenario = std::env::var("LEO_DESKTOP_E2E_SCENARIO").ok();
+        let Some(scenario) = selected_driver_scenario(configured_scenario.as_deref()) else {
+            if let Err(error) = fs::write(&result_path, b"error: unknown desktop E2E scenario\n") {
+                tracing::error!(path = %result_path.display(), %error, "desktop E2E result write failed");
+            }
+            desktop.close();
+            return None;
+        };
 
         let openai = resolved.settings.openai_config();
         let openai = openai.as_ref();
@@ -62,10 +73,14 @@ pub fn DesktopE2eDriver() -> Element {
         }
 
         Some(spawn(async move {
-            let result = document::eval(DRIVER_SCRIPT)
-                .recv::<String>()
-                .await
-                .unwrap_or_else(|error| format!("error: desktop E2E driver failed: {error}"));
+            let mut driver = document::eval(DRIVER_SCRIPT);
+            let result = match driver.send(scenario) {
+                Ok(()) => driver
+                    .recv::<String>()
+                    .await
+                    .unwrap_or_else(|error| format!("error: desktop E2E driver failed: {error}")),
+                Err(error) => format!("error: desktop E2E driver failed to start: {error}"),
+            };
             if let Err(error) = fs::write(&result_path, result) {
                 tracing::error!(path = %result_path.display(), %error, "desktop E2E result write failed");
             }
@@ -73,6 +88,14 @@ pub fn DesktopE2eDriver() -> Element {
         }))
     });
     rsx! {}
+}
+
+fn selected_driver_scenario(configured: Option<&str>) -> Option<&'static str> {
+    match configured.unwrap_or(COMPLETE_ANALYSIS_SCENARIO) {
+        COMPLETE_ANALYSIS_SCENARIO => Some(COMPLETE_ANALYSIS_SCENARIO),
+        ANALYSIS_RECOVERY_SCENARIO => Some(ANALYSIS_RECOVERY_SCENARIO),
+        _ => None,
+    }
 }
 
 fn environment_path(name: &str) -> Option<PathBuf> {

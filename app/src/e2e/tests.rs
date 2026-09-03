@@ -1,6 +1,9 @@
 use backend::analysis::OpenAiConfig;
 
-use super::{loopback_proxy_is_bypassed, provider_configuration_is_safe};
+use super::{
+    ANALYSIS_RECOVERY_SCENARIO, COMPLETE_ANALYSIS_SCENARIO, loopback_proxy_is_bypassed,
+    provider_configuration_is_safe, selected_driver_scenario,
+};
 
 fn openai_config(api_key: &str, model: &str, base_url: Option<&str>) -> OpenAiConfig {
     OpenAiConfig {
@@ -103,4 +106,17 @@ fn loopback_provider_rejects_a_proxy_without_a_global_bypass() {
         true,
         Some("127.0.0.1, localhost"),
     ));
+}
+
+#[test]
+fn desktop_driver_defaults_to_the_complete_flow_and_rejects_unknown_scenarios() {
+    assert_eq!(
+        selected_driver_scenario(None),
+        Some(COMPLETE_ANALYSIS_SCENARIO)
+    );
+    assert_eq!(
+        selected_driver_scenario(Some(ANALYSIS_RECOVERY_SCENARIO)),
+        Some(ANALYSIS_RECOVERY_SCENARIO)
+    );
+    assert_eq!(selected_driver_scenario(Some("unknown")), None);
 }
