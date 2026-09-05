@@ -59,11 +59,10 @@ fn form_composes_all_sections_and_keeps_editable_secrets_local_to_inputs() {
             name: "Camera 1".into(),
             rtsp_url: "rtsp://render-camera.example/stream".into(),
             initially_included_in_analysis: true,
-            sample_every_ms: 1_000,
+            initial_monitoring_profile_id: 1,
         }],
         openai: OpenAiSettings {
             api_key: "render-secret-key".into(),
-            model: String::new(),
             base_url: None,
         },
         ..ApplicationSettings::default()
@@ -77,7 +76,9 @@ fn form_composes_all_sections_and_keeps_editable_secrets_local_to_inputs() {
         "Cameras",
         "Storage",
         "Recording",
-        "Analysis provider",
+        "Provider credentials",
+        "Monitoring profiles",
+        "Analysis profiles",
         "Application",
     ] {
         assert!(html.contains(heading), "missing {heading:?} in {html}");

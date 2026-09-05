@@ -7974,9 +7974,6 @@
   .w-full {
     width: 100%;
   }
-  .max-w-sm {
-    max-width: var(--container-sm);
-  }
   .min-w-0 {
     min-width: 0px;
   }
@@ -9607,6 +9604,9 @@
   .text-error {
     color: var(--color-error);
   }
+  .text-warning {
+    color: var(--color-warning);
+  }
   .capitalize {
     text-transform: capitalize;
   }
@@ -10376,6 +10376,9 @@
     }
   }
   @media (width >= 40rem) {
+    .sm\:grid-cols-2 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
     .sm\:grid-cols-\[max-content_minmax\(0\,1fr\)\] {
       grid-template-columns: max-content minmax(0,1fr);
     }

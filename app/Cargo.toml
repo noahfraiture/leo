@@ -6,7 +6,7 @@ edition = "2024"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-desktop-e2e = []
+desktop-e2e = ["backend/test-support"]
 paid-openai-evaluations = []
 
 [dependencies]

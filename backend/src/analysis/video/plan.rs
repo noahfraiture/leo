@@ -9,45 +9,51 @@ use super::error::{Error, Result};
 
 /// One enabled span with a fixed cadence on the session-relative timeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::analysis) struct SamplingPeriod {
+pub struct SamplingPeriod {
     /// Inclusive session-relative start; this offset is sampled immediately.
-    pub(in crate::analysis) start: Duration,
+    pub start: Duration,
     /// Exclusive session-relative end.
-    pub(in crate::analysis) end: Duration,
+    pub end: Duration,
     /// Fixed cadence beginning at `start`.
-    pub(in crate::analysis) sample_every: Duration,
+    pub sample_every: Duration,
 }
 
 /// A camera's ordered, non-overlapping enabled periods for one completed session.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::analysis) struct SamplingSchedule {
+pub struct SamplingSchedule {
     /// Camera whose participation and interval events produced this schedule.
-    pub(in crate::analysis) camera_id: u32,
+    pub camera_id: u32,
     /// Ordered enabled spans; disabled time is omitted as gaps.
-    pub(in crate::analysis) periods: Vec<SamplingPeriod>,
+    pub periods: Vec<SamplingPeriod>,
 }
 
 impl SamplingSchedule {
     /// Replays one camera's session actions into normalized enabled periods.
-    pub(in crate::analysis) fn from_session(session: &Session, camera_id: u32) -> Result<Self> {
+    pub fn from_session(session: &Session, camera_id: u32) -> Result<Self> {
         let camera = session
             .cameras
             .iter()
             .find(|camera| camera.id == camera_id)
             .ok_or(Error::UnknownCamera { camera_id })?;
-        if camera.sample_every.is_zero() {
-            return Err(Error::InvalidSamplingInterval { camera_id });
-        }
-
+        let mut profile_id = camera.initial_monitoring_profile_id;
+        let cadence = |id| {
+            session
+                .monitoring_profiles
+                .iter()
+                .find(|profile| profile.id == id)
+                .map(|profile| Duration::from_millis(profile.sample_every_ms))
+                .filter(|interval| !interval.is_zero())
+                .ok_or(Error::InvalidSamplingInterval { camera_id })
+        };
         let mut enabled = camera.enabled;
-        let mut sample_every = camera.sample_every;
+        let mut sample_every = cadence(profile_id)?;
         let mut period_start = enabled.then_some(Duration::ZERO);
         let mut periods = Vec::new();
 
         for actions in session.actions.chunk_by(|left, right| left.0 == right.0) {
             let offset = actions[0].0;
             let previous_enabled = enabled;
-            let previous_sample_every = sample_every;
+            let previous_profile_id = profile_id;
 
             for (_, action) in actions {
                 match action {
@@ -64,29 +70,25 @@ impl SamplingSchedule {
                         }
                         enabled = *next_enabled;
                     }
-                    OperatorAction::SetSamplingInterval {
-                        camera_id: action_camera_id,
-                        sample_every: next_sample_every,
-                    } if *action_camera_id == camera_id => {
-                        if next_sample_every.is_zero() {
-                            return Err(Error::InvalidSamplingInterval { camera_id });
+                    OperatorAction::SetMonitoringProfile {
+                        camera_ids,
+                        monitoring_profile_id,
+                    } if camera_ids.contains(&camera_id) => {
+                        if offset > session.end_offset {
+                            return Err(Error::ActionAfterSessionEnd {
+                                camera_id,
+                                offset,
+                                session_end: session.end_offset,
+                            });
                         }
-                        if *next_sample_every != sample_every {
-                            if offset > session.end_offset {
-                                return Err(Error::ActionAfterSessionEnd {
-                                    camera_id,
-                                    offset,
-                                    session_end: session.end_offset,
-                                });
-                            }
-                            sample_every = *next_sample_every;
-                        }
+                        profile_id = *monitoring_profile_id;
+                        sample_every = cadence(profile_id)?;
                     }
                     _ => {}
                 }
             }
 
-            if enabled == previous_enabled && sample_every == previous_sample_every {
+            if enabled == previous_enabled && profile_id == previous_profile_id {
                 continue;
             }
 
@@ -97,7 +99,7 @@ impl SamplingSchedule {
                 periods.push(SamplingPeriod {
                     start,
                     end: offset,
-                    sample_every: previous_sample_every,
+                    sample_every: cadence(previous_profile_id)?,
                 });
             }
             period_start = (enabled && offset < session.end_offset).then_some(offset);
@@ -118,7 +120,7 @@ impl SamplingSchedule {
     }
 
     /// Generates ordered, unique session offsets from all normalized periods.
-    pub(in crate::analysis) fn sample_offsets(&self) -> Result<Vec<Duration>> {
+    pub fn sample_offsets(&self) -> Result<Vec<Duration>> {
         let mut offsets = Vec::new();
         let mut previous_end = None;
 
@@ -267,16 +269,16 @@ pub struct Frame {
 
 /// One camera's ordered planned samples across the recording segments that cover the session.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::analysis) struct SampleSequence {
+pub struct SampleSequence {
     /// Camera represented by every planned frame in the sequence.
-    pub(in crate::analysis) camera_id: u32,
+    pub camera_id: u32,
     /// Samples ordered across the complete software session timeline.
-    pub(in crate::analysis) frames: Vec<Frame>,
+    pub frames: Vec<Frame>,
 }
 
 impl SampleSequence {
     /// Matches each planned sample to zero or one local segment without decoding media.
-    pub(in crate::analysis) fn from_segments(
+    pub fn from_segments(
         session_start_utc_ms: i64,
         schedule: &SamplingSchedule,
         segments: &[RecordingSegment],
@@ -340,16 +342,16 @@ impl SampleSequence {
 
 /// All available camera samples at one session-relative offset.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::analysis) struct FrameSet {
+pub struct FrameSet {
     /// Position shared by every frame in this set on the session timeline.
-    pub(in crate::analysis) session_offset: Duration,
+    pub session_offset: Duration,
     /// Frames ordered by camera ID.
-    pub(in crate::analysis) frames: Vec<Frame>,
+    pub frames: Vec<Frame>,
 }
 
 impl FrameSet {
     /// Merges ordered camera sequences by session offset and camera ID.
-    pub(in crate::analysis) fn from_sequences(sequences: Vec<SampleSequence>) -> Result<Vec<Self>> {
+    pub fn from_sequences(sequences: Vec<SampleSequence>) -> Result<Vec<Self>> {
         for sequence in &sequences {
             for frames in sequence.frames.windows(2) {
                 if frames[0].session_offset == frames[1].session_offset {

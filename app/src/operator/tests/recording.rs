@@ -1,9 +1,6 @@
 use std::{
-    cell::{Cell, RefCell},
     fs,
-    num::NonZeroUsize,
     path::PathBuf,
-    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -18,7 +15,6 @@ use backend::{
     },
     session::{OperatorAction, Session},
 };
-use tokio::sync::oneshot;
 
 use super::{
     apply_fault_outcome, apply_start_outcome, apply_stop_outcome, handle_recorder_event,
@@ -64,12 +60,9 @@ impl Harness {
 
     fn workflow(&self) -> OperatorState {
         OperatorState::new(
-            camera_settings(),
+            crate::test_settings(camera_settings(), Some(crate::test_openai_config()), 5, 0),
             self.session_root(),
             self.recorder.clone(),
-            Some(crate::test_openai_config()),
-            NonZeroUsize::new(5).unwrap(),
-            0,
         )
         .expect("workflow should initialize")
     }
@@ -98,14 +91,14 @@ fn camera_settings() -> Vec<CameraSettings> {
             name: "Salon 1".into(),
             rtsp_url: "rtsp://camera-one.example/live".into(),
             initially_included_in_analysis: true,
-            sample_every_ms: 1_000,
+            initial_monitoring_profile_id: 1,
         },
         CameraSettings {
             id: 2,
             name: "Salon 2".into(),
             rtsp_url: "rtsp://camera-two.example/live".into(),
             initially_included_in_analysis: false,
-            sample_every_ms: 2_000,
+            initial_monitoring_profile_id: 2,
         },
     ]
 }
@@ -115,14 +108,7 @@ async fn make_active(operator: &mut OperatorState) -> PathBuf {
         .begin_start(START_UTC_MS)
         .expect("session should begin starting");
     let directory = request.directory.clone();
-    let outcome = run_start_session_with(
-        request,
-        std::future::ready(Ok(())),
-        std::future::ready(Ok(Vec::new())),
-        |_| true,
-        |_| true,
-    )
-    .await;
+    let outcome = run_start_session_with(request, std::future::ready(Ok(())), |_| true).await;
     apply_start_outcome(operator, outcome);
     assert!(matches!(operator.session, SessionRunState::Active { .. }));
     directory
@@ -153,20 +139,12 @@ async fn start_actions_stop_reload_and_discovery_preserve_durable_order() {
         );
         Ok(())
     };
-    let failed_start_stop_polled = Arc::new(AtomicBool::new(false));
-    let stop_flag = Arc::clone(&failed_start_stop_polled);
-    let unused_cleanup = async move {
-        stop_flag.store(true, Ordering::SeqCst);
-        Ok(Vec::new())
-    };
-
-    let outcome = run_start_session_with(request, start, unused_cleanup, |_| true, |_| true).await;
+    let outcome = run_start_session_with(request, start, |_| true).await;
     apply_start_outcome(&mut workflow, outcome);
 
-    assert!(!failed_start_stop_polled.load(Ordering::SeqCst));
     assert!(matches!(workflow.session, SessionRunState::Active { .. }));
     workflow
-        .set_sampling_interval(2, Duration::from_secs(3))
+        .set_monitoring_profile(vec![2], 3)
         .expect("cadence should be durably updated");
     workflow
         .set_participation(2, true)
@@ -178,12 +156,12 @@ async fn start_actions_stop_reload_and_discovery_preserve_durable_order() {
     let marker = directory.join("recording-complete");
     let stop_events_path = events_path.clone();
     let stop_marker = marker.clone();
+
     let stop = async move {
-        Session::load(&stop_events_path)
-            .expect("EndSession must be durable before recorder Stop is polled");
+        Session::load(&stop_events_path).expect("end event must precede recorder Stop");
         assert!(
             !stop_marker.exists(),
-            "completion marker must follow recorder Stop"
+            "completion follows media finalization"
         );
         Ok(Vec::new())
     };
@@ -199,9 +177,9 @@ async fn start_actions_stop_reload_and_discovery_preserve_durable_order() {
         vec![
             (
                 session.actions[0].0,
-                OperatorAction::SetSamplingInterval {
-                    camera_id: 2,
-                    sample_every: Duration::from_secs(3),
+                OperatorAction::SetMonitoringProfile {
+                    camera_ids: vec![2],
+                    monitoring_profile_id: 3
                 },
             ),
             (
@@ -232,17 +210,10 @@ async fn all_camera_startup_failure_rolls_back_staging_without_stop() {
         .expect("session should begin starting");
     let directory = request.directory.clone();
     let events_path = request.events_path.clone();
-    let stop_polled = Arc::new(AtomicBool::new(false));
-    let stop_flag = Arc::clone(&stop_polled);
 
     let outcome = run_start_session_with(
         request,
         std::future::ready(Err(RecorderError::RecorderStartupFailed)),
-        async move {
-            stop_flag.store(true, Ordering::SeqCst);
-            Ok(Vec::new())
-        },
-        |_| true,
         |_| true,
     )
     .await;
@@ -251,7 +222,6 @@ async fn all_camera_startup_failure_rolls_back_staging_without_stop() {
     assert!(matches!(workflow.session, SessionRunState::Idle));
     assert!(!directory.exists());
     assert!(!events_path.exists());
-    assert!(!stop_polled.load(Ordering::SeqCst));
     assert!(workflow.message.is_some());
 
     harness.shutdown();
@@ -269,13 +239,9 @@ async fn fault_claimed_before_start_continuation_creates_no_event_log() {
         .begin_fault("recorder failed after readiness".into(), true)
         .expect("fault should claim cleanup while Starting");
 
-    let outcome = run_start_session_with(
-        request,
-        std::future::ready(Ok(())),
-        std::future::ready(Ok(Vec::new())),
-        |directory| start_is_current(&workflow, directory),
-        |_| true,
-    )
+    let outcome = run_start_session_with(request, std::future::ready(Ok(())), |directory| {
+        start_is_current(&workflow, directory)
+    })
     .await;
     apply_start_outcome(&mut workflow, outcome);
 
@@ -308,155 +274,68 @@ async fn recorder_event_channel_closure_faults_an_active_session_once() {
 }
 
 #[tokio::test]
-async fn failed_start_cleanup_claim_blocks_late_fault_and_owns_one_stop() {
-    let harness = Harness::new();
-    let workflow = Rc::new(RefCell::new(harness.workflow()));
-    let request = workflow
-        .borrow_mut()
-        .begin_start(START_UTC_MS)
-        .expect("session should begin starting");
-    let directory = request.directory.clone();
-    fs::write(&request.events_path, b"occupied")
-        .expect("events path should force controller creation failure");
-    let stop_calls = Rc::new(Cell::new(0));
-    let stop_call_counter = Rc::clone(&stop_calls);
-    let (stop_started_tx, stop_started_rx) = oneshot::channel();
-    let (release_stop_tx, release_stop_rx) = oneshot::channel();
-    let current_workflow = Rc::clone(&workflow);
-    let cleanup_workflow = Rc::clone(&workflow);
-
-    let cleanup = run_start_session_with(
-        request,
-        std::future::ready(Ok(())),
-        async move {
-            stop_call_counter.set(stop_call_counter.get() + 1);
-            stop_started_tx
-                .send(())
-                .expect("test should observe cleanup starting");
-            release_stop_rx.await.expect("test should release cleanup");
-            Ok(Vec::new())
-        },
-        move |directory| start_is_current(&current_workflow.borrow(), directory),
-        move |directory| {
-            cleanup_workflow
-                .borrow_mut()
-                .claim_failed_start_cleanup(directory)
-        },
-    );
-    tokio::pin!(cleanup);
-    tokio::select! {
-        _ = &mut cleanup => panic!("cleanup completed before release"),
-        started = stop_started_rx => started.expect("cleanup should start"),
+async fn unavailable_start_metadata_preserves_capture_and_allows_the_next_session() {
+    for invalid_profiles in [false, true] {
+        let harness = Harness::new();
+        let mut workflow = harness.workflow();
+        let mut request = workflow.begin_start(START_UTC_MS).unwrap();
+        let directory = request.directory.clone();
+        let media = directory.join("recordings/camera-1/retained.mkv");
+        fs::write(&media, b"captured bytes").unwrap();
+        if invalid_profiles {
+            request.metadata_error = Some("invalid monitoring configuration".into());
+        } else {
+            fs::write(&request.events_path, b"occupied").unwrap();
+        }
+        let outcome = run_start_session_with(request, std::future::ready(Ok(())), |_| true).await;
+        apply_start_outcome(&mut workflow, outcome);
+        assert!(matches!(
+            workflow.session,
+            SessionRunState::Active {
+                controller: None,
+                ..
+            }
+        ));
+        assert!(
+            workflow
+                .metadata_error
+                .as_ref()
+                .unwrap()
+                .contains("Recording continues")
+        );
+        assert_eq!(fs::read(&media).unwrap(), b"captured bytes");
+        let request = workflow.begin_stop().unwrap();
+        let outcome = run_stop_session_with(request, std::future::ready(Ok(Vec::new()))).await;
+        apply_stop_outcome(&mut workflow, outcome);
+        assert!(matches!(workflow.session, SessionRunState::Idle));
+        assert!(!directory.join("recording-complete").exists());
+        assert!(workflow.incomplete_sessions.contains(&directory));
+        workflow
+            .begin_start(START_UTC_MS + 1)
+            .expect("metadata repair must not block the next customer");
+        harness.shutdown();
     }
-
-    let duplicate = handle_recorder_event(
-        &mut workflow.borrow_mut(),
-        RecorderEvent::Faulted {
-            camera_id: Some(2),
-            message: "late fatal recorder event".into(),
-        },
-    );
-
-    assert!(duplicate.is_none(), "failed Start cleanup must own Stop");
-    release_stop_tx
-        .send(())
-        .expect("cleanup future should still be waiting");
-    let outcome = cleanup.await;
-    apply_start_outcome(&mut workflow.borrow_mut(), outcome);
-
-    assert_eq!(stop_calls.get(), 1);
-    assert!(!directory.exists());
-    assert!(!directory.join("recording-complete").exists());
-    let state = workflow.borrow();
-    assert!(matches!(state.session, SessionRunState::Idle));
-    assert!(
-        state
-            .message
-            .as_deref()
-            .is_some_and(|message| message.contains("metadata start failed"))
-    );
-    drop(state);
-    harness.shutdown();
 }
 
 #[tokio::test]
-async fn controller_creation_failure_cleans_before_removing_staging() {
+async fn capture_fault_after_metadata_failure_still_claims_cleanup_once() {
     let harness = Harness::new();
     let mut workflow = harness.workflow();
-    let request = workflow
-        .begin_start(START_UTC_MS)
-        .expect("session should begin starting");
-    let directory = request.directory.clone();
-    fs::write(&request.events_path, b"occupied")
-        .expect("events path should force create_new failure");
-    let cleanup_directory = directory.clone();
-    let stop_polled = Arc::new(AtomicBool::new(false));
-    let stop_flag = Arc::clone(&stop_polled);
-
-    let outcome = run_start_session_with(
-        request,
-        std::future::ready(Ok(())),
-        async move {
-            assert!(
-                cleanup_directory.exists(),
-                "staging must remain until recorder cleanup succeeds"
-            );
-            stop_flag.store(true, Ordering::SeqCst);
-            Ok(Vec::new())
-        },
-        |_| true,
-        |directory| workflow.claim_failed_start_cleanup(directory),
-    )
-    .await;
+    let mut request = workflow.begin_start(START_UTC_MS).unwrap();
+    request.metadata_error = Some("monitoring unavailable".into());
+    let outcome = run_start_session_with(request, std::future::ready(Ok(())), |_| true).await;
     apply_start_outcome(&mut workflow, outcome);
-
-    assert!(stop_polled.load(Ordering::SeqCst));
-    assert!(!directory.exists());
-    assert!(matches!(workflow.session, SessionRunState::Idle));
-
-    harness.shutdown();
-}
-
-#[tokio::test]
-async fn failed_start_cleanup_failure_preserves_staging_and_faults() {
-    let harness = Harness::new();
-    let mut workflow = harness.workflow();
-    let request = workflow
-        .begin_start(START_UTC_MS)
-        .expect("session should begin starting");
-    let directory = request.directory.clone();
-    fs::write(&request.events_path, b"occupied")
-        .expect("events path should force create_new failure");
-
-    let outcome = run_start_session_with(
-        request,
-        std::future::ready(Ok(())),
-        std::future::ready(Err(RecorderError::FfmpegQuit)),
-        |_| true,
-        |directory| workflow.claim_failed_start_cleanup(directory),
-    )
-    .await;
-    apply_start_outcome(&mut workflow, outcome);
-
-    assert!(directory.exists());
-    assert!(matches!(
-        &workflow.session,
-        SessionRunState::Faulted { directory: actual, .. } if actual == &directory
-    ));
-    assert!(
-        workflow
-            .message
-            .as_deref()
-            .is_some_and(|message| message.contains("recorder cleanup failed"))
-    );
-    assert!(
-        workflow
-            .cameras
-            .iter()
-            .all(|camera| camera.recorder_status == backend::recording::RecorderStatus::Stopped)
-    );
-    assert!(!directory.join("recording-complete").exists());
-
+    let fault = RecorderEvent::Faulted {
+        camera_id: Some(1),
+        message: "capture failed".into(),
+    };
+    let cleanup = handle_recorder_event(&mut workflow, fault)
+        .expect("real capture failure still requests cleanup");
+    assert!(cleanup.controller.is_none());
+    assert!(handle_recorder_event_channel_closed(&mut workflow).is_none());
+    let outcome = run_fault_session_with(cleanup, std::future::ready(Ok(Vec::new()))).await;
+    apply_fault_outcome(&mut workflow, outcome);
+    assert!(matches!(workflow.session, SessionRunState::Faulted { .. }));
     harness.shutdown();
 }
 
@@ -469,6 +348,8 @@ async fn end_session_failure_still_polls_stop_and_never_marks_complete() {
         panic!("session should be active");
     };
     controller
+        .as_mut()
+        .unwrap()
         .apply(OperatorAction::EndSession)
         .expect("test should pre-end the controller");
     let request = workflow
@@ -485,7 +366,7 @@ async fn end_session_failure_still_polls_stop_and_never_marks_complete() {
     apply_stop_outcome(&mut workflow, outcome);
 
     assert!(stop_polled.load(Ordering::SeqCst));
-    assert!(matches!(workflow.session, SessionRunState::Faulted { .. }));
+    assert!(matches!(workflow.session, SessionRunState::Idle));
     assert!(!directory.join("recording-complete").exists());
 
     harness.shutdown();
@@ -526,11 +407,11 @@ async fn stop_failure_after_end_preserves_directory_without_marker() {
 }
 
 #[tokio::test]
-async fn completion_marker_failure_keeps_workflow_faulted() {
+async fn completion_marker_failure_retains_recording_and_allows_a_new_session() {
     let harness = Harness::new();
     let mut workflow = harness.workflow();
     let directory = make_active(&mut workflow).await;
-    fs::write(directory.join("recording-complete"), b"")
+    fs::write(directory.join("recording-complete"), b"incomplete")
         .expect("existing marker should force create_new failure");
     let request = workflow
         .begin_stop()
@@ -539,39 +420,62 @@ async fn completion_marker_failure_keeps_workflow_faulted() {
     let outcome = run_stop_session_with(request, std::future::ready(Ok(Vec::new()))).await;
     apply_stop_outcome(&mut workflow, outcome);
 
-    assert!(matches!(workflow.session, SessionRunState::Faulted { .. }));
+    assert!(matches!(workflow.session, SessionRunState::Idle));
     assert!(workflow.sessions.is_empty());
+    assert!(workflow.incomplete_sessions.contains(&directory));
+    workflow.begin_start(START_UTC_MS + 1).unwrap();
     harness.shutdown();
 }
 
 #[tokio::test]
-async fn uncertain_append_fault_skips_second_end_but_still_polls_cleanup() {
+async fn failed_metadata_append_preserves_last_saved_selections_and_recording() {
     let harness = Harness::new();
-    let mut workflow = harness.workflow();
-    let directory = make_active(&mut workflow).await;
-    let events_path = directory.join("events.jsonl");
-    let error = workflow
-        .set_sampling_interval(2, Duration::ZERO)
-        .expect_err("invalid append should fail");
-    let request = workflow
-        .begin_fault(error.to_string(), false)
-        .expect("metadata failure should claim cleanup");
-    assert!(request.controller.is_none());
-    let stop_polled = Arc::new(AtomicBool::new(false));
-    let stop_flag = Arc::clone(&stop_polled);
-
-    let outcome = run_fault_session_with(request, async move {
-        stop_flag.store(true, Ordering::SeqCst);
-        Ok(Vec::new())
-    })
-    .await;
-    apply_fault_outcome(&mut workflow, outcome);
-
-    assert!(stop_polled.load(Ordering::SeqCst));
-    assert!(Session::load(&events_path).is_err());
-    assert!(!directory.join("recording-complete").exists());
-    assert!(matches!(workflow.session, SessionRunState::Faulted { .. }));
-
+    for participation in [false, true] {
+        let mut workflow = harness.workflow();
+        let request = workflow
+            .begin_start(START_UTC_MS + i64::from(participation))
+            .unwrap();
+        let directory = request.directory.clone();
+        let outcome = run_start_session_with(request, std::future::ready(Ok(())), |_| true).await;
+        apply_start_outcome(&mut workflow, outcome);
+        let SessionRunState::Active {
+            controller: Some(controller),
+            ..
+        } = &mut workflow.session
+        else {
+            panic!("active writer required")
+        };
+        controller.fail_writes_for_test().unwrap();
+        let result = if participation {
+            workflow.set_participation(2, true)
+        } else {
+            workflow.set_monitoring_profile(vec![1, 2], 3)
+        };
+        assert!(result.is_err());
+        assert!(matches!(
+            workflow.session,
+            SessionRunState::Active {
+                controller: None,
+                ..
+            }
+        ));
+        assert_eq!(workflow.cameras[0].active_monitoring_profile_id, 1);
+        assert_eq!(workflow.cameras[1].active_monitoring_profile_id, 2);
+        assert!(!workflow.cameras[1].participating);
+        assert!(
+            workflow
+                .cameras
+                .iter()
+                .all(|camera| camera.recorder_status
+                    == backend::recording::RecorderStatus::Recording)
+        );
+        assert!(workflow.set_monitoring_profile(vec![1], 2).is_err());
+        let request = workflow.begin_stop().unwrap();
+        let outcome = run_stop_session_with(request, std::future::ready(Ok(Vec::new()))).await;
+        apply_stop_outcome(&mut workflow, outcome);
+        assert!(matches!(workflow.session, SessionRunState::Idle));
+        assert!(!directory.join("recording-complete").exists());
+    }
     harness.shutdown();
 }
 

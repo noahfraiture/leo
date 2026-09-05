@@ -2,6 +2,17 @@
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
+    Profile(#[from] crate::profiles::Error),
+
+    #[error(
+        "one frame set contains {images} images but the profile permits {limit}; increase the image limit"
+    )]
+    OversizedFrameSet { images: usize, limit: usize },
+
+    #[error("analysis frame sets must be chronological")]
+    UnorderedFrameSets,
+
+    #[error(transparent)]
     Session(#[from] crate::session::Error),
 
     #[error(transparent)]
@@ -22,7 +33,9 @@ pub enum Error {
     #[error("analysis plan contains no analyzable frame sets")]
     NoAnalyzableFrames,
 
-    #[error("analysis overlap must be smaller than frame sets per batch")]
+    #[error(
+        "analysis overlap prevents progress with these image/time limits; reduce overlap or increase the limits"
+    )]
     InvalidBatchOverlap,
 
     #[error("analysis checklist must not be empty")]

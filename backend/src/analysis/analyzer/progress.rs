@@ -1,4 +1,6 @@
-use std::{fs::File, path::Path};
+use std::{fs::File, ops::Range, path::Path};
+
+use crate::profiles::AnalysisProfile;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -6,7 +8,7 @@ use uuid::Uuid;
 use crate::analysis::{agent::AnalysisResponse, error::Error, video::AnalysisWarning};
 
 /// Current on-disk analysis checkpoint schema.
-pub const ANALYSIS_SCHEMA_VERSION: u8 = 2;
+pub const ANALYSIS_SCHEMA_VERSION: u8 = 3;
 
 /// Durable analysis identity, warnings, and completed response prefix for one session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -22,6 +24,10 @@ pub struct AnalysisCheckpoint {
     pub plan_fingerprint: String,
     /// Batch count from the freshly rebuilt canonical plan.
     pub total_batches: usize,
+    /// Complete resolved parameters, independent of later Settings changes.
+    pub analysis_profile: AnalysisProfile,
+    /// Exact frame-set ranges rebuilt and compared before every resume.
+    pub resolved_batches: Vec<Range<usize>>,
     /// Physical recording gaps found while rebuilding the plan.
     pub warnings: Vec<AnalysisWarning>,
     /// Contiguous completed prefix; vector position is the batch index.
@@ -58,6 +64,15 @@ impl AnalysisCheckpoint {
         }
         if self.plan_fingerprint.is_empty() {
             return Err(Error::EmptyCheckpointPlanFingerprint);
+        }
+        self.analysis_profile.validate()?;
+        if self.resolved_batches.len() != self.total_batches
+            || self
+                .resolved_batches
+                .iter()
+                .any(|range| range.start >= range.end)
+        {
+            return Err(Error::CheckpointPlanFingerprint);
         }
         if self.responses.len() > self.total_batches {
             return Err(Error::ProgressExceedsPlan {

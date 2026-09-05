@@ -20,11 +20,20 @@ pub struct StoredSession {
     pub session: Session,
 }
 
-/// Lists marked, completed sessions directly beneath `root`, newest first.
-pub fn list_sessions(root: &Path) -> Result<Vec<StoredSession>> {
+/// Completed sessions and retained capture directories that still need repair.
+#[derive(Debug, Default)]
+pub struct SessionCatalog {
+    pub sessions: Vec<StoredSession>,
+    pub incomplete: Vec<PathBuf>,
+}
+
+/// Lists completed sessions and retained incomplete recordings directly beneath `root`.
+pub fn list_sessions(root: &Path) -> Result<SessionCatalog> {
     let root_metadata = match fs::symlink_metadata(root) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(SessionCatalog::default());
+        }
         Err(error) => return Err(error.into()),
     };
     if !root_metadata.file_type().is_dir() {
@@ -36,6 +45,7 @@ pub fn list_sessions(root: &Path) -> Result<Vec<StoredSession>> {
     }
 
     let mut sessions = Vec::new();
+    let mut incomplete = Vec::new();
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let directory = entry.path();
@@ -61,7 +71,12 @@ pub fn list_sessions(root: &Path) -> Result<Vec<StoredSession>> {
             .is_ok_and(|metadata| metadata.file_type().is_file())
             && fs::symlink_metadata(&marker_path)
                 .is_ok_and(|metadata| metadata.file_type().is_file() && metadata.len() == 0);
+        let has_recordings = fs::symlink_metadata(directory.join("recordings"))
+            .is_ok_and(|metadata| metadata.file_type().is_dir());
         if !valid_files {
+            if has_recordings {
+                incomplete.push(directory.clone());
+            }
             tracing::warn!(path = %directory.display(), "skipping invalid or active session directory");
             continue;
         }
@@ -69,6 +84,9 @@ pub fn list_sessions(root: &Path) -> Result<Vec<StoredSession>> {
         match Session::load(&events_path) {
             Ok(session) => sessions.push(StoredSession { directory, session }),
             Err(_) => {
+                if has_recordings {
+                    incomplete.push(directory.clone());
+                }
                 tracing::warn!(path = %directory.display(), "skipping invalid or active session directory");
             }
         }
@@ -81,7 +99,11 @@ pub fn list_sessions(root: &Path) -> Result<Vec<StoredSession>> {
             .cmp(&left.session.start_utc_ms)
             .then_with(|| right.session.id.cmp(&left.session.id))
     });
-    Ok(sessions)
+    incomplete.sort_by(|left, right| right.cmp(left));
+    Ok(SessionCatalog {
+        sessions,
+        incomplete,
+    })
 }
 
 /// Durably creates the zero-byte completion marker without replacing an existing entry.

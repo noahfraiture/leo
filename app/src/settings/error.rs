@@ -3,7 +3,7 @@ use std::path::PathBuf;
 /// Validation or settings-storage failure.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("settings are invalid")]
+    #[error("{0}")]
     InvalidSettings(#[source] ValidationErrors),
     #[error("failed to read settings file at {path}")]
     ReadSettings {
@@ -52,21 +52,19 @@ pub enum ValidationError {
     BlankCameraUrl { camera_id: u32 },
     #[error("camera {camera_id} has an invalid RTSP URL")]
     InvalidCameraUrl { camera_id: u32 },
-    #[error("camera {camera_id} sampling cadence must be positive whole seconds")]
-    InvalidSamplingCadence { camera_id: u32 },
     #[error("recorder timeout must be positive and fit runtime limits")]
     InvalidRecorderTimeout,
-    #[error("analysis frame sets per prompt must be positive and fit runtime limits")]
-    InvalidAnalysisFrameSetsPerPrompt,
-    #[error("analysis overlap must fit runtime limits and be smaller than frame sets per prompt")]
-    InvalidAnalysisOverlapFrameSets,
+    #[error(transparent)]
+    Profile(#[from] backend::profiles::Error),
+    #[error("next profile ID must be nonzero and greater than every allocated profile ID")]
+    InvalidNextProfileId,
+    #[error("enter an API key and a valid HTTP or HTTPS provider URL in Settings")]
+    InvalidProvider,
     #[error("custom data root must be absolute: {path}")]
     DataRootNotAbsolute { path: PathBuf },
-    #[error("OpenAI base URL must be an absolute HTTP or HTTPS URL")]
-    InvalidOpenAiBaseUrl,
 }
 
 /// All validation failures found in one pass over application settings.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("settings validation failed")]
+#[error("settings validation failed: {}", .0.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))]
 pub struct ValidationErrors(pub Vec<ValidationError>);

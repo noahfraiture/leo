@@ -2,6 +2,9 @@ use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(transparent)]
+    Profile(#[from] crate::profiles::Error),
+
     #[error("session event I/O failed")]
     Io(#[from] std::io::Error),
 
@@ -91,4 +94,19 @@ pub enum Error {
     SequenceOverflow,
 }
 
-pub(crate) type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, Error>;
+
+impl Error {
+    /// Whether a metadata operation may have left the event stream incomplete.
+    pub fn is_write_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::Io(_)
+                | Self::Serialize(_)
+                | Self::SystemTime(_)
+                | Self::UtcTimestampOverflow
+                | Self::SessionOffsetOverflow
+                | Self::SequenceOverflow
+        )
+    }
+}

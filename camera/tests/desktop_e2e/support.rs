@@ -69,21 +69,31 @@ pub fn write_desktop_settings(
                 "name": format!("Salon {id}"),
                 "rtspUrl": format!("rtsp://{address}/axis-media/media.amp"),
                 "initiallyIncludedInAnalysis": true,
-                "sampleEveryMs": 1_000
+                "initialMonitoringProfileId": id
             })
         })
         .collect::<Vec<_>>();
     let settings = json!({
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "nextCameraId": 3,
         "cameras": cameras,
         "dataRoot": data_root,
         "recorderTimeoutSecs": 10,
-        "analysisFrameSetsPerPrompt": analysis_frame_sets_per_prompt,
-        "analysisOverlapFrameSets": 0,
+        "monitoringProfiles": [
+            {"id": 1, "name": "Standard", "sampleEveryMs": 1000},
+            {"id": 2, "name": "Stable", "sampleEveryMs": 2000}
+        ],
+        "nextMonitoringProfileId": 3,
+        "analysisProfiles": [{
+            "id": 1, "name": "Fixture", "model": model,
+            "maxImagesPerPrompt": analysis_frame_sets_per_prompt * 2,
+            "maxPromptSpanMs": (analysis_frame_sets_per_prompt.saturating_sub(1) * 1000).max(1),
+            "overlapFrameSets": 0, "imageSize": "original", "imageDetail": "providerDefault", "maxOutputTokens": null
+        }],
+        "nextAnalysisProfileId": 2,
+        "defaultAnalysisProfileId": 1,
         "openai": {
             "apiKey": api_key,
-            "model": model,
             "baseUrl": base_url
         },
         "logLevel": "info"

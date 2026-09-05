@@ -10,7 +10,7 @@ Use the smallest check supported by the resources currently available. Run comma
 just test-unit test-e2e
 ```
 
-This is a free, local-only check. **Pass:** both recipes exit successfully. They cover unit behavior, local media, recorder reconnect, the mock provider, and the desktop happy, analysis-recovery, and preview-degraded workflows.
+This is a free, local-only check. **Pass:** both recipes exit successfully. They cover unit behavior, local media, recorder reconnect, the mock provider, and the desktop happy, analysis-recovery, and preview-degraded workflows. The latter changes profiles and participation, injects a metadata append failure, verifies both cameras keep recording across it, decodes the retained video, and records a subsequent session. Local evidence checks also verify resizing, image detail, and output-token limits.
 
 ## 2. Local real provider
 
@@ -26,7 +26,7 @@ LEO_RUN_PAID_OPENAI_TEST=1 LEO_E2E_REAL_OPENAI=1 just test-paid
 
 **Requires:** the local and provider checks pass; the actual H.264 RTSP camera or cameras and intended external storage are available; and the provider request has explicit cost approval.
 
-1. Launch `just app`. In Settings, configure the actual camera or cameras, select the external data root, enter the provider key, model, and optional base URL, choose the log level, and confirm the recorder timeout.
+1. Launch `just app`. In Settings, configure the actual camera or cameras, select the external data root, configure monitoring and analysis profiles, enter the provider key and optional base URL, choose the log level, and confirm the recorder timeout.
 2. Save, restart Leo, and confirm Settings shows the intended data path.
 3. Confirm every configured physical preview moves.
 4. Start a session and confirm every configured camera records.
@@ -49,4 +49,9 @@ This is an exploratory recovery check, not part of the required smoke gate. Use 
 
 The important safety property is that uncertain storage is never presented as a completed recording. If the operating system refuses the removal, record the drill as `Not run` rather than forcing a non-disposable device.
 
-Hardware being unavailable is `Not run`; it does not invalidate either local check. Keep credentials and complete RTSP URLs out of reports and logs. Full-duration soak, exact gap arithmetic, process snapshots, power-loss drills, and exhaustive failure injection remain outside this smoke checklist.
+Hardware being unavailable is `Not run`; it does not invalidate either local check. Keep credentials and complete RTSP URLs out of reports and logs. Power-loss drills, process-crash continuity, and exhaustive failure injection remain outside this smoke checklist.
+
+
+## 4. Before customer use: full-day rehearsal
+
+Use the intended cameras and storage for a full working day. Repeatedly start and stop sessions, navigate Settings/Monitor/Analyze, change individual and bulk monitoring profiles and participation, and disconnect/reconnect one camera. On disposable sessions, perform controlled metadata-write failure checks without removing the recording volume. Confirm continued capture where possible, honest last-saved warnings, playable finalized media, discoverable incomplete folders, and the ability to record the next session. Record elapsed duration and any interruptions. Automated local checks do not establish day-long reliability. Provider analysis still needs separate cost approval.

@@ -28,8 +28,9 @@ fn session(
             id: 1,
             name: "Front".into(),
             enabled,
-            sample_every,
+            initial_monitoring_profile_id: sample_every.as_millis() as u32,
         }],
+        monitoring_profiles: crate::tests::monitoring_profiles(),
         actions,
     }
 }
@@ -47,9 +48,9 @@ fn participation(offset_secs: u64, enabled: bool) -> (Duration, OperatorAction) 
 fn interval(offset_secs: u64, sample_every_secs: u64) -> (Duration, OperatorAction) {
     (
         Duration::from_secs(offset_secs),
-        OperatorAction::SetSamplingInterval {
-            camera_id: 1,
-            sample_every: Duration::from_secs(sample_every_secs),
+        OperatorAction::SetMonitoringProfile {
+            camera_ids: vec![1],
+            monitoring_profile_id: (sample_every_secs * 1000) as u32,
         },
     )
 }
@@ -479,7 +480,7 @@ fn camera_without_segments_gets_one_full_session_gap() {
         id: 2,
         name: "Side".into(),
         enabled: false,
-        sample_every: Duration::from_secs(1),
+        initial_monitoring_profile_id: 1000,
     });
 
     let warnings = recording_gap_warnings(&session, &[segment(1, 0, 5_000)])
@@ -506,5 +507,45 @@ fn frame_sets_reject_duplicate_camera_frames_at_one_offset() {
         let error = FrameSet::from_sequences(sequences)
             .expect_err("one camera may contribute at most one frame per offset");
         assert!(error.to_string().contains("duplicate camera 1 frame"));
+    }
+}
+
+#[test]
+fn profile_identity_controls_restarts_and_same_time_final_state() {
+    for (ids, expected) in [
+        (vec![1000], vec![0, 1000, 2000, 3000]),
+        (vec![99], vec![0, 1000, 1500, 2500, 3500]),
+        (vec![99, 1000], vec![0, 1000, 2000, 3000]),
+    ] {
+        let mut session = session(
+            true,
+            Duration::from_secs(1),
+            Duration::from_secs(4),
+            ids.into_iter()
+                .map(|id| {
+                    (
+                        Duration::from_millis(1500),
+                        OperatorAction::SetMonitoringProfile {
+                            camera_ids: vec![1],
+                            monitoring_profile_id: id,
+                        },
+                    )
+                })
+                .collect(),
+        );
+        session
+            .monitoring_profiles
+            .push(crate::profiles::MonitoringProfile {
+                id: 99,
+                name: "Another profile with the same cadence".into(),
+                sample_every_ms: 1000,
+            });
+        assert_eq!(
+            sample_offsets(&session),
+            expected
+                .into_iter()
+                .map(Duration::from_millis)
+                .collect::<Vec<_>>()
+        );
     }
 }

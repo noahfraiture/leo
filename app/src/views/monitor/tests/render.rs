@@ -22,10 +22,7 @@ fn idle_monitor_offers_recording_and_stable_previews() {
 
     assert!(html.contains("Session idle"), "{html}");
     assert_button_disabled(&html, "Start session", false);
-    assert!(
-        html.contains("Initial sampling interval: 1 second"),
-        "{html}"
-    );
+    assert!(html.contains("Monitoring profile"), "{html}");
     assert!(html.contains(&session_root), "{html}");
     assert_two_stable_previews(&html);
 }
@@ -54,7 +51,7 @@ fn active_monitor_keeps_recording_health_and_analysis_controls_separate() {
         "{html}"
     );
     assert!(html.contains("Include in analysis"), "{html}");
-    assert!(html.contains("Sampling interval (seconds)"), "{html}");
+    assert!(html.contains("Monitoring profile"), "{html}");
     assert_two_stable_previews(&html);
 }
 

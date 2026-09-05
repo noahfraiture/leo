@@ -30,12 +30,12 @@ pub fn Sidebar() -> Element {
             .collect::<Vec<_>>()
     };
 
+    let incomplete = operator.read().incomplete_sessions.clone();
     rsx! {
         section {
             class: "flex flex-col gap-4",
             aria_labelledby: "completed-sessions-title",
-            div {
-                class: "flex items-center justify-between gap-2",
+            div { class: "flex items-center justify-between gap-2",
                 h2 {
                     id: "completed-sessions-title",
                     class: "text-lg font-semibold",
@@ -62,11 +62,7 @@ pub fn Sidebar() -> Element {
                     for (session_id, start_utc_ms, status, selected) in rows {
                         li { key: "{session_id}",
                             button {
-                                class: if selected {
-                                    "btn h-auto w-full justify-start border-primary bg-base-100 p-3 text-left"
-                                } else {
-                                    "btn btn-ghost h-auto w-full justify-start p-3 text-left"
-                                },
+                                class: if selected { "btn h-auto w-full justify-start border-primary bg-base-100 p-3 text-left" } else { "btn btn-ghost h-auto w-full justify-start p-3 text-left" },
                                 r#type: "button",
                                 aria_label: "Session {session_id}, UTC milliseconds: {start_utc_ms}, status: {status}",
                                 aria_pressed: selected,
@@ -76,7 +72,9 @@ pub fn Sidebar() -> Element {
                                     state.set_transient_message(None);
                                 },
                                 span { class: "flex min-w-0 flex-1 flex-col gap-1",
-                                    span { class: "text-xs font-normal", "UTC milliseconds: {start_utc_ms}" }
+                                    span { class: "text-xs font-normal",
+                                        "UTC milliseconds: {start_utc_ms}"
+                                    }
                                     span { class: "badge badge-outline", "{status}" }
                                 }
                             }
@@ -84,6 +82,35 @@ pub fn Sidebar() -> Element {
                     }
                 }
             }
+            if !incomplete.is_empty() {
+                h3 { class: "font-semibold", "Recordings needing repair" }
+                for directory in incomplete {
+                    div { class: "rounded-box border border-base-300 p-3 text-sm",
+                        p { "Metadata incomplete; repair before analysis." }
+                        p { class: "break-all", "{directory.display()}" }
+                        button {
+                            class: "btn btn-outline btn-sm mt-2",
+                            r#type: "button",
+                            onclick: move |_| {
+                                let program = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+                                let opened = std::process::Command::new(program)
+                                    .arg(&directory)
+                                    .status()
+                                    .is_ok_and(|status| status.success());
+                                if !opened {
+                                    operator
+                                        .write()
+                                        .set_transient_message(
+                                            Some("Could not open the recording folder.".into()),
+                                        );
+                                }
+                            },
+                            "Open recording folder"
+                        }
+                    }
+                }
+            }
+
         }
     }
 }

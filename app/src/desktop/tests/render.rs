@@ -48,14 +48,17 @@ fn settings_snapshot(root: &Path) -> (SettingsStore, ResolvedSettings) {
             name: "Camera 1".into(),
             rtsp_url: "rtsp://loaded-camera.example/stream".into(),
             initially_included_in_analysis: true,
-            sample_every_ms: 1_000,
+            initial_monitoring_profile_id: 1,
         }],
         data_root: Some(root.join("loaded-data")),
         openai: OpenAiSettings {
             api_key: "loaded-secret-key".into(),
-            model: "loaded-model".into(),
             base_url: Some("https://loaded.provider.example/v1".into()),
         },
+        analysis_profiles: vec![backend::profiles::AnalysisProfile {
+            model: "loaded-model".into(),
+            ..ApplicationSettings::default().analysis_profiles.remove(0)
+        }],
         log_level: LogLevel::Info,
         ..ApplicationSettings::default()
     };
@@ -140,6 +143,10 @@ fn runtime_failure_keeps_guidance_and_saved_settings_available() {
         },
     );
     assert!(settings.contains("loaded-model"), "{settings}");
+    assert!(
+        settings.contains("Recorder preflight failed."),
+        "{settings}"
+    );
 }
 
 #[test]

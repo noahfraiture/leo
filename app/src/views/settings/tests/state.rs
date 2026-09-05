@@ -17,7 +17,7 @@ fn removing_a_camera_clears_only_its_field_errors() {
     for field in [
         SettingsField::CameraName(removed_id),
         SettingsField::CameraRtspUrl(removed_id),
-        SettingsField::CameraSampleEvery(removed_id),
+        SettingsField::CameraMonitoringProfile(removed_id),
     ] {
         state.field_errors.insert(field, "invalid".into());
     }
@@ -36,7 +36,7 @@ fn removing_a_camera_clears_only_its_field_errors() {
         field,
         SettingsField::CameraName(id)
             | SettingsField::CameraRtspUrl(id)
-            | SettingsField::CameraSampleEvery(id)
+            | SettingsField::CameraMonitoringProfile(id)
             if *id == removed_id
     )));
 }
@@ -56,49 +56,38 @@ fn draft_conversion_reports_camera_and_numeric_fields() {
 }
 
 #[test]
-fn draft_round_trips_analysis_batching_fields() {
-    let settings = Settings {
-        analysis_frame_sets_per_prompt: 7,
-        analysis_overlap_frame_sets: 2,
-        ..Settings::default()
-    };
-    let mut state = SettingsPageState::new(settings);
-
-    assert_eq!(state.draft.analysis_frame_sets_per_prompt, "7");
-    assert_eq!(state.draft.analysis_overlap_frame_sets, "2");
-
-    state.draft.analysis_frame_sets_per_prompt = "9".into();
-    state.draft.analysis_overlap_frame_sets = "3".into();
-    let submitted = state.submission().expect("batching draft should be valid");
-    assert_eq!(submitted.analysis_frame_sets_per_prompt, 9);
-    assert_eq!(submitted.analysis_overlap_frame_sets, 3);
+fn profile_drafts_round_trip_editable_limits_and_millisecond_cadence() {
+    let mut state = SettingsPageState::new(Settings::default());
+    state.draft.monitoring_profiles[0].sample_every_ms = "500".into();
+    state.draft.analysis_profiles[0].model = "test-model".into();
+    state.draft.analysis_profiles[0].max_images = "9".into();
+    state.draft.analysis_profiles[0].overlap = "3".into();
+    state.draft.analysis_profiles[0].maximum_edge = "720".into();
+    let submitted = state.submission().unwrap();
+    assert_eq!(submitted.monitoring_profiles[0].sample_every_ms, 500);
+    assert_eq!(submitted.analysis_profiles[0].max_images_per_prompt, 9);
+    assert_eq!(submitted.analysis_profiles[0].overlap_frame_sets, 3);
+    assert_eq!(
+        submitted.analysis_profiles[0].image_size,
+        ImageSizePolicy::MaximumLongEdge(720)
+    );
 }
 
 #[test]
-fn draft_maps_analysis_batching_errors_to_their_fields() {
+fn invalid_profile_drafts_remain_explicit_while_recording_can_be_saved() {
     let mut state = SettingsPageState::new(Settings::default());
-    state.draft.analysis_frame_sets_per_prompt.clear();
-    state.draft.analysis_overlap_frame_sets = "-1".into();
-
-    let errors = match state.submission() {
-        Err(errors) => errors,
-        Ok(_) => panic!("invalid batching draft should fail"),
-    };
-    assert!(errors.contains_key(&SettingsField::AnalysisFrameSetsPerPrompt));
-    assert!(errors.contains_key(&SettingsField::AnalysisOverlapFrameSets));
-
-    state.draft.analysis_frame_sets_per_prompt = "5".into();
-    state.draft.analysis_overlap_frame_sets = "5".into();
-    let errors = match state.submission() {
-        Err(errors) => errors,
-        Ok(_) => panic!("overlapping batching draft should fail"),
-    };
-    assert_eq!(
-        errors
-            .get(&SettingsField::AnalysisOverlapFrameSets)
-            .map(String::as_str),
-        Some(
-            "Enter a nonnegative whole number within runtime limits and smaller than frame sets per prompt."
-        )
+    state.draft.monitoring_profiles[0].sample_every_ms.clear();
+    state.draft.analysis_profiles[0].overlap = "-1".into();
+    let submitted = state
+        .submission()
+        .expect("valid recording settings can still be saved");
+    submitted.validate_recording().unwrap();
+    assert!(submitted.validate_monitoring().is_err());
+    assert!(submitted.validate_analysis().is_err());
+    assert!(
+        state.draft.monitoring_profiles[0]
+            .sample_every_ms
+            .is_empty()
     );
+    assert_eq!(state.draft.analysis_profiles[0].overlap, "-1");
 }

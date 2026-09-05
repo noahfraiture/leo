@@ -1,4 +1,4 @@
-use std::{cell::Cell, fs, num::NonZeroUsize, path::Path};
+use std::{cell::Cell, fs, path::Path};
 
 use rig_core::{
     completion::Message,
@@ -27,7 +27,7 @@ async fn analyze_with_mock(
 ) -> Result<AnalysisCheckpoint, Error> {
     analyze_session_with(
         request,
-        |_| {
+        |_, _| {
             constructions.set(constructions.get() + 1);
             Ok(Agent::new(model))
         },
@@ -62,23 +62,23 @@ fn write_session(directory: &Path, end_offset_ms: u64) {
         .expect("recording directory should be created");
     let events = [
         json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "sequence": 0,
             "session_id": SESSION_ID,
             "utc_ms": START_UTC_MS,
             "session_offset_ms": 0,
             "action": {
-                "type": "session_started",
+                "type": "session_started", "monitoring_profiles": crate::tests::monitoring_profiles(),
                 "cameras": [{
                     "camera_id": 1,
                     "name": "Camera 1",
                     "enabled": true,
-                    "sample_every_ms": 1_000
+                    "initial_monitoring_profile_id": 1_000
                 }]
             }
         }),
         json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "sequence": 1,
             "session_id": SESSION_ID,
             "utc_ms": START_UTC_MS + i64::try_from(end_offset_ms).unwrap(),
@@ -141,11 +141,10 @@ fn request(directory: &Path, checklist: &str) -> AnalyzeSession {
     AnalyzeSession {
         directory: directory.to_owned(),
         checklist: checklist.into(),
-        frame_sets_per_prompt: NonZeroUsize::new(5).unwrap(),
-        overlap_frame_sets: 0,
+        profile: crate::tests::analysis_profile(5, 0),
+        checkpoint_path: None,
         openai: OpenAiConfig {
             api_key: "test-key".into(),
-            model: "test-model".into(),
             base_url: None,
         },
     }
@@ -508,12 +507,13 @@ async fn full_local_ffmpeg_and_mock_model_analysis_uses_pre_and_post_gap_segment
     let constructions = Cell::new(0);
     let mut snapshots = Vec::new();
 
-    let checkpoint = analyze_with_mock(
-        request(&directory, "Start the exercise"),
-        model,
-        &constructions,
-        |checkpoint| snapshots.push(checkpoint),
-    )
+    let mut request = request(&directory, "Start the exercise");
+    request.profile.max_output_tokens = Some(1024);
+    request.profile.image_detail = crate::profiles::ImageDetailPolicy::High;
+    request.profile.image_size = crate::profiles::ImageSizePolicy::MaximumLongEdge(320);
+    let checkpoint = analyze_with_mock(request, model, &constructions, |checkpoint| {
+        snapshots.push(checkpoint)
+    })
     .await
     .expect("local analysis should complete");
 
@@ -547,6 +547,7 @@ async fn full_local_ffmpeg_and_mock_model_analysis_uses_pre_and_post_gap_segment
 
     let requests = recorded_model.requests();
     assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].max_tokens, Some(1024));
     let Message::User { content } = requests[0]
         .chat_history
         .iter()
@@ -565,6 +566,7 @@ async fn full_local_ffmpeg_and_mock_model_analysis_uses_pre_and_post_gap_segment
     assert_eq!(images.len(), 3);
     for image in images {
         assert_eq!(image.media_type, Some(ImageMediaType::JPEG));
+        assert_eq!(image.detail, Some(rig_core::message::ImageDetail::High));
         assert!(matches!(
             &image.data,
             DocumentSourceKind::Base64(data) if !data.is_empty()

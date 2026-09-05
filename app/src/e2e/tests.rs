@@ -5,10 +5,9 @@ use super::{
     loopback_proxy_is_bypassed, provider_configuration_is_safe, selected_driver_scenario,
 };
 
-fn openai_config(api_key: &str, model: &str, base_url: Option<&str>) -> OpenAiConfig {
+fn openai_config(api_key: &str, base_url: Option<&str>) -> OpenAiConfig {
     OpenAiConfig {
         api_key: api_key.into(),
-        model: model.into(),
         base_url: base_url.map(str::to_owned),
     }
 }
@@ -16,21 +15,17 @@ fn openai_config(api_key: &str, model: &str, base_url: Option<&str>) -> OpenAiCo
 #[test]
 fn active_provider_configuration_requires_loopback_or_both_paid_gates() {
     assert!(provider_configuration_is_safe(
-        Some(&openai_config(
-            "key",
-            "model",
-            Some("http://127.42.0.1:3000/v1"),
-        )),
+        Some(&openai_config("key", Some("http://127.42.0.1:3000/v1"),)),
         None,
         None,
     ));
     assert!(provider_configuration_is_safe(
-        Some(&openai_config("key", "model", Some("http://[::1]:3000/v1"))),
+        Some(&openai_config("key", Some("http://[::1]:3000/v1"))),
         None,
         None,
     ));
     assert!(provider_configuration_is_safe(
-        Some(&openai_config("key", "model", None)),
+        Some(&openai_config("key", None)),
         Some("1"),
         Some("1"),
     ));
@@ -38,45 +33,24 @@ fn active_provider_configuration_requires_loopback_or_both_paid_gates() {
     for configuration in [
         (None, None, None),
         (
-            Some(openai_config(
-                "key",
-                "model",
-                Some("https://api.openai.com/v1"),
-            )),
+            Some(openai_config("key", Some("https://api.openai.com/v1"))),
             None,
             None,
         ),
         (
-            Some(openai_config(
-                "key",
-                "model",
-                Some("http://localhost:3000/v1"),
-            )),
+            Some(openai_config("key", Some("http://localhost:3000/v1"))),
             None,
             None,
         ),
-        (Some(openai_config("key", "model", None)), Some("1"), None),
+        (Some(openai_config("key", None)), Some("1"), None),
+        (Some(openai_config(" ", None)), Some("1"), Some("1")),
         (
-            Some(openai_config(" ", "model", None)),
-            Some("1"),
-            Some("1"),
-        ),
-        (Some(openai_config("key", " ", None)), Some("1"), Some("1")),
-        (
-            Some(openai_config(
-                "key",
-                "model",
-                Some("https://api.openai.com/v1"),
-            )),
+            Some(openai_config("key", Some("https://api.openai.com/v1"))),
             Some("1"),
             Some("1"),
         ),
         (
-            Some(openai_config(
-                " ",
-                "model",
-                Some("http://127.0.0.1:3000/v1"),
-            )),
+            Some(openai_config(" ", Some("http://127.0.0.1:3000/v1"))),
             None,
             None,
         ),

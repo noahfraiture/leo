@@ -55,12 +55,14 @@ impl Harness {
         )
         .expect("test recorder runtime should start");
         let workflow = OperatorState::new(
-            cameras,
+            crate::test_settings(
+                cameras,
+                openai,
+                frame_sets_per_prompt.get(),
+                overlap_frame_sets,
+            ),
             temporary.path().join("sessions"),
             recorder,
-            openai,
-            frame_sets_per_prompt,
-            overlap_frame_sets,
         )
         .expect("workflow should initialize");
 
@@ -95,14 +97,14 @@ fn camera_settings() -> Vec<CameraSettings> {
             name: "Salon 1".into(),
             rtsp_url: "rtsp://camera-one.example/live".into(),
             initially_included_in_analysis: true,
-            sample_every_ms: 1_000,
+            initial_monitoring_profile_id: 1,
         },
         CameraSettings {
             id: 2,
             name: "Salon 2".into(),
             rtsp_url: "rtsp://camera-two.example/live".into(),
             initially_included_in_analysis: false,
-            sample_every_ms: 2_000,
+            initial_monitoring_profile_id: 2,
         },
     ]
 }
@@ -111,11 +113,14 @@ fn start_active(workflow: &mut OperatorState) -> PathBuf {
     let request = workflow
         .begin_start(START_UTC_MS)
         .expect("idle workflow should begin starting");
-    let controller =
-        SessionController::create(request.events_path.clone(), request.session_cameras.clone())
-            .expect("session controller should be created");
+    let controller = SessionController::create(
+        request.events_path.clone(),
+        request.session_cameras.clone(),
+        crate::test_monitoring_profiles(),
+    )
+    .expect("session controller should be created");
     let directory = request.directory.clone();
-    workflow.finish_start(directory.clone(), controller);
+    workflow.finish_start(directory.clone(), Some(controller));
     directory
 }
 
@@ -130,23 +135,23 @@ fn write_session(
     fs::create_dir_all(&directory).expect("session directory should be created");
     let events = [
         json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "sequence": 0,
             "session_id": session_id,
             "utc_ms": start_utc_ms,
             "session_offset_ms": 0,
             "action": {
-                "type": "session_started",
+                "type": "session_started", "monitoring_profiles": crate::test_monitoring_profiles(),
                 "cameras": [{
                     "camera_id": 1,
                     "name": "Salon 1",
                     "enabled": true,
-                    "sample_every_ms": 1_000
+                    "initial_monitoring_profile_id": 1
                 }]
             }
         }),
         json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "sequence": 1,
             "session_id": session_id,
             "utc_ms": start_utc_ms + 1_000,
@@ -188,11 +193,13 @@ fn checkpoint(
     responses: Vec<AnalysisResponse>,
 ) -> AnalysisCheckpoint {
     AnalysisCheckpoint {
-        schema_version: 2,
+        schema_version: 3,
         session_id,
         checklist: checklist.into(),
         plan_fingerprint: "0123456789abcdef".into(),
         total_batches,
+        analysis_profile: crate::test_analysis_profile(5, 0),
+        resolved_batches: (0..total_batches).map(|i| i..i + 1).collect(),
         warnings: vec![AnalysisWarning::RecordingGap {
             camera_id: 2,
             start_offset_ms: 1_000,
@@ -217,9 +224,9 @@ fn prepare_analysis_session(
     if let Some(saved) = saved {
         fs::write(
             directory.join("analysis.json"),
-            serde_json::to_vec_pretty(saved).expect("v2 checkpoint should serialize"),
+            serde_json::to_vec_pretty(saved).expect("current checkpoint should serialize"),
         )
-        .expect("v2 checkpoint should be written");
+        .expect("current checkpoint should be written");
     }
     harness
         .workflow
@@ -315,12 +322,13 @@ fn begin_start_creates_storage_and_records_every_camera() {
         request
             .session_cameras
             .iter()
-            .map(|camera| (camera.id, camera.enabled, camera.sample_every))
+            .map(|camera| (
+                camera.id,
+                camera.enabled,
+                camera.initial_monitoring_profile_id
+            ))
             .collect::<Vec<_>>(),
-        [
-            (1, true, Duration::from_secs(1)),
-            (2, false, Duration::from_secs(2)),
-        ]
+        [(1, true, 1), (2, false, 2),]
     );
     assert!(
         harness
@@ -361,6 +369,8 @@ fn stop_transitions_active_to_stopping_then_idle_and_refreshes() {
     ));
     request
         .controller
+        .as_mut()
+        .unwrap()
         .apply(OperatorAction::EndSession)
         .expect("session end should be written");
     mark_recording_complete(&directory).expect("session should be marked complete");
@@ -398,9 +408,15 @@ fn duplicate_start_and_stop_requests_are_rejected() {
     assert!(harness.workflow.begin_start(START_UTC_MS + 1).is_err());
     assert!(harness.workflow.begin_stop().is_err());
 
-    let controller = SessionController::create(request.events_path, request.session_cameras)
-        .expect("controller should be created");
-    harness.workflow.finish_start(request.directory, controller);
+    let controller = SessionController::create(
+        request.events_path,
+        request.session_cameras,
+        crate::test_monitoring_profiles(),
+    )
+    .expect("controller should be created");
+    harness
+        .workflow
+        .finish_start(request.directory, Some(controller));
     harness
         .workflow
         .begin_stop()
@@ -463,9 +479,15 @@ fn fatal_event_while_starting_cannot_reactivate_the_session() {
         .begin_fault("recorder failed after readiness".into(), true)
         .expect("a starting recorder fault should request cleanup");
     assert!(cleanup.controller.is_none());
-    let controller = SessionController::create(request.events_path, request.session_cameras)
-        .expect("late session controller should be constructible");
-    harness.workflow.finish_start(request.directory, controller);
+    let controller = SessionController::create(
+        request.events_path,
+        request.session_cameras,
+        crate::test_monitoring_profiles(),
+    )
+    .expect("late session controller should be constructible");
+    harness
+        .workflow
+        .finish_start(request.directory, Some(controller));
 
     assert!(matches!(
         harness.workflow.session,
@@ -540,10 +562,16 @@ fn reconnecting_before_finish_start_is_preserved() {
             status: RecorderStatus::Reconnecting,
             message: Some("camera stream interrupted".into()),
         });
-    let controller = SessionController::create(request.events_path, request.session_cameras)
-        .expect("session controller should start");
+    let controller = SessionController::create(
+        request.events_path,
+        request.session_cameras,
+        crate::test_monitoring_profiles(),
+    )
+    .expect("session controller should start");
 
-    harness.workflow.finish_start(request.directory, controller);
+    harness
+        .workflow
+        .finish_start(request.directory, Some(controller));
 
     assert_eq!(
         harness.workflow.cameras[0].recorder_status,
@@ -601,9 +629,12 @@ fn participation_is_written_before_display_state_changes() {
     let controller = SessionController::create(
         request.events_path,
         vec![request.session_cameras[0].clone()],
+        crate::test_monitoring_profiles(),
     )
     .expect("mismatched controller should be created for the failure test");
-    harness.workflow.finish_start(request.directory, controller);
+    harness
+        .workflow
+        .finish_start(request.directory, Some(controller));
 
     let error = harness
         .workflow
@@ -627,10 +658,10 @@ fn cadence_is_written_before_display_state_changes() {
 
     let error = harness
         .workflow
-        .set_sampling_interval(2, Duration::ZERO)
+        .set_monitoring_profile(vec![2], 0)
         .expect_err("controller must reject zero cadence");
 
-    assert_eq!(harness.workflow.cameras[1].config.sample_every_ms, 2_000);
+    assert_eq!(harness.workflow.cameras[1].active_monitoring_profile_id, 2);
     let cleanup = harness
         .workflow
         .begin_fault(error.to_string(), false)
@@ -856,10 +887,15 @@ fn retry_preserves_the_saved_checkpoint() {
     assert_eq!(saved_checkpoint(&harness.workflow, session_id), &persisted);
     assert_eq!(harness.workflow.running_analysis_id, None);
 
+    harness.workflow.analysis_profiles.clear();
+    harness.workflow.selected_analysis_profile_id = 99;
+    harness.workflow.model_config_error = Some("Current Settings are invalid".into());
     let retry = harness
         .workflow
         .begin_analysis("Another replacement".into())
         .expect("retry should begin");
+    assert_eq!(first.profile, persisted.analysis_profile);
+    assert_eq!(retry.profile, persisted.analysis_profile);
     assert_eq!(first.directory, directory);
     assert_eq!(retry.directory, directory);
     assert_eq!(first.checklist, "Persisted retry checklist");
@@ -867,5 +903,32 @@ fn retry_preserves_the_saved_checkpoint() {
     assert_eq!(saved_checkpoint(&harness.workflow, session_id), &persisted);
     assert_eq!(harness.workflow.analysis_error, None);
     assert_eq!(harness.workflow.running_analysis_id, Some(session_id));
+    harness.shutdown();
+}
+
+#[test]
+fn new_analysis_requires_idle_and_discards_only_the_previous_checkpoint() {
+    let mut harness = Harness::new();
+    let id = Uuid::from_u128(77);
+    let saved = checkpoint(id, "Original checklist", 2, vec![]);
+    let directory = prepare_analysis_session(&mut harness, id, Some(&saved));
+    let events = fs::read(directory.join("events.jsonl")).unwrap();
+    harness.workflow.begin_analysis("ignored".into()).unwrap();
+    assert!(harness.workflow.reset_analysis(id).is_err());
+    assert!(directory.join("analysis.json").exists());
+    harness
+        .workflow
+        .analysis_failed(id, "test interruption".into());
+    harness.workflow.reset_analysis(id).unwrap();
+    assert!(!directory.join("analysis.json").exists());
+    assert_eq!(fs::read(directory.join("events.jsonl")).unwrap(), events);
+    assert!(directory.join("recording-complete").exists());
+    harness.workflow.analysis_profiles[0].model = "new-model".into();
+    let next = harness
+        .workflow
+        .begin_analysis("New checklist".into())
+        .unwrap();
+    assert_eq!(next.profile.model, "new-model");
+    assert_eq!(next.checklist, "New checklist");
     harness.shutdown();
 }

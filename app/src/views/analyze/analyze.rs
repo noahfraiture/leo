@@ -31,7 +31,10 @@ pub fn Analyze() -> Element {
     };
 
     rsx! {
-        if let Some((session_id, start_utc_ms, duration_ms, camera_count, directory, checkpoint)) = selected {
+        if let Some(
+            (session_id, start_utc_ms, duration_ms, camera_count, directory, checkpoint),
+        ) = selected
+        {
             SelectedSession {
                 key: "{session_id}",
                 session_id,
@@ -67,7 +70,17 @@ fn SelectedSession(
         (
             !matches!(state.session, SessionRunState::Idle),
             state.running_analysis_id,
-            state.model_config_error.clone(),
+            if checkpoint
+                .as_ref()
+                .is_ok_and(|checkpoint| checkpoint.is_some())
+            {
+                state
+                    .openai
+                    .is_none()
+                    .then(|| "Enter valid provider credentials in Settings before resuming.".into())
+            } else {
+                state.model_config_error.clone()
+            },
             state
                 .analysis_error
                 .as_ref()
@@ -107,7 +120,11 @@ fn SelectedSession(
             section {
                 class: "rounded-box border border-base-300 p-4",
                 aria_labelledby: "session-recap-title",
-                h2 { id: "session-recap-title", class: "mb-3 text-lg font-semibold", "Session recap" }
+                h2 {
+                    id: "session-recap-title",
+                    class: "mb-3 text-lg font-semibold",
+                    "Session recap"
+                }
                 dl { class: "grid gap-x-4 gap-y-2 text-sm sm:grid-cols-[max-content_minmax(0,1fr)]",
                     dt { class: "font-medium", "Session UUID" }
                     dd { class: "break-all font-mono", "{session_id}" }
@@ -131,9 +148,16 @@ fn SelectedSession(
             }
 
             if recording_blocked {
-                p { class: "alert alert-warning", "Analysis is unavailable while recording is active." }
+                p { class: "alert alert-warning",
+                    "Analysis is unavailable while recording is active."
+                }
             } else if running {
-                p { class: "alert alert-info", role: "status", aria_live: "polite", "Analysis is running." }
+                p {
+                    class: "alert alert-info",
+                    role: "status",
+                    aria_live: "polite",
+                    "Analysis is running."
+                }
             } else if running_id.is_some() {
                 p { class: "alert alert-info", "Another session analysis is running." }
             }
@@ -155,6 +179,7 @@ fn SelectedSession(
 
             match checkpoint {
                 Ok(Some(checkpoint)) => rsx! {
+                    ReplaceAnalysis { session_id, disabled: recording_blocked || running_id.is_some() }
                     PersistedChecklist {
                         session_id,
                         checklist: checkpoint.checklist.clone(),
@@ -163,9 +188,11 @@ fn SelectedSession(
                     CheckpointResults { checkpoint }
                 },
                 Ok(None) => rsx! {
+                    AnalysisProfileSelection { disabled: recording_blocked || running_id.is_some() }
                     NewChecklist { session_id, action_disabled }
                 },
                 Err(_) => rsx! {
+                    ReplaceAnalysis { session_id, disabled: recording_blocked || running_id.is_some() }
                     InvalidChecklist { session_id }
                 },
             }
@@ -299,9 +326,9 @@ fn AnalysisAction(
                         operator_state.write().set_transient_message(None);
                         operator::spawn_analysis(operator_state, request, session_id);
                     }
-                    Err(error) => operator_state
-                        .write()
-                        .set_transient_message(Some(error.to_string())),
+                    Err(error) => {
+                        operator_state.write().set_transient_message(Some(error.to_string()))
+                    }
                 }
             },
             "{label}"
@@ -336,12 +363,36 @@ fn CheckpointResults(checkpoint: AnalysisCheckpoint) -> Element {
         })
         .collect::<Vec<_>>();
     let latest = checkpoint.responses.last().cloned();
+    let image_size = match checkpoint.analysis_profile.image_size {
+        backend::profiles::ImageSizePolicy::Original => "original dimensions".into(),
+        backend::profiles::ImageSizePolicy::MaximumLongEdge(edge) => {
+            format!("up to {edge} pixels on the longest edge")
+        }
+    };
+    let image_detail = match checkpoint.analysis_profile.image_detail {
+        backend::profiles::ImageDetailPolicy::ProviderDefault => "provider default",
+        backend::profiles::ImageDetailPolicy::Low => "low",
+        backend::profiles::ImageDetailPolicy::High => "high",
+    };
+    let output_limit = checkpoint.analysis_profile.max_output_tokens.map_or_else(
+        || "provider default".into(),
+        |tokens| format!("{tokens} tokens"),
+    );
 
     rsx! {
         section {
             class: "flex flex-col gap-4 rounded-box border border-base-300 p-4",
             aria_labelledby: "analysis-results-title",
             h2 { id: "analysis-results-title", class: "text-lg font-semibold", "Analysis results" }
+            p { class: "text-sm",
+                "Profile: {checkpoint.analysis_profile.name}. Model: {checkpoint.analysis_profile.model}."
+            }
+            p { class: "text-sm",
+                "Maximum images: {checkpoint.analysis_profile.max_images_per_prompt}; maximum span: {checkpoint.analysis_profile.max_prompt_span_ms} ms; overlap: {checkpoint.analysis_profile.overlap_frame_sets} frame sets."
+            }
+            p { class: "text-sm",
+                "Image size: {image_size}; detail: {image_detail}; output limit: {output_limit}."
+            }
             div { class: "flex flex-col gap-2",
                 progress {
                     class: "progress progress-primary w-full",
@@ -352,12 +403,17 @@ fn CheckpointResults(checkpoint: AnalysisCheckpoint) -> Element {
                 p { class: "text-sm", "Completed batches: {completed} of {total}" }
             }
             if !warnings.is_empty() {
-                section { class: "flex flex-col gap-2", aria_labelledby: "recording-warnings-title",
-                    h3 { id: "recording-warnings-title", class: "font-semibold", "Recording warnings" }
+                section {
+                    class: "flex flex-col gap-2",
+                    aria_labelledby: "recording-warnings-title",
+                    h3 {
+                        id: "recording-warnings-title",
+                        class: "font-semibold",
+                        "Recording warnings"
+                    }
                     ul { class: "flex flex-col gap-2",
                         for (camera_id, start_offset_ms, end_offset_ms) in warnings {
-                            li {
-                                class: "alert alert-warning text-sm",
+                            li { class: "alert alert-warning text-sm",
                                 "Recording gap: camera {camera_id}, {start_offset_ms} ms to {end_offset_ms} ms"
                             }
                         }
@@ -367,14 +423,18 @@ fn CheckpointResults(checkpoint: AnalysisCheckpoint) -> Element {
             if completed == 0 {
                 p { class: "text-sm", "No completed batches yet." }
             } else {
-                section { class: "flex flex-col gap-2", aria_labelledby: "observations-title",
+                section {
+                    class: "flex flex-col gap-2",
+                    aria_labelledby: "observations-title",
                     h3 { id: "observations-title", class: "font-semibold", "Observations" }
                     if observations.is_empty() {
                         p { class: "text-sm", "No observations reported." }
                     } else {
                         ol { class: "flex flex-col gap-2",
                             for (index, (timestamp, description)) in observations.into_iter().enumerate() {
-                                li { key: "{index}", class: "rounded-box bg-base-200 p-3 text-sm",
+                                li {
+                                    key: "{index}",
+                                    class: "rounded-box bg-base-200 p-3 text-sm",
                                     p { class: "font-mono font-medium", "{timestamp}" }
                                     p { "{description}" }
                                 }
@@ -383,15 +443,29 @@ fn CheckpointResults(checkpoint: AnalysisCheckpoint) -> Element {
                     }
                 }
                 if let Some(latest) = latest {
-                    section { class: "flex flex-col gap-2", aria_labelledby: "sequence-summary-title",
-                        h3 { id: "sequence-summary-title", class: "font-semibold", "Latest sequence summary" }
+                    section {
+                        class: "flex flex-col gap-2",
+                        aria_labelledby: "sequence-summary-title",
+                        h3 {
+                            id: "sequence-summary-title",
+                            class: "font-semibold",
+                            "Latest sequence summary"
+                        }
                         p { class: "text-sm", "{latest.sequence_summary}" }
                     }
-                    section { class: "flex flex-col gap-2", aria_labelledby: "checklist-progress-title",
-                        h3 { id: "checklist-progress-title", class: "font-semibold", "Latest checklist status" }
+                    section {
+                        class: "flex flex-col gap-2",
+                        aria_labelledby: "checklist-progress-title",
+                        h3 {
+                            id: "checklist-progress-title",
+                            class: "font-semibold",
+                            "Latest checklist status"
+                        }
                         ul { class: "flex flex-col gap-2",
                             for (index, item) in latest.checklist_progress.into_iter().enumerate() {
-                                li { key: "{index}", class: "rounded-box border border-base-300 p-3 text-sm",
+                                li {
+                                    key: "{index}",
+                                    class: "rounded-box border border-base-300 p-3 text-sm",
                                     div { class: "flex flex-wrap items-center justify-between gap-2",
                                         p { class: "font-medium", "{item.item}" }
                                         span { class: "badge badge-outline", "{item.status}" }
@@ -401,6 +475,75 @@ fn CheckpointResults(checkpoint: AnalysisCheckpoint) -> Element {
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn AnalysisProfileSelection(disabled: bool) -> Element {
+    let mut operator = use_context::<Signal<OperatorState>>();
+    let profiles = operator.read().analysis_profiles.clone();
+    let selected = operator.read().selected_analysis_profile_id;
+    rsx! {
+        div { class: "flex flex-col gap-2",
+            label { r#for: "analysis-profile", "Analysis profile" }
+            select {
+                id: "analysis-profile",
+                class: "select select-bordered",
+                disabled,
+                value: "{selected}",
+                onchange: move |event| {
+                    operator.write().selected_analysis_profile_id = event
+                        .value()
+                        .parse()
+                        .unwrap_or(0);
+                },
+                for profile in profiles {
+                    option { value: "{profile.id}", "{profile.name}" }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ReplaceAnalysis(session_id: Uuid, disabled: bool) -> Element {
+    let mut operator = use_context::<Signal<OperatorState>>();
+    let mut confirming = use_signal(|| false);
+    rsx! {
+        div { class: "flex flex-col items-start gap-2",
+            if confirming() {
+                p {
+                    "Discard this session's analysis results to choose a different profile? The video and session events are kept."
+                }
+                button {
+                    class: "btn btn-warning btn-sm",
+                    r#type: "button",
+                    disabled,
+                    onclick: move |_| {
+                        let result = operator.write().reset_analysis(session_id);
+                        if let Err(error) = result {
+                            operator.write().set_transient_message(Some(error.to_string()));
+                        }
+                        confirming.set(false);
+                    },
+                    "Discard analysis and choose a profile"
+                }
+                button {
+                    class: "btn btn-ghost btn-sm",
+                    r#type: "button",
+                    onclick: move |_| confirming.set(false),
+                    "Cancel"
+                }
+            } else {
+                button {
+                    class: "btn btn-outline btn-sm",
+                    r#type: "button",
+                    disabled,
+                    onclick: move |_| confirming.set(true),
+                    "Start a new analysis"
                 }
             }
         }

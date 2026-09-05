@@ -20,15 +20,15 @@ fn populated_settings(data_root: PathBuf) -> Settings {
             name: "Room 1".into(),
             rtsp_url: "rtsp://operator:password@camera.example/stream".into(),
             initially_included_in_analysis: false,
-            sample_every_ms: 2_000,
+            initial_monitoring_profile_id: 2,
         }],
         data_root: Some(data_root),
         recorder_timeout_secs: 23,
-        analysis_frame_sets_per_prompt: 7,
-        analysis_overlap_frame_sets: 2,
+        monitoring_profiles: crate::test_monitoring_profiles(),
+        next_monitoring_profile_id: 4,
+        analysis_profiles: vec![crate::test_analysis_profile(7, 2)],
         openai: OpenAiSettings {
             api_key: "test-secret-key".into(),
-            model: "test-model".into(),
             base_url: Some("https://provider.example/v1".into()),
         },
         log_level: LogLevel::Trace,
@@ -63,8 +63,11 @@ fn settings_round_trip_and_resolve_runtime_values() {
         resolved.recorder_settings.io_timeout,
         Duration::from_secs(23)
     );
-    assert_eq!(resolved.analysis_frame_sets_per_prompt.get(), 7);
-    assert_eq!(resolved.analysis_overlap_frame_sets, 2);
+    assert_eq!(
+        resolved.settings.analysis_profiles[0].max_images_per_prompt,
+        7
+    );
+    assert_eq!(resolved.settings.analysis_profiles[0].overlap_frame_sets, 2);
     let bytes = fs::read(&store.settings_path).unwrap();
     assert!(bytes.ends_with(b"}\n"));
 }
@@ -109,4 +112,46 @@ fn saved_settings_are_owner_only() {
         .permissions()
         .mode();
     assert_eq!(mode & 0o777, 0o600);
+}
+
+#[test]
+fn malformed_optional_sections_keep_recording_usable_and_leave_the_source_file_unchanged() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(root.path());
+    let valid = populated_settings(root.path().join("data"));
+    for key in [
+        "monitoringProfiles",
+        "analysisProfiles",
+        "openai",
+        "initiallyIncludedInAnalysis",
+    ] {
+        let mut value = serde_json::to_value(&valid).unwrap();
+        if key == "initiallyIncludedInAnalysis" {
+            value["cameras"][0][key] = serde_json::json!("invalid");
+        } else {
+            value[key] = serde_json::json!({"bad": "private-value"});
+        }
+        let bytes = serde_json::to_vec(&value).unwrap();
+        fs::create_dir_all(store.settings_path.parent().unwrap()).unwrap();
+        fs::write(&store.settings_path, &bytes).unwrap();
+        let loaded = store.load().unwrap().unwrap();
+        loaded.settings.validate_recording().unwrap();
+        let warning = if key == "monitoringProfiles" || key == "initiallyIncludedInAnalysis" {
+            loaded.monitoring_error
+        } else {
+            loaded.analysis_error
+        };
+        assert!(warning.unwrap().contains(key));
+        assert_eq!(fs::read(&store.settings_path).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn diagnostic_logging_failure_does_not_block_recording_storage() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(root.path());
+    fs::create_dir_all(&store.default_data_root).unwrap();
+    fs::write(store.default_data_root.join("logs"), b"occupied").unwrap();
+    store.save(&Settings::default()).unwrap();
+    assert!(store.load().unwrap().unwrap().sessions_root.is_dir());
 }

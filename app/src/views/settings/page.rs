@@ -3,6 +3,7 @@ use dioxus::prelude::*;
 use super::{
     application::ApplicationSettingsSection,
     camera::CameraSettingsSection,
+    profiles::{AnalysisProfilesSection, MonitoringProfilesSection},
     provider::ProviderSettingsSection,
     recording::RecordingSettingsSection,
     state::{SettingsContext, SettingsPageState, camera_has_error},
@@ -29,9 +30,7 @@ pub fn Settings() -> Element {
                     class: "text-2xl font-semibold",
                     "Application settings"
                 }
-                p { class: "mt-1 text-sm",
-                    "Configure Leo, save, then restart to apply every change."
-                }
+                p { class: "mt-1 text-sm", "Configure Leo, save, then restart to apply every change." }
             }
 
             SettingsNotices {}
@@ -60,17 +59,15 @@ pub fn Settings() -> Element {
                     div { class: "flex min-w-0 flex-col gap-6",
                         StorageSettingsSection {}
                         RecordingSettingsSection {}
+                        MonitoringProfilesSection {}
+                        AnalysisProfilesSection {}
                         ProviderSettingsSection {}
                     }
                 }
                 ApplicationSettingsSection {}
 
                 div { class: "flex flex-col items-start gap-2 sm:flex-row sm:items-center",
-                    button {
-                        class: "btn btn-primary",
-                        r#type: "submit",
-                        "Save settings"
-                    }
+                    button { class: "btn btn-primary", r#type: "submit", "Save settings" }
                 }
             }
         }
@@ -83,7 +80,17 @@ fn SettingsNotices() -> Element {
     let state = use_context::<SettingsContext>().state;
     let page = state.read();
 
+    let startup_error =
+        try_consume_context::<crate::desktop::RuntimeAvailability>().and_then(|availability| {
+            match availability {
+                crate::desktop::RuntimeAvailability::Failed { message } => Some(message),
+                _ => None,
+            }
+        });
     rsx! {
+        if let Some(error) = startup_error {
+            div { class: "alert alert-warning mb-4", role: "alert", "{error}" }
+        }
         if let Some(error) = &page.save_error {
             div { class: "alert alert-error mb-4", role: "alert", "{error}" }
         }

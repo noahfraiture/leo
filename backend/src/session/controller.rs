@@ -10,10 +10,13 @@ use std::{
 
 use uuid::Uuid;
 
+use crate::profiles::MonitoringProfile;
+
 use super::{
     error::{Error, Result},
     event_log::{
-        SCHEMA_VERSION, SessionAction, SessionCamera, SessionEvent, camera_ids, duration_to_millis,
+        SCHEMA_VERSION, SessionAction, SessionCamera, SessionEvent, camera_ids, validate_change,
+        validate_snapshot,
     },
 };
 
@@ -22,10 +25,10 @@ use super::{
 pub enum OperatorAction {
     /// Includes or excludes a camera from subsequent software sampling.
     SetCameraParticipation { camera_id: u32, enabled: bool },
-    /// Changes a camera's software sampling cadence.
-    SetSamplingInterval {
-        camera_id: u32,
-        sample_every: Duration,
+    /// Applies one monitoring profile atomically to the selected cameras.
+    SetMonitoringProfile {
+        camera_ids: Vec<u32>,
+        monitoring_profile_id: u32,
     },
     /// Ends the persisted session timeline; recorder shutdown remains the caller's responsibility.
     EndSession,
@@ -35,16 +38,26 @@ pub enum OperatorAction {
 #[derive(Debug)]
 pub struct SessionController {
     log: SessionLog,
+    monitoring_profiles: Vec<MonitoringProfile>,
 }
 
 impl SessionController {
     /// Creates a new event log and durably writes its session-start event.
-    pub fn create(events_path: PathBuf, cameras: Vec<SessionCamera>) -> Result<Self> {
+    pub fn create(
+        events_path: PathBuf,
+        cameras: Vec<SessionCamera>,
+        monitoring_profiles: Vec<MonitoringProfile>,
+    ) -> Result<Self> {
         let camera_ids = camera_ids(&cameras)?;
-        let action = SessionAction::SessionStarted { cameras };
+        validate_snapshot(&cameras, &monitoring_profiles)?;
+        let action = SessionAction::SessionStarted {
+            cameras,
+            monitoring_profiles: monitoring_profiles.clone(),
+        };
 
         Ok(Self {
             log: SessionLog::create(events_path, camera_ids, action)?,
+            monitoring_profiles,
         })
     }
 
@@ -60,15 +73,19 @@ impl SessionController {
                 self.log
                     .append(SessionAction::CameraParticipationChanged { camera_id, enabled })
             }
-            OperatorAction::SetSamplingInterval {
-                camera_id,
-                sample_every,
+            OperatorAction::SetMonitoringProfile {
+                camera_ids,
+                monitoring_profile_id,
             } => {
-                self.log.require_camera(camera_id)?;
-                let sample_every_ms = duration_to_millis(camera_id, sample_every)?;
-                self.log.append(SessionAction::SamplingIntervalChanged {
-                    camera_id,
-                    sample_every_ms,
+                validate_change(
+                    &self.log.camera_ids,
+                    &self.monitoring_profiles,
+                    &camera_ids,
+                    monitoring_profile_id,
+                )?;
+                self.log.append(SessionAction::MonitoringProfileChanged {
+                    camera_ids,
+                    monitoring_profile_id,
                 })
             }
             OperatorAction::EndSession => {
@@ -77,6 +94,13 @@ impl SessionController {
                 Ok(())
             }
         }
+    }
+
+    /// Injects a write failure into a disposable test session without disturbing its recorder.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_writes_for_test(&mut self) -> Result<()> {
+        self.log.file = File::open("/dev/null")?;
+        Ok(())
     }
 
     /// Returns monotonic elapsed time since the session-start event was written.

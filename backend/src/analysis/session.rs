@@ -1,6 +1,8 @@
 //! Validates one completed session and drives its resumable analysis to completion.
 
-use std::{fs, num::NonZeroUsize, path::PathBuf};
+use std::{fs, path::PathBuf};
+
+use crate::profiles::AnalysisProfile;
 
 use rig_core::completion::CompletionModel;
 
@@ -20,10 +22,9 @@ pub struct AnalyzeSession {
     pub directory: PathBuf,
     /// Correct exercise sequence supplied to every model request.
     pub checklist: String,
-    /// Synchronized frame sets sent in each model request.
-    pub frame_sets_per_prompt: NonZeroUsize,
-    /// Frame sets repeated between adjacent model requests.
-    pub overlap_frame_sets: usize,
+    pub profile: AnalysisProfile,
+    /// Separate evaluation output; None writes the application's analysis.json.
+    pub checkpoint_path: Option<PathBuf>,
     pub openai: OpenAiConfig,
 }
 
@@ -34,7 +35,7 @@ pub async fn analyze_session(
 ) -> Result<AnalysisCheckpoint> {
     analyze_session_with(
         request,
-        |config| OpenAiAgent::from_config(config).map_err(Error::from),
+        |config, profile| OpenAiAgent::from_config(config, profile).map_err(Error::from),
         on_checkpoint,
     )
     .await
@@ -47,13 +48,13 @@ async fn analyze_session_with<M, F>(
 ) -> Result<AnalysisCheckpoint>
 where
     M: CompletionModel,
-    F: FnOnce(OpenAiConfig) -> Result<Agent<M>>,
+    F: FnOnce(OpenAiConfig, &AnalysisProfile) -> Result<Agent<M>>,
 {
     let AnalyzeSession {
         directory,
         checklist,
-        frame_sets_per_prompt,
-        overlap_frame_sets,
+        profile,
+        checkpoint_path,
         openai,
     } = request;
     if checklist.trim().is_empty() {
@@ -80,7 +81,7 @@ where
         tokio::task::spawn_blocking(move || list_segments(&recordings_root, &camera_ids))
             .await
             .map_err(Error::SegmentDiscoveryTask)??;
-    let checkpoint_path = directory.join("analysis.json");
+    let checkpoint_path = checkpoint_path.unwrap_or_else(|| directory.join("analysis.json"));
     let checklist = match fs::symlink_metadata(&checkpoint_path) {
         Ok(_) => checklist,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => checklist.trim().to_owned(),
@@ -90,8 +91,7 @@ where
         segments,
         session,
         checklist,
-        frame_sets_per_prompt,
-        overlap_frame_sets,
+        profile.clone(),
         checkpoint_path,
     )
     .await?;
@@ -102,7 +102,7 @@ where
         return Ok(checkpoint);
     }
 
-    let agent = make_agent(openai)?;
+    let agent = make_agent(openai, &profile)?;
     while checkpoint.responses.len() < checkpoint.total_batches {
         analyzer.analyze_next(&agent).await?;
         checkpoint = analyzer.checkpoint().clone();

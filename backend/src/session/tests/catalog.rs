@@ -12,24 +12,24 @@ const VALID_ID: &str = "5a660250-36fc-4c2b-93fa-b04247bdad20";
 
 fn events(session_id: &str, start_utc_ms: i64, ended: bool) -> String {
     let mut events = vec![json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "sequence": 0,
         "session_id": session_id,
         "utc_ms": start_utc_ms,
         "session_offset_ms": 0,
         "action": {
-            "type": "session_started",
+            "type": "session_started", "monitoring_profiles": crate::tests::monitoring_profiles(),
             "cameras": [{
                 "camera_id": 1,
                 "name": "Front",
                 "enabled": true,
-                "sample_every_ms": 1_000
+                "initial_monitoring_profile_id": 1_000
             }]
         }
     })];
     if ended {
         events.push(json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "sequence": 1,
             "session_id": session_id,
             "utc_ms": start_utc_ms + 1_000,
@@ -65,7 +65,9 @@ fn write_complete_session(root: &Path, name: &str, session_id: &str, start_utc_m
 }
 
 fn listed(root: &Path) -> Vec<StoredSession> {
-    list_sessions(root).expect("session catalogue should load")
+    list_sessions(root)
+        .expect("session catalogue should load")
+        .sessions
 }
 
 #[test]

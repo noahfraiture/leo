@@ -4,7 +4,6 @@ use std::{
     fs,
     future::Future,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 use backend::{
@@ -30,11 +29,9 @@ pub fn spawn_start_session(mut operator: Signal<OperatorState>, utc_ms: i64) {
         }
     };
     let start_recorder = request.recorder.clone();
-    let stop_recorder = request.recorder.clone();
     let recording_cameras = request.recording_cameras.clone();
     let recordings_root = request.directory.join("recordings");
     let current_operator = operator;
-    let mut cleanup_operator = operator;
 
     dioxus::dioxus_core::spawn_forever(async move {
         let outcome = run_start_session_with(
@@ -44,15 +41,9 @@ pub fn spawn_start_session(mut operator: Signal<OperatorState>, utc_ms: i64) {
                     .start(recording_cameras, recordings_root)
                     .await
             },
-            async move { stop_recorder.stop().await },
             move |directory| {
                 let state = current_operator.read();
                 start_is_current(&state, directory)
-            },
-            move |directory| {
-                cleanup_operator
-                    .write()
-                    .claim_failed_start_cleanup(directory)
             },
         )
         .await;
@@ -122,64 +113,39 @@ pub fn handle_recorder_event_channel_closed(
     cleanup
 }
 
-/// Persists participation before changing presentation state and faults on any write error.
+/// Saves participation without coupling metadata failure to recorder shutdown.
 pub fn set_participation(
     mut operator: Signal<OperatorState>,
     camera_id: u32,
     enabled: bool,
 ) -> Result<(), super::Error> {
-    let (result, cleanup) = {
-        let mut state = operator.write();
-        match state.set_participation(camera_id, enabled) {
-            Ok(()) => {
-                state.set_transient_message(None);
-                (Ok(()), None)
-            }
-            Err(error) => {
-                let message = error.to_string();
-                state.set_transient_message(Some(message.clone()));
-                let cleanup = state.begin_fault(message, false);
-                (Err(error), cleanup)
-            }
-        }
-    };
-    if let Some(request) = cleanup {
-        spawn_fault_cleanup(operator, request);
-    }
+    let result = operator.write().set_participation(camera_id, enabled);
+    operator
+        .write()
+        .set_transient_message(result.as_ref().err().map(ToString::to_string));
     result
 }
 
-/// Persists cadence before changing presentation state and faults on any write error.
-pub fn set_sampling_interval(
+/// Applies one monitoring profile to the selected cameras without affecting capture.
+pub fn set_monitoring_profile(
     mut operator: Signal<OperatorState>,
-    camera_id: u32,
-    sample_every: Duration,
+    camera_ids: Vec<u32>,
+    profile_id: u32,
 ) -> Result<(), super::Error> {
-    let (result, cleanup) = {
-        let mut state = operator.write();
-        match state.set_sampling_interval(camera_id, sample_every) {
-            Ok(()) => {
-                state.set_transient_message(None);
-                (Ok(()), None)
-            }
-            Err(error) => {
-                let message = error.to_string();
-                state.set_transient_message(Some(message.clone()));
-                let cleanup = state.begin_fault(message, false);
-                (Err(error), cleanup)
-            }
-        }
-    };
-    if let Some(request) = cleanup {
-        spawn_fault_cleanup(operator, request);
-    }
+    let result = operator
+        .write()
+        .set_monitoring_profile(camera_ids, profile_id);
+    operator
+        .write()
+        .set_transient_message(result.as_ref().err().map(ToString::to_string));
     result
 }
 
 enum StartOutcome {
     Active {
         directory: PathBuf,
-        controller: SessionController,
+        controller: Option<SessionController>,
+        metadata_error: Option<String>,
     },
     Idle {
         directory: PathBuf,
@@ -193,7 +159,7 @@ enum StartOutcome {
 }
 
 enum StopOutcome {
-    Completed,
+    Completed { warning: Option<String> },
     Faulted { directory: PathBuf, message: String },
 }
 
@@ -202,18 +168,14 @@ struct FaultOutcome {
     message: String,
 }
 
-async fn run_start_session_with<StartFuture, StopFuture, Continue, ClaimCleanup>(
+async fn run_start_session_with<StartFuture, Continue>(
     request: StartSessionRequest,
     start: StartFuture,
-    stop: StopFuture,
     continue_start: Continue,
-    claim_cleanup: ClaimCleanup,
 ) -> StartOutcome
 where
     StartFuture: Future<Output = Result<(), RecorderError>>,
-    StopFuture: Future<Output = Result<Vec<RecordingSegment>, RecorderError>>,
     Continue: FnOnce(&Path) -> bool,
-    ClaimCleanup: FnOnce(&Path) -> bool,
 {
     let camera_ids = request
         .recording_cameras
@@ -248,35 +210,28 @@ where
         return StartOutcome::Superseded;
     }
 
-    match SessionController::create(request.events_path, request.session_cameras) {
-        Ok(controller) => StartOutcome::Active {
-            directory: request.directory,
-            controller,
-        },
-        Err(error) => {
-            let metadata_message = format!("Session metadata start failed: {error}");
-            if !claim_cleanup(&request.directory) {
-                tracing::info!(
-                    path = %request.directory.display(),
-                    "failed session start cleanup owned by fault task"
-                );
-                return StartOutcome::Superseded;
-            }
-            tracing::error!(
-                path = %request.directory.display(),
-                error = %error,
-                "session start event failed; recorder cleanup requested"
-            );
-            match stop.await {
-                Ok(_) => remove_failed_start(request.directory, metadata_message),
-                Err(cleanup_error) => StartOutcome::Faulted {
-                    directory: request.directory,
-                    message: format!(
-                        "{metadata_message}; recorder cleanup failed: {cleanup_error}"
-                    ),
-                },
-            }
-        }
+    let metadata = match request.metadata_error {
+        Some(error) => Err(error),
+        None => SessionController::create(
+            request.events_path,
+            request.session_cameras,
+            request.monitoring_profiles,
+        )
+        .map_err(|error| error.to_string()),
+    };
+    let (controller, metadata_error) = match metadata {
+        Ok(controller) => (Some(controller), None),
+        Err(error) => (
+            None,
+            Some(format!(
+                "Recording continues. Session metadata start failed: {error}. This session needs repair before analysis."
+            )),
+        ),
+    };
+    StartOutcome::Active {
+        directory: request.directory,
+        controller,
+        metadata_error,
     }
 }
 
@@ -298,7 +253,11 @@ fn apply_start_outcome(operator: &mut OperatorState, outcome: StartOutcome) {
         StartOutcome::Active {
             directory,
             controller,
-        } => operator.finish_start(directory, controller),
+            metadata_error,
+        } => {
+            operator.finish_start(directory, controller);
+            operator.metadata_error = metadata_error;
+        }
         StartOutcome::Idle { directory, message } => operator.fail_start(&directory, message),
         StartOutcome::Faulted { directory, message } => operator.finish_fault(directory, message),
         StartOutcome::Superseded => {}
@@ -319,7 +278,10 @@ async fn run_stop_session_with<StopFuture>(
 where
     StopFuture: Future<Output = Result<Vec<RecordingSegment>, RecorderError>>,
 {
-    let end = request.controller.apply(OperatorAction::EndSession);
+    let end = match request.controller.as_mut() {
+        Some(controller) => controller.apply(OperatorAction::EndSession),
+        None => Err(backend::session::Error::MissingSessionStart),
+    };
     if let Err(error) = &end {
         tracing::error!(
             path = %request.directory.display(),
@@ -348,11 +310,23 @@ where
                     path = %request.directory.display(),
                     "recording completion marker written"
                 );
-                return StopOutcome::Completed;
+                return StopOutcome::Completed { warning: None };
             }
-            Err(error) => format!("Recording completion marker failed: {error}"),
+            Err(error) => {
+                return StopOutcome::Completed {
+                    warning: Some(format!(
+                        "Recording saved; metadata needs repair. Completion marker failed: {error}"
+                    )),
+                };
+            }
         },
-        (Err(error), Ok(_)) => format!("Session end event failed: {error}"),
+        (Err(error), Ok(_)) => {
+            return StopOutcome::Completed {
+                warning: Some(format!(
+                    "Recording saved; metadata needs repair. Session end event failed: {error}"
+                )),
+            };
+        }
         (Ok(()), Err(error)) => format!("Recorder Stop failed: {error}"),
         (Err(end_error), Err(stop_error)) => {
             format!("Session end event failed: {end_error}; recorder Stop failed: {stop_error}")
@@ -366,11 +340,15 @@ where
 
 fn apply_stop_outcome(operator: &mut OperatorState, outcome: StopOutcome) {
     match outcome {
-        StopOutcome::Completed => {
+        StopOutcome::Completed { warning } => {
+            operator.metadata_error = None;
             if let Err(error) = operator.finish_stop() {
                 operator.set_transient_message(Some(format!(
                     "Completed session refresh failed: {error}"
                 )));
+            }
+            if let Some(warning) = warning {
+                operator.message = Some(warning);
             }
         }
         StopOutcome::Faulted { directory, message } => operator.finish_fault(directory, message),

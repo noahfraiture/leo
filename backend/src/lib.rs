@@ -5,5 +5,9 @@
 //! Implementation modules stay private behind those three entry points.
 
 pub mod analysis;
+pub mod profiles;
 pub mod recording;
 pub mod session;
+
+#[cfg(test)]
+mod tests;

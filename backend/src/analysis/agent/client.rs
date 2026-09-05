@@ -3,6 +3,8 @@ use rig_core::completion::{AssistantContent, CompletionModel, Message};
 use rig_core::providers::openai;
 use serde::{Deserialize, Serialize};
 
+use crate::profiles::AnalysisProfile;
+
 use super::error::{Error, Result};
 
 const INSTRUCTIONS: &str = "Analyze the student's video frames against the supplied correct sequence. Describe only visible evidence, preserve timestamps, and update every checklist item.";
@@ -53,17 +55,16 @@ pub type OpenAiAgent = Agent<openai::responses_api::ResponsesCompletionModel>;
 #[derive(Clone, PartialEq, Eq)]
 pub struct OpenAiConfig {
     pub api_key: String,
-    pub model: String,
     pub base_url: Option<String>,
 }
 
 impl OpenAiAgent {
     /// Builds one model from an explicit application-owned configuration.
-    pub fn from_config(config: OpenAiConfig) -> Result<Self> {
+    pub fn from_config(config: OpenAiConfig, profile: &AnalysisProfile) -> Result<Self> {
         if config.api_key.trim().is_empty() {
             return Err(Error::BlankConfiguration("OpenAI API key"));
         }
-        if config.model.trim().is_empty() {
+        if profile.model.trim().is_empty() {
             return Err(Error::BlankConfiguration("OpenAI model"));
         }
 
@@ -72,7 +73,7 @@ impl OpenAiAgent {
             builder = builder.base_url(base_url);
         }
         let client = builder.build().map_err(ProviderClientError::from)?;
-        Ok(Self::new(client.completion_model(config.model)))
+        Ok(Self::new(client.completion_model(profile.model.clone())))
     }
 }
 
@@ -83,14 +84,20 @@ impl<M: CompletionModel> Agent<M> {
     }
 
     /// Sends one prebuilt prompt and parses its structured analysis response.
-    pub async fn analyze(&self, prompt: Message) -> Result<AnalysisResponse> {
-        let response = self
+    pub async fn analyze(
+        &self,
+        prompt: Message,
+        max_output_tokens: Option<u64>,
+    ) -> Result<AnalysisResponse> {
+        let mut request = self
             .model
             .completion_request(prompt)
             .preamble(INSTRUCTIONS.to_owned())
-            .output_schema(rig_core::schemars::schema_for!(AnalysisResponse))
-            .send()
-            .await?;
+            .output_schema(rig_core::schemars::schema_for!(AnalysisResponse));
+        if let Some(limit) = max_output_tokens {
+            request = request.max_tokens(limit);
+        }
+        let response = request.send().await?;
         let text = response
             .choice
             .iter()

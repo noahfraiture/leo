@@ -3,7 +3,6 @@
 
 use std::{
     fs,
-    num::NonZeroUsize,
     path::{Path, PathBuf},
     process::Command,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -50,15 +49,10 @@ async fn natural_fixture_exercises_application_checkpoint_flow() {
         stop_timeout: Duration::from_secs(5),
     })
     .expect("paid test requires ffmpeg and ffprobe");
-    let mut workflow = OperatorState::new(
-        camera_settings(),
-        sessions_root,
-        handle,
-        Some(openai),
-        NonZeroUsize::new(5).unwrap(),
-        0,
-    )
-    .expect("workflow should initialize");
+    let mut settings = crate::test_settings(camera_settings(), Some(openai), 5, 0);
+    settings.analysis_profiles[0] = paid_analysis_profile(5);
+    let mut workflow =
+        OperatorState::new(settings, sessions_root, handle).expect("workflow should initialize");
     workflow
         .refresh_sessions()
         .expect("session should be discovered");
@@ -195,8 +189,8 @@ async fn run_paid_evaluation(
         AnalyzeSession {
             directory,
             checklist: checklist.into(),
-            frame_sets_per_prompt: NonZeroUsize::new(5).unwrap(),
-            overlap_frame_sets: 0,
+            profile: paid_analysis_profile(5 * fixtures.len()),
+            checkpoint_path: None,
             openai: openai.clone(),
         },
         |_| {},
@@ -221,10 +215,16 @@ async fn run_paid_evaluation(
     );
 }
 
+fn paid_analysis_profile(max_images: usize) -> backend::profiles::AnalysisProfile {
+    backend::profiles::AnalysisProfile {
+        model: std::env::var("ANALYSIS_MODEL").expect("paid test requires ANALYSIS_MODEL"),
+        ..crate::test_analysis_profile(max_images, 0)
+    }
+}
+
 fn openai_config_from_environment() -> OpenAiConfig {
     OpenAiConfig {
         api_key: std::env::var("OPENAI_API_KEY").expect("paid test requires OPENAI_API_KEY"),
-        model: std::env::var("ANALYSIS_MODEL").expect("paid test requires ANALYSIS_MODEL"),
         base_url: std::env::var("OPENAI_BASE_URL").ok(),
     }
 }
@@ -291,21 +291,21 @@ fn create_evaluation_session(
                 "camera_id": index + 1,
                 "name": camera_name,
                 "enabled": true,
-                "sample_every_ms": sample_every_ms
+                "initial_monitoring_profile_id": 1
             })
         })
         .collect::<Vec<_>>();
     let events = [
         json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "sequence": 0,
             "session_id": session_id,
             "utc_ms": start_utc_ms,
             "session_offset_ms": 0,
-            "action": {"type": "session_started", "cameras": cameras}
+            "action": {"type": "session_started", "monitoring_profiles": [{"id": 1, "name": "Evaluation", "sampleEveryMs": sample_every_ms}], "cameras": cameras}
         }),
         json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "sequence": 1,
             "session_id": session_id,
             "utc_ms": start_utc_ms + i64::try_from(duration_ms).expect("duration should fit i64"),
@@ -348,7 +348,7 @@ fn camera_settings() -> Vec<CameraSettings> {
             name: format!("Salon {id}"),
             rtsp_url: format!("rtsp://127.0.0.1:855{}/axis-media/media.amp", id + 3),
             initially_included_in_analysis: id == 1,
-            sample_every_ms: 1_000,
+            initial_monitoring_profile_id: 1,
         })
         .collect()
 }
@@ -366,21 +366,21 @@ fn create_local_session(
     fs::create_dir(&camera_2).expect("camera 2 directory should be created");
     let events = [
         json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "sequence": 0,
             "session_id": session_id,
             "utc_ms": start_utc_ms,
             "session_offset_ms": 0,
             "action": {
-                "type": "session_started",
+                "type": "session_started", "monitoring_profiles": crate::test_monitoring_profiles(),
                 "cameras": [
-                    {"camera_id": 1, "name": "Salon 1", "enabled": true, "sample_every_ms": 1_000},
-                    {"camera_id": 2, "name": "Salon 2", "enabled": false, "sample_every_ms": 1_000}
+                    {"camera_id": 1, "name": "Salon 1", "enabled": true, "initial_monitoring_profile_id": 1},
+                    {"camera_id": 2, "name": "Salon 2", "enabled": false, "initial_monitoring_profile_id": 1}
                 ]
             }
         }),
         json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "sequence": 1,
             "session_id": session_id,
             "utc_ms": start_utc_ms + 5_000,

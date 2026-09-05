@@ -4,13 +4,19 @@ use std::{
     time::{Duration, Instant},
 };
 
-use backend::analysis::OpenAiConfig;
+use backend::{
+    analysis::OpenAiConfig,
+    profiles::{
+        AnalysisProfile, ImageDetailPolicy, ImageSizePolicy, MonitoringProfile,
+        validate_analysis_profiles, validate_monitoring_profiles,
+    },
+};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
 use super::{ValidationError, ValidationErrors};
 
-pub const SETTINGS_SCHEMA_VERSION: u32 = 2;
+pub const SETTINGS_SCHEMA_VERSION: u32 = 3;
 
 /// Persisted application configuration edited before runtime services start.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,10 +28,11 @@ pub struct Settings {
     pub cameras: Vec<CameraSettings>,
     pub data_root: Option<PathBuf>,
     pub recorder_timeout_secs: u64,
-    /// Synchronized frame sets sent in each analysis request.
-    pub analysis_frame_sets_per_prompt: u64,
-    /// Frame sets repeated between adjacent analysis requests.
-    pub analysis_overlap_frame_sets: u64,
+    pub monitoring_profiles: Vec<MonitoringProfile>,
+    pub next_monitoring_profile_id: u32,
+    pub analysis_profiles: Vec<AnalysisProfile>,
+    pub next_analysis_profile_id: u32,
+    pub default_analysis_profile_id: u32,
     pub openai: OpenAiSettings,
     pub log_level: LogLevel,
 }
@@ -39,8 +46,9 @@ pub struct CameraSettings {
     /// Credential-bearing source URL; do not include it in logs or errors.
     pub rtsp_url: String,
     pub initially_included_in_analysis: bool,
-    /// Analysis sampling cadence in whole milliseconds.
-    pub sample_every_ms: u64,
+    /// Optional metadata reference; invalid references do not affect capture.
+    #[serde(default, deserialize_with = "profile_reference")]
+    pub initial_monitoring_profile_id: u32,
 }
 
 /// Persisted credentials and endpoint selection for explicit analysis.
@@ -48,7 +56,6 @@ pub struct CameraSettings {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OpenAiSettings {
     pub api_key: String,
-    pub model: String,
     pub base_url: Option<String>,
 }
 
@@ -84,11 +91,27 @@ impl Default for Settings {
             cameras: Vec::new(),
             data_root: None,
             recorder_timeout_secs: 10,
-            analysis_frame_sets_per_prompt: 5,
-            analysis_overlap_frame_sets: 0,
+            monitoring_profiles: vec![MonitoringProfile {
+                id: 1,
+                name: "Standard".into(),
+                sample_every_ms: 1000,
+            }],
+            next_monitoring_profile_id: 2,
+            analysis_profiles: vec![AnalysisProfile {
+                id: 1,
+                name: "Baseline".into(),
+                model: String::new(),
+                max_images_per_prompt: 16,
+                max_prompt_span_ms: 7000,
+                overlap_frame_sets: 2,
+                image_size: ImageSizePolicy::Original,
+                image_detail: ImageDetailPolicy::ProviderDefault,
+                max_output_tokens: None,
+            }],
+            next_analysis_profile_id: 2,
+            default_analysis_profile_id: 1,
             openai: OpenAiSettings {
                 api_key: String::new(),
-                model: String::new(),
                 base_url: None,
             },
             log_level: LogLevel::Info,
@@ -97,8 +120,8 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Returns every invalid persisted field or cross-field invariant.
-    pub fn validate(&self) -> Result<(), ValidationErrors> {
+    /// Validates only the fields required to start and retain camera recordings.
+    pub fn validate_recording(&self) -> Result<(), ValidationErrors> {
         let mut errors = Vec::new();
 
         if self.schema_version != SETTINGS_SCHEMA_VERSION {
@@ -141,11 +164,6 @@ impl Settings {
                     camera_id: camera.id,
                 });
             }
-            if camera.sample_every_ms == 0 || camera.sample_every_ms % 1_000 != 0 {
-                errors.push(ValidationError::InvalidSamplingCadence {
-                    camera_id: camera.id,
-                });
-            }
         }
 
         let recorder_timeout = Duration::from_secs(self.recorder_timeout_secs);
@@ -155,28 +173,11 @@ impl Settings {
         {
             errors.push(ValidationError::InvalidRecorderTimeout);
         }
-        if self.analysis_frame_sets_per_prompt == 0
-            || usize::try_from(self.analysis_frame_sets_per_prompt).is_err()
-        {
-            errors.push(ValidationError::InvalidAnalysisFrameSetsPerPrompt);
-        }
-        if usize::try_from(self.analysis_overlap_frame_sets).is_err()
-            || self.analysis_overlap_frame_sets >= self.analysis_frame_sets_per_prompt
-        {
-            errors.push(ValidationError::InvalidAnalysisOverlapFrameSets);
-        }
         if let Some(path) = &self.data_root
             && !path.is_absolute()
         {
             errors.push(ValidationError::DataRootNotAbsolute { path: path.clone() });
         }
-        if let Some(base_url) = &self.openai.base_url
-            && !Url::parse(base_url)
-                .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.has_host())
-        {
-            errors.push(ValidationError::InvalidOpenAiBaseUrl);
-        }
-
         if errors.is_empty() {
             Ok(())
         } else {
@@ -184,16 +185,85 @@ impl Settings {
         }
     }
 
-    /// Returns provider configuration only when both required values are present.
-    pub fn openai_config(&self) -> Option<OpenAiConfig> {
-        (!self.openai.api_key.trim().is_empty() && !self.openai.model.trim().is_empty()).then(
-            || OpenAiConfig {
-                api_key: self.openai.api_key.clone(),
-                model: self.openai.model.clone(),
-                base_url: self.openai.base_url.clone(),
-            },
-        )
+    /// Validates monitoring independently so invalid metadata cannot block recording.
+    pub fn validate_monitoring(&self) -> Result<(), ValidationError> {
+        validate_monitoring_profiles(&self.monitoring_profiles)
+            .map_err(ValidationError::Profile)?;
+        if self.next_monitoring_profile_id == 0
+            || self
+                .monitoring_profiles
+                .iter()
+                .any(|p| p.id >= self.next_monitoring_profile_id)
+        {
+            return Err(ValidationError::InvalidNextProfileId);
+        }
+        for camera in &self.cameras {
+            if !self
+                .monitoring_profiles
+                .iter()
+                .any(|p| p.id == camera.initial_monitoring_profile_id)
+            {
+                return Err(ValidationError::Profile(
+                    backend::profiles::Error::UnknownMonitoring {
+                        id: camera.initial_monitoring_profile_id,
+                    },
+                ));
+            }
+        }
+        Ok(())
     }
+
+    /// Validates analysis definitions and credentials without affecting capture availability.
+    pub fn validate_analysis(&self) -> Result<(), ValidationError> {
+        validate_analysis_profiles(&self.analysis_profiles).map_err(ValidationError::Profile)?;
+        if self.next_analysis_profile_id == 0
+            || self
+                .analysis_profiles
+                .iter()
+                .any(|p| p.id >= self.next_analysis_profile_id)
+        {
+            return Err(ValidationError::InvalidNextProfileId);
+        }
+        if !self
+            .analysis_profiles
+            .iter()
+            .any(|p| p.id == self.default_analysis_profile_id)
+        {
+            return Err(ValidationError::Profile(
+                backend::profiles::Error::UnknownAnalysis {
+                    id: self.default_analysis_profile_id,
+                },
+            ));
+        }
+        self.openai_config()
+            .ok_or(ValidationError::InvalidProvider)?;
+        Ok(())
+    }
+
+    /// Returns usable provider credentials; model selection belongs to the analysis profile.
+    pub fn openai_config(&self) -> Option<OpenAiConfig> {
+        if self.openai.api_key.trim().is_empty()
+            || self.openai.base_url.as_ref().is_some_and(|value| {
+                !Url::parse(value)
+                    .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.has_host())
+            })
+        {
+            return None;
+        }
+        Some(OpenAiConfig {
+            api_key: self.openai.api_key.clone(),
+            base_url: self.openai.base_url.clone(),
+        })
+    }
+}
+
+// Invalid optional metadata references remain visible as unresolved IDs without rejecting capture settings.
+fn profile_reference<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_u64()
+        .and_then(|id| u32::try_from(id).ok())
+        .unwrap_or(0))
 }
 
 fn valid_rtsp_url(value: &str) -> bool {

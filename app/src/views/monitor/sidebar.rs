@@ -31,7 +31,7 @@ pub fn Sidebar() -> Element {
                     camera.config.id,
                     camera.config.name.clone(),
                     camera.participating,
-                    camera.config.sample_every_ms,
+                    camera.active_monitoring_profile_id,
                 )
             })
     });
@@ -85,9 +85,11 @@ pub fn Sidebar() -> Element {
                             if let Some(utc_ms) = utc_ms {
                                 operator::spawn_start_session(operator_state, utc_ms);
                             } else {
-                                operator_state.write().set_transient_message(Some(
-                                    "The system clock cannot start a session.".into(),
-                                ));
+                                operator_state
+                                    .write()
+                                    .set_transient_message(
+                                        Some("The system clock cannot start a session.".into()),
+                                    );
                             }
                         },
                         "Start session"
@@ -95,18 +97,16 @@ pub fn Sidebar() -> Element {
                     if analysis_running {
                         p { class: "text-sm", "Start is unavailable while analysis is running." }
                     }
-                    if let Some((_, name, _, sample_every_ms)) = selected {
-                        div {
-                            class: "flex flex-col gap-1 text-sm",
-                            h3 { class: "font-medium", "Selected camera" }
-                            p { "{name}" }
-                            p {
-                                "Initial sampling interval: {sample_every_ms / 1_000} {seconds_label(sample_every_ms / 1_000)}"
-                            }
+                    if let Some((camera_id, name, participating, profile_id)) = selected {
+                        SelectedCameraControls {
+                            key: "{camera_id}",
+                            camera_id,
+                            name,
+                            participating,
+                            profile_id,
                         }
                     }
-                    div {
-                        class: "flex flex-col gap-1 text-sm",
+                    div { class: "flex flex-col gap-1 text-sm",
                         h3 { class: "font-medium", "Session root" }
                         p { class: "break-all", "{session_root}" }
                     }
@@ -139,8 +139,7 @@ pub fn Sidebar() -> Element {
                         "Start session"
                     }
                     RecorderStatuses { title: "Camera readiness", cameras }
-                    div {
-                        class: "flex flex-col gap-1 text-sm",
+                    div { class: "flex flex-col gap-1 text-sm",
                         h3 { class: "font-medium", "Staging directory" }
                         p { class: "break-all", "{directory}" }
                     }
@@ -168,13 +167,13 @@ pub fn Sidebar() -> Element {
                     }
                     ElapsedTime {}
                     RecorderStatuses { title: "Recorder health", cameras }
-                    if let Some((camera_id, name, participating, sample_every_ms)) = selected {
+                    if let Some((camera_id, name, participating, profile_id)) = selected {
                         SelectedCameraControls {
                             key: "{camera_id}",
                             camera_id,
                             name,
                             participating,
-                            sample_every_ms,
+                            profile_id,
                         }
                     }
                     button {
@@ -183,8 +182,7 @@ pub fn Sidebar() -> Element {
                         onclick: move |_| operator::spawn_stop_session(operator_state),
                         "Stop session"
                     }
-                    div {
-                        class: "flex flex-col gap-1 text-sm",
+                    div { class: "flex flex-col gap-1 text-sm",
                         h3 { class: "font-medium", "Session directory" }
                         p { class: "break-all", "{directory}" }
                     }
@@ -217,8 +215,7 @@ pub fn Sidebar() -> Element {
                         disabled: true,
                         "Stop session"
                     }
-                    div {
-                        class: "flex flex-col gap-1 text-sm",
+                    div { class: "flex flex-col gap-1 text-sm",
                         h3 { class: "font-medium", "Session directory" }
                         p { class: "break-all", "{directory}" }
                     }
@@ -238,18 +235,15 @@ pub fn Sidebar() -> Element {
                         class: "text-lg font-semibold",
                         "Recording"
                     }
-                    div {
-                        class: "rounded-box border border-error/30 bg-error/10 p-3 text-sm",
-                        div {
-                            class: "flex flex-col gap-2",
+                    div { class: "rounded-box border border-error/30 bg-error/10 p-3 text-sm",
+                        div { class: "flex flex-col gap-2",
                             p { class: "font-medium", "Session faulted" }
                             p {
                                 "Recorder cleanup was attempted; inspect the session directory, then restart Leo before starting another session."
                             }
                         }
                     }
-                    div {
-                        class: "flex flex-col gap-1 text-sm",
+                    div { class: "flex flex-col gap-1 text-sm",
                         h3 { class: "font-medium", "Faulted session directory" }
                         p { class: "break-all", "{directory}" }
                     }
@@ -268,8 +262,7 @@ fn RecorderStatuses(title: &'static str, cameras: Vec<(u32, String, RecorderStat
             role: "status",
             aria_live: "polite",
             h3 { class: "text-sm font-medium", "{title}" }
-            ul {
-                class: "flex flex-col gap-2",
+            ul { class: "flex flex-col gap-2",
                 for (camera_id, name, status) in cameras {
                     li {
                         key: "{camera_id}",
@@ -292,75 +285,100 @@ fn SelectedCameraControls(
     camera_id: u32,
     name: String,
     participating: bool,
-    sample_every_ms: u64,
+    profile_id: u32,
 ) -> Element {
-    let mut operator_state = use_context::<Signal<OperatorState>>();
-    let initial_seconds = sample_every_ms / 1_000;
-    let mut cadence = use_signal(move || initial_seconds.to_string());
-    let input_id = format!("sampling-interval-{camera_id}");
+    let operator_state = use_context::<Signal<OperatorState>>();
+    let mut chosen_profile = use_signal(move || profile_id);
+    let state = operator_state.read();
+    let profiles = state.monitoring_profiles.clone();
+    let current_name = profiles
+        .iter()
+        .find(|p| p.id == profile_id)
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| "Unavailable".into());
+    let warning = state.metadata_error.clone().or_else(|| {
+        state.monitoring_config_error.as_ref().map(|error| {
+            format!("Recording remains available. Monitoring metadata needs correction: {error}")
+        })
+    });
+    let disabled = warning.is_some()
+        || !matches!(
+            state.session,
+            SessionRunState::Idle
+                | SessionRunState::Active {
+                    controller: Some(_),
+                    ..
+                }
+        );
+    let all_cameras = state
+        .cameras
+        .iter()
+        .map(|camera| camera.config.id)
+        .collect::<Vec<_>>();
+    drop(state);
     let participation_action = if participating {
         "Exclude from analysis"
     } else {
         "Include in analysis"
     };
-
     rsx! {
-        section {
-            class: "flex flex-col gap-3 border-t border-base-300 pt-4",
-            aria_labelledby: "selected-camera-{camera_id}",
-            h3 {
-                id: "selected-camera-{camera_id}",
-                class: "font-medium",
-                "Selected camera"
-            }
+        section { class: "flex flex-col gap-3 border-t border-base-300 pt-4",
+            h3 { class: "font-medium", "Selected camera" }
             p { class: "text-sm", "{name}" }
+            span { class: "badge badge-outline", "{current_name}" }
+            if let Some(warning) = warning {
+                p { class: "alert alert-warning text-sm", role: "status", "{warning}" }
+            }
             button {
                 class: "btn btn-outline btn-sm w-full",
                 r#type: "button",
+                disabled,
                 onclick: move |_| {
-                    let _ = operator::set_participation(
-                        operator_state,
-                        camera_id,
-                        !participating,
-                    );
+                    let _ = operator::set_participation(operator_state, camera_id, !participating);
                 },
                 "{participation_action}"
             }
-            form {
-                class: "flex flex-col gap-2",
-                onsubmit: move |event| {
-                    event.prevent_default();
-                    if let Some(interval) = parse_sampling_interval(&cadence()) {
-                        let _ = operator::set_sampling_interval(
-                            operator_state,
-                            camera_id,
-                            interval,
-                        );
-                    } else {
-                        operator_state.write().set_transient_message(Some(
-                            "Sampling interval must be a positive whole number of seconds.".into(),
-                        ));
-                    }
+            label {
+                class: "text-sm font-medium",
+                r#for: "monitoring-profile-{camera_id}",
+                "Monitoring profile"
+            }
+            select {
+                id: "monitoring-profile-{camera_id}",
+                class: "select select-bordered w-full",
+                disabled,
+                value: "{chosen_profile}",
+                onchange: move |event| chosen_profile.set(event.value().parse().unwrap_or(0)),
+                option { value: "0", "Select a profile" }
+                for profile in profiles {
+                    option { value: "{profile.id}", "{profile.name}" }
+                }
+            }
+            button {
+                class: "btn btn-sm w-full",
+                r#type: "button",
+                disabled,
+                onclick: move |_| {
+                    let _ = operator::set_monitoring_profile(
+                        operator_state,
+                        vec![camera_id],
+                        chosen_profile(),
+                    );
                 },
-                label {
-                    class: "text-sm font-medium",
-                    r#for: input_id.clone(),
-                    "Sampling interval (seconds)"
-                }
-                input {
-                    id: input_id,
-                    class: "input input-bordered w-full",
-                    r#type: "number",
-                    min: "1",
-                    step: "1",
-                    value: cadence(),
-                    oninput: move |event| cadence.set(event.value()),
-                }
-                button {
-                    class: "btn btn-sm w-full",
-                    r#type: "submit",
-                    "Apply cadence"
-                }
+                "Apply to selected camera"
+            }
+            button {
+                class: "btn btn-outline btn-sm w-full",
+                r#type: "button",
+                disabled,
+                onclick: move |_| {
+                    let _ = operator::set_monitoring_profile(
+                        operator_state,
+                        all_cameras.clone(),
+                        chosen_profile(),
+                    );
+                },
+                "Apply to all cameras"
             }
         }
     }
@@ -380,16 +398,13 @@ fn ElapsedTime() -> Element {
     let elapsed = {
         let state = operator.read();
         match &state.session {
-            SessionRunState::Active { controller, .. } => controller.elapsed(),
+            SessionRunState::Active { started_at, .. } => started_at.elapsed(),
             _ => Duration::ZERO,
         }
     };
 
     rsx! {
-        p {
-            class: "font-mono text-lg",
-            "Elapsed time: {format_elapsed(elapsed)}"
-        }
+        p { class: "font-mono text-lg", "Elapsed time: {format_elapsed(elapsed)}" }
     }
 }
 
@@ -402,11 +417,6 @@ fn recorder_status_label(status: RecorderStatus) -> &'static str {
     }
 }
 
-fn parse_sampling_interval(value: &str) -> Option<Duration> {
-    let seconds = value.parse::<u64>().ok()?;
-    (seconds > 0 && seconds.checked_mul(1_000).is_some()).then(|| Duration::from_secs(seconds))
-}
-
 fn format_elapsed(elapsed: Duration) -> String {
     let seconds = elapsed.as_secs();
     format!(
@@ -415,10 +425,6 @@ fn format_elapsed(elapsed: Duration) -> String {
         seconds / 60 % 60,
         seconds % 60
     )
-}
-
-fn seconds_label(seconds: u64) -> &'static str {
-    if seconds == 1 { "second" } else { "seconds" }
 }
 
 #[cfg(test)]

@@ -34,6 +34,8 @@ fn checkpoint() -> AnalysisCheckpoint {
         checklist: "Start the exercise".into(),
         plan_fingerprint: "0123456789abcdef".into(),
         total_batches: TOTAL_BATCHES,
+        analysis_profile: crate::tests::analysis_profile(5, 0),
+        resolved_batches: (0..TOTAL_BATCHES).map(|i| i..i + 1).collect(),
         warnings: vec![AnalysisWarning::RecordingGap {
             camera_id: 2,
             start_offset_ms: 1_000,
@@ -44,7 +46,7 @@ fn checkpoint() -> AnalysisCheckpoint {
 }
 
 #[test]
-fn checkpoint_v2_round_trips_checklist_fingerprint_warnings_and_responses() {
+fn checkpoint_round_trips_checklist_fingerprint_warnings_and_responses() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let path = directory.path().join("analysis.json");
     let expected = checkpoint();
@@ -55,7 +57,7 @@ fn checkpoint_v2_round_trips_checklist_fingerprint_warnings_and_responses() {
     .expect("checkpoint should be written");
 
     let actual =
-        AnalysisCheckpoint::read(&path, session_id()).expect("valid v2 checkpoint should load");
+        AnalysisCheckpoint::read(&path, session_id()).expect("valid checkpoint should load");
 
     assert_eq!(actual, expected);
 }

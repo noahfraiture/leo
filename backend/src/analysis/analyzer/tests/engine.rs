@@ -1,5 +1,7 @@
+// Batch fixtures intentionally contain ranges, not individual indices.
+#![allow(clippy::single_range_in_vec_init)]
+
 use std::{
-    num::NonZeroUsize,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -34,6 +36,7 @@ fn session(cameras: Vec<SessionCamera>) -> Session {
         start_utc_ms: SESSION_START_UTC_MS,
         end_offset: Duration::from_secs(5),
         cameras,
+        monitoring_profiles: crate::tests::monitoring_profiles(),
         actions: Vec::new(),
     }
 }
@@ -43,7 +46,7 @@ fn camera(id: u32, enabled: bool, sample_every_secs: u64) -> SessionCamera {
         id,
         name: format!("Camera {id}"),
         enabled,
-        sample_every: Duration::from_secs(sample_every_secs),
+        initial_monitoring_profile_id: (sample_every_secs * 1000) as u32,
     }
 }
 
@@ -89,8 +92,7 @@ async fn resume_analyzer(checkpoint: PathBuf, frame_sets_per_batch: usize) -> An
         vec![covering_segment(1)],
         session(vec![camera(1, true, 2)]),
         "Start the exercise".into(),
-        NonZeroUsize::new(frame_sets_per_batch).unwrap(),
-        0,
+        crate::tests::analysis_profile(frame_sets_per_batch, 0),
         checkpoint,
     )
     .await
@@ -119,10 +121,31 @@ fn prompt_preserves_previous_response_and_frame_order() {
         prompt_content("Open the valve", Some(&previous)).expect("prompt header should be built");
 
     append_prompt_frame_set(&mut content, "00:00:01.000");
-    append_prompt_frame(&mut content, 1, "Front", "00:00:01.000", &[1, 2]);
-    append_prompt_frame(&mut content, 2, "Side", "00:00:01.000", &[3]);
+    append_prompt_frame(
+        &mut content,
+        1,
+        "Front",
+        "00:00:01.000",
+        &[1, 2],
+        crate::profiles::ImageDetailPolicy::ProviderDefault,
+    );
+    append_prompt_frame(
+        &mut content,
+        2,
+        "Side",
+        "00:00:01.000",
+        &[3],
+        crate::profiles::ImageDetailPolicy::ProviderDefault,
+    );
     append_prompt_frame_set(&mut content, "00:00:02.000");
-    append_prompt_frame(&mut content, 1, "Front", "00:00:02.000", &[4]);
+    append_prompt_frame(
+        &mut content,
+        1,
+        "Front",
+        "00:00:02.000",
+        &[4],
+        crate::profiles::ImageDetailPolicy::ProviderDefault,
+    );
 
     let content = content.iter().collect::<Vec<_>>();
     assert!(matches!(
@@ -197,8 +220,7 @@ async fn initial_checkpoint_exists_before_provider_or_extraction_failure() {
         vec![segment(1, 0, 5_000, invalid_segment)],
         session(vec![camera(1, true, 2)]),
         "Start the exercise".into(),
-        NonZeroUsize::new(2).unwrap(),
-        0,
+        crate::tests::analysis_profile(2, 0),
         extraction_checkpoint.clone(),
     )
     .await
@@ -348,8 +370,7 @@ async fn full_local_ffmpeg_and_model_pipeline_uses_the_existing_fixture() {
         ],
         exercise,
         "Start the exercise".into(),
-        NonZeroUsize::new(2).unwrap(),
-        0,
+        crate::tests::analysis_profile(2, 0),
         checkpoint.clone(),
     )
     .await
@@ -415,8 +436,7 @@ async fn full_local_ffmpeg_pipeline_resumes_with_previous_response_and_next_fram
         segments.clone(),
         first_session,
         "Start the exercise".into(),
-        NonZeroUsize::new(2).unwrap(),
-        0,
+        crate::tests::analysis_profile(2, 0),
         checkpoint.clone(),
     )
     .await
@@ -436,8 +456,7 @@ async fn full_local_ffmpeg_pipeline_resumes_with_previous_response_and_next_fram
         segments,
         resumed_session,
         "Start the exercise".into(),
-        NonZeroUsize::new(2).unwrap(),
-        0,
+        crate::tests::analysis_profile(2, 0),
         checkpoint,
     )
     .await
@@ -498,8 +517,7 @@ async fn resume_rejects_changed_checklist_plan_batching_or_warnings() {
         vec![covering_segment(1)],
         exercise(),
         "Start the exercise".into(),
-        NonZeroUsize::new(2).unwrap(),
-        0,
+        crate::tests::analysis_profile(2, 0),
         checkpoint.clone(),
     )
     .await
@@ -509,8 +527,7 @@ async fn resume_rejects_changed_checklist_plan_batching_or_warnings() {
         vec![covering_segment(1)],
         exercise(),
         "Use a different checklist".into(),
-        NonZeroUsize::new(2).unwrap(),
-        0,
+        crate::tests::analysis_profile(2, 0),
         checkpoint.clone(),
     )
     .await;
@@ -523,8 +540,7 @@ async fn resume_rejects_changed_checklist_plan_batching_or_warnings() {
         vec![segment(1, -100, 5_000, fixture_path())],
         exercise(),
         "Start the exercise".into(),
-        NonZeroUsize::new(2).unwrap(),
-        0,
+        crate::tests::analysis_profile(2, 0),
         checkpoint.clone(),
     )
     .await;
@@ -537,8 +553,7 @@ async fn resume_rejects_changed_checklist_plan_batching_or_warnings() {
         vec![covering_segment(1)],
         exercise(),
         "Start the exercise".into(),
-        NonZeroUsize::new(3).unwrap(),
-        0,
+        crate::tests::analysis_profile(3, 0),
         checkpoint.clone(),
     )
     .await;
@@ -551,8 +566,7 @@ async fn resume_rejects_changed_checklist_plan_batching_or_warnings() {
         vec![covering_segment(1)],
         exercise(),
         "Start the exercise".into(),
-        NonZeroUsize::new(2).unwrap(),
-        1,
+        crate::tests::analysis_profile(2, 1),
         checkpoint.clone(),
     )
     .await;
@@ -565,8 +579,7 @@ async fn resume_rejects_changed_checklist_plan_batching_or_warnings() {
         vec![covering_segment(1), covering_segment(2)],
         exercise(),
         "Start the exercise".into(),
-        NonZeroUsize::new(2).unwrap(),
-        0,
+        crate::tests::analysis_profile(2, 0),
         checkpoint,
     )
     .await;
@@ -580,14 +593,14 @@ async fn resume_rejects_changed_checklist_plan_batching_or_warnings() {
 fn fingerprint_is_independent_of_absolute_paths() {
     let first = plan_fingerprint(
         &fingerprint_plan(PathBuf::from("/first/location/segment.mkv")),
-        NonZeroUsize::new(5).unwrap(),
-        0,
+        &crate::tests::analysis_profile(5, 0),
+        &[0..1],
     )
     .expect("first plan should be fingerprinted");
     let second = plan_fingerprint(
         &fingerprint_plan(PathBuf::from("/different/location/segment.mkv")),
-        NonZeroUsize::new(5).unwrap(),
-        0,
+        &crate::tests::analysis_profile(5, 0),
+        &[0..1],
     )
     .expect("second plan should be fingerprinted");
 
@@ -598,22 +611,24 @@ fn fingerprint_is_independent_of_absolute_paths() {
 fn fingerprint_encoding_is_stable() {
     let fingerprint = plan_fingerprint(
         &fingerprint_plan(PathBuf::from("/excluded/from/fingerprint.mkv")),
-        NonZeroUsize::new(5).unwrap(),
-        0,
+        &crate::tests::analysis_profile(5, 0),
+        &[0..1],
     )
     .expect("golden plan should be fingerprinted");
 
     assert_eq!(
         fingerprint,
-        "a3d35b83f408534773b83f3acb173d660dfd9ec20af1c5dd94e0dea4e0528a29"
+        "27a25e9feae8e6b6ad73900e454536f9e0149b00f580c3552cb21598e7a97207"
     );
 }
 
 #[test]
 fn fingerprint_changes_when_only_overlap_changes() {
     let frame_sets = fingerprint_plan(PathBuf::from("/excluded/from/fingerprint.mkv"));
-    let without_overlap = plan_fingerprint(&frame_sets, NonZeroUsize::new(5).unwrap(), 0).unwrap();
-    let with_overlap = plan_fingerprint(&frame_sets, NonZeroUsize::new(5).unwrap(), 2).unwrap();
+    let without_overlap =
+        plan_fingerprint(&frame_sets, &crate::tests::analysis_profile(5, 0), &[0..1]).unwrap();
+    let with_overlap =
+        plan_fingerprint(&frame_sets, &crate::tests::analysis_profile(5, 2), &[0..1]).unwrap();
 
     assert_ne!(without_overlap, with_overlap);
 }
@@ -627,8 +642,7 @@ async fn resume_plans_overlapping_batches_with_one_final_partial_batch() {
         vec![segment(1, 0, 10_000, fixture_path())],
         exercise,
         "Start the exercise".into(),
-        NonZeroUsize::new(5).unwrap(),
-        2,
+        crate::tests::analysis_profile(5, 2),
         directory.path().join("analysis.json"),
     )
     .await
@@ -652,8 +666,7 @@ async fn resume_rebuilds_the_canonical_plan_and_zero_overlap_batches() {
         vec![covering_segment(1)],
         session(vec![camera(1, true, 2), camera(2, false, 1)]),
         "Start the exercise".into(),
-        NonZeroUsize::new(2).unwrap(),
-        0,
+        crate::tests::analysis_profile(2, 0),
         checkpoint.clone(),
     )
     .await
@@ -675,7 +688,10 @@ async fn resume_rebuilds_the_canonical_plan_and_zero_overlap_batches() {
             end_offset_ms: 5_000,
         }]
     );
-    assert_eq!(analyzer.frame_sets_per_batch.get(), 2);
+    assert_eq!(
+        analyzer.checkpoint.analysis_profile.max_images_per_prompt,
+        2
+    );
     assert_eq!(analyzer.checkpoint.total_batches, 2);
     assert_eq!(analyzer.batch_range(0), 0..2);
     assert_eq!(analyzer.batch_range(1), 2..3);
@@ -695,13 +711,12 @@ async fn resume_rejects_overlap_equal_to_batch_size() {
         vec![covering_segment(1)],
         session(vec![camera(1, true, 1)]),
         "Start the exercise".into(),
-        NonZeroUsize::new(2).unwrap(),
-        2,
+        crate::tests::analysis_profile(2, 2),
         directory.path().join("analysis.json"),
     )
     .await;
 
-    assert!(matches!(result, Err(super::Error::InvalidBatchOverlap)));
+    assert!(matches!(result, Err(super::Error::Profile(_))));
 }
 
 #[tokio::test]
@@ -712,11 +727,55 @@ async fn resume_rejects_an_empty_merged_plan() {
         Vec::new(),
         session(vec![camera(1, true, 1)]),
         "Start the exercise".into(),
-        NonZeroUsize::new(2).unwrap(),
-        0,
+        crate::tests::analysis_profile(2, 0),
         directory.path().join("analysis.json"),
     )
     .await;
 
     assert!(matches!(result, Err(super::Error::NoAnalyzableFrames)));
+}
+
+#[test]
+fn every_resolved_profile_field_and_batch_boundary_changes_identity() {
+    let profile = crate::tests::analysis_profile(5, 0);
+    let frames = fingerprint_plan(PathBuf::from("fixture.mkv"));
+    let fingerprint = plan_fingerprint(&frames, &profile, &[0..1]).unwrap();
+    let mut changed = Vec::new();
+    let mut next = profile.clone();
+    next.id += 1;
+    changed.push(next);
+    let mut next = profile.clone();
+    next.name.push_str(" edited");
+    changed.push(next);
+    let mut next = profile.clone();
+    next.model.push_str("-other");
+    changed.push(next);
+    let mut next = profile.clone();
+    next.max_images_per_prompt += 1;
+    changed.push(next);
+    let mut next = profile.clone();
+    next.max_prompt_span_ms -= 1;
+    changed.push(next);
+    let mut next = profile.clone();
+    next.overlap_frame_sets += 1;
+    changed.push(next);
+    let mut next = profile.clone();
+    next.image_size = crate::profiles::ImageSizePolicy::MaximumLongEdge(320);
+    changed.push(next);
+    let mut next = profile.clone();
+    next.image_detail = crate::profiles::ImageDetailPolicy::High;
+    changed.push(next);
+    let mut next = profile.clone();
+    next.max_output_tokens = Some(1024);
+    changed.push(next);
+    for next in changed {
+        assert_ne!(
+            fingerprint,
+            plan_fingerprint(&frames, &next, &[0..1]).unwrap()
+        );
+    }
+    assert_ne!(
+        fingerprint,
+        plan_fingerprint(&frames, &profile, &[0..2]).unwrap()
+    );
 }

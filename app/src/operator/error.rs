@@ -27,14 +27,16 @@ pub enum Error {
     EmptyChecklist,
     #[error("camera {camera_id} is not configured")]
     UnknownCamera { camera_id: u32 },
-    #[error("camera {camera_id} sampling interval is outside the millisecond range")]
-    InvalidSamplingInterval { camera_id: u32 },
     #[error("failed to create session directory {path}")]
     CreateDirectory {
         path: PathBuf,
         #[source]
         source: io::Error,
     },
+    #[error("monitoring metadata is unavailable; recording continues")]
+    MetadataUnavailable,
+    #[error("could not discard the previous analysis checkpoint")]
+    ResetAnalysis(#[source] io::Error),
     #[error("session metadata operation failed")]
     Session(#[from] backend::session::Error),
 }

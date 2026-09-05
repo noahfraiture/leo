@@ -97,9 +97,25 @@ pub struct Startup {
 /// Loads settings and prepares every startup-only runtime dependency.
 pub fn prepare(store: SettingsStore) -> Startup {
     let mut runtime = DesktopRuntime::new();
-    let loaded = store
-        .load()
-        .unwrap_or_else(|error| panic!("application settings could not be loaded: {error}"));
+    let loaded = match store.load() {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            let _ = logging::init_stderr(LogLevel::Info);
+            return Startup {
+                bootstrap: Bootstrap::Failed {
+                    message: format!(
+                        "{error}. Correct the settings file or re-enter recording settings below."
+                    ),
+                },
+                settings: InitialSettings {
+                    store,
+                    draft: ApplicationSettings::default(),
+                    initial_route: Route::Settings {},
+                },
+                runtime,
+            };
+        }
+    };
     let (bootstrap, settings) = match loaded {
         None => missing_settings(store),
         Some(config) => loaded_settings(store, config, &mut runtime),
@@ -142,16 +158,14 @@ fn loaded_settings(
 fn prepare_runtime(config: ResolvedSettings, runtime: &mut DesktopRuntime) -> Bootstrap {
     let log_level = config.settings.log_level;
     let log_guard = match logging::init(&config.logs_root, log_level) {
-        Ok(log_guard) => log_guard,
+        Ok(log_guard) => Some(log_guard),
         Err(_error) => {
             let _ = logging::init_stderr(log_level);
             tracing::error!("application logging initialization failed");
-            return Bootstrap::Failed {
-                message: "Application logging is unavailable.".into(),
-            };
+            None
         }
     };
-    runtime.log = Some(log_guard);
+    runtime.log = log_guard;
     tracing::info!("startup configuration loaded");
 
     let (runtime_owner, handle, events) = match RecorderRuntime::spawn(config.recorder_settings) {
@@ -168,7 +182,7 @@ fn prepare_runtime(config: ResolvedSettings, runtime: &mut DesktopRuntime) -> Bo
         handle,
         events: Arc::new(Mutex::new(Some(events))),
     };
-    let operator = match initialize_operator(&config, &recorder) {
+    let operator = match initialize_operator(&config, &recorder, runtime.log.is_some()) {
         Ok(operator) => operator,
         Err(message) => {
             tracing::error!("operator state initialization failed");
@@ -189,17 +203,26 @@ fn prepare_runtime(config: ResolvedSettings, runtime: &mut DesktopRuntime) -> Bo
 fn initialize_operator(
     config: &ResolvedSettings,
     recorder: &RecorderBootstrap,
+    file_logging_available: bool,
 ) -> Result<InitialOperatorState, String> {
     OperatorState::new(
-        config.settings.cameras.clone(),
+        config.settings.clone(),
         config.sessions_root.clone(),
         recorder.handle.clone(),
-        config.settings.openai_config(),
-        config.analysis_frame_sets_per_prompt,
-        config.analysis_overlap_frame_sets,
     )
-    .map(|operator| InitialOperatorState(Arc::new(Mutex::new(Some(operator)))))
-    .map_err(|_| "Operator state is unavailable.".into())
+    .map(|mut operator| {
+        operator.monitoring_config_error = config.monitoring_error.clone();
+        operator.model_config_error = config.analysis_error.clone();
+        if !file_logging_available {
+            let warning = "Diagnostic file logging is unavailable. Recording remains available.";
+            operator.message = Some(match operator.message.take() {
+                Some(message) => format!("{message} {warning}"),
+                None => warning.into(),
+            });
+        }
+        InitialOperatorState(Arc::new(Mutex::new(Some(operator))))
+    })
+    .map_err(|error| format!("Operator state is unavailable: {error}"))
 }
 
 fn prepare_preview(config: &ResolvedSettings) -> (PreviewState, Option<Bridge>) {

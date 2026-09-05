@@ -11,12 +11,14 @@ use std::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::profiles::{MonitoringProfile, validate_monitoring_profiles};
+
 use super::{
     controller::OperatorAction,
     error::{Error, Result},
 };
 
-pub(super) const SCHEMA_VERSION: u8 = 1;
+pub const SCHEMA_VERSION: u8 = 2;
 
 /// One camera's software sampling configuration at the start of a session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,9 +31,8 @@ pub struct SessionCamera {
     pub name: String,
     /// Whether software sampling begins enabled; physical recording is unaffected.
     pub enabled: bool,
-    /// Initial interval between selected samples.
-    #[serde(rename = "sample_every_ms", with = "duration_millis")]
-    pub sample_every: Duration,
+    /// Reference to an immutable definition in the session-start snapshot.
+    pub initial_monitoring_profile_id: u32,
 }
 
 /// A completed session reconstructed from its event log.
@@ -45,6 +46,8 @@ pub struct Session {
     pub end_offset: Duration,
     /// Camera configuration captured by the session-start event.
     pub cameras: Vec<SessionCamera>,
+    /// All monitoring definitions available during this session.
+    pub monitoring_profiles: Vec<MonitoringProfile>,
     /// Camera changes paired with their session-relative offsets.
     pub actions: Vec<(Duration, OperatorAction)>,
 }
@@ -83,11 +86,15 @@ impl Session {
                 actual: session_offset_ms,
             });
         }
-        let cameras = match action {
-            SessionAction::SessionStarted { cameras } => cameras,
+        let (cameras, monitoring_profiles) = match action {
+            SessionAction::SessionStarted {
+                cameras,
+                monitoring_profiles,
+            } => (cameras, monitoring_profiles),
             _ => return Err(Error::MissingSessionStart),
         };
         let camera_ids = camera_ids(&cameras)?;
+        validate_snapshot(&cameras, &monitoring_profiles)?;
         let mut actions = Vec::new();
         let mut end = None;
         let mut previous_offset_ms = session_offset_ms;
@@ -133,18 +140,21 @@ impl Session {
                         OperatorAction::SetCameraParticipation { camera_id, enabled },
                     ));
                 }
-                SessionAction::SamplingIntervalChanged {
-                    camera_id,
-                    sample_every_ms,
+                SessionAction::MonitoringProfileChanged {
+                    camera_ids: changed,
+                    monitoring_profile_id,
                 } => {
-                    require_camera(&camera_ids, camera_id)?;
-                    let sample_every = Duration::from_millis(sample_every_ms);
-                    duration_to_millis(camera_id, sample_every)?;
+                    validate_change(
+                        &camera_ids,
+                        &monitoring_profiles,
+                        &changed,
+                        monitoring_profile_id,
+                    )?;
                     actions.push((
                         offset,
-                        OperatorAction::SetSamplingInterval {
-                            camera_id,
-                            sample_every,
+                        OperatorAction::SetMonitoringProfile {
+                            camera_ids: changed,
+                            monitoring_profile_id,
                         },
                     ));
                 }
@@ -157,6 +167,7 @@ impl Session {
             start_utc_ms,
             end_offset: end.ok_or(Error::MissingSessionEnd)?,
             cameras,
+            monitoring_profiles,
             actions,
         })
     }
@@ -165,39 +176,40 @@ impl Session {
 /// One ordered line in the private persisted JSONL session schema.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct SessionEvent {
+pub struct SessionEvent {
     /// Version of the persisted event schema.
-    pub(super) schema_version: u8,
+    pub schema_version: u8,
     /// Zero-based contiguous position in the event log.
-    pub(super) sequence: u64,
+    pub sequence: u64,
     /// Session UUID shared by every line in the log.
-    pub(super) session_id: Uuid,
+    pub session_id: Uuid,
     /// UTC audit timestamp in milliseconds since the Unix epoch.
-    pub(super) utc_ms: i64,
+    pub utc_ms: i64,
     /// Deterministic position on the session timeline in milliseconds.
-    pub(super) session_offset_ms: u64,
-    pub(super) action: SessionAction,
+    pub session_offset_ms: u64,
+    pub action: SessionAction,
 }
 
 /// Persisted session actions; participation and cadence variants affect only sampling.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub(super) enum SessionAction {
+pub enum SessionAction {
     SessionStarted {
         cameras: Vec<SessionCamera>,
+        monitoring_profiles: Vec<MonitoringProfile>,
     },
     CameraParticipationChanged {
         camera_id: u32,
         enabled: bool,
     },
-    SamplingIntervalChanged {
-        camera_id: u32,
-        sample_every_ms: u64,
+    MonitoringProfileChanged {
+        camera_ids: Vec<u32>,
+        monitoring_profile_id: u32,
     },
     SessionEnded,
 }
 
-pub(super) fn camera_ids(cameras: &[SessionCamera]) -> Result<HashSet<u32>> {
+pub fn camera_ids(cameras: &[SessionCamera]) -> Result<HashSet<u32>> {
     if cameras.is_empty() {
         return Err(Error::EmptyCameraList);
     }
@@ -206,7 +218,6 @@ pub(super) fn camera_ids(cameras: &[SessionCamera]) -> Result<HashSet<u32>> {
         if camera.id == 0 {
             return Err(Error::ZeroCameraId);
         }
-        duration_to_millis(camera.id, camera.sample_every)?;
         if !camera_ids.insert(camera.id) {
             return Err(Error::DuplicateCamera {
                 camera_id: camera.id,
@@ -216,38 +227,40 @@ pub(super) fn camera_ids(cameras: &[SessionCamera]) -> Result<HashSet<u32>> {
     Ok(camera_ids)
 }
 
-pub(super) fn duration_to_millis(camera_id: u32, duration: Duration) -> Result<u64> {
-    let milliseconds = u64::try_from(duration.as_millis())
-        .map_err(|_| Error::InvalidSamplingInterval { camera_id })?;
-    if milliseconds == 0 {
-        Err(Error::InvalidSamplingInterval { camera_id })
-    } else {
-        Ok(milliseconds)
+/// Checks profile definitions and camera references in a session-start snapshot.
+pub fn validate_snapshot(cameras: &[SessionCamera], profiles: &[MonitoringProfile]) -> Result<()> {
+    validate_monitoring_profiles(profiles)?;
+    for camera in cameras {
+        require_profile(profiles, camera.initial_monitoring_profile_id)?;
     }
+    Ok(())
 }
 
-mod duration_millis {
-    use std::time::Duration;
-
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub(super) fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let milliseconds = u64::try_from(duration.as_millis()).map_err(|_| {
-            <S::Error as serde::ser::Error>::custom(
-                "sampling interval is outside the persisted millisecond range",
-            )
-        })?;
-        serializer.serialize_u64(milliseconds)
+pub fn validate_change(
+    known_cameras: &HashSet<u32>,
+    profiles: &[MonitoringProfile],
+    changed: &[u32],
+    profile_id: u32,
+) -> Result<()> {
+    require_profile(profiles, profile_id)?;
+    if changed.is_empty() {
+        return Err(Error::EmptyCameraList);
     }
+    let mut unique = HashSet::new();
+    for &camera_id in changed {
+        require_camera(known_cameras, camera_id)?;
+        if !unique.insert(camera_id) {
+            return Err(Error::DuplicateCamera { camera_id });
+        }
+    }
+    Ok(())
+}
 
-    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        u64::deserialize(deserializer).map(Duration::from_millis)
+fn require_profile(profiles: &[MonitoringProfile], id: u32) -> Result<()> {
+    if profiles.iter().any(|profile| profile.id == id) {
+        Ok(())
+    } else {
+        Err(crate::profiles::Error::UnknownMonitoring { id }.into())
     }
 }
 

@@ -143,16 +143,15 @@ fn desktop_operator_flow_records_two_cameras_and_analyzes() {
     camera_1.assert_process_group_exited(SHUTDOWN_TIMEOUT);
     camera_2.assert_process_group_exited(SHUTDOWN_TIMEOUT);
 
-    let sessions = list_sessions(&data_root.join("sessions")).expect("list E2E sessions");
+    let sessions = list_sessions(&data_root.join("sessions"))
+        .expect("list E2E sessions")
+        .sessions;
     assert_eq!(sessions.len(), 1, "expected one completed E2E session");
     let stored = &sessions[0];
     assert!(stored.session.actions.iter().any(|(_, action)| {
         matches!(
             action,
-            OperatorAction::SetSamplingInterval {
-                camera_id: 1,
-                sample_every
-            } if *sample_every == Duration::from_secs(2)
+            OperatorAction::SetMonitoringProfile { camera_ids, monitoring_profile_id: 2 } if camera_ids == &[1]
         )
     }));
 
@@ -268,7 +267,9 @@ fn desktop_analysis_resumes_after_transient_provider_failure() {
     camera_1.assert_process_group_exited(SHUTDOWN_TIMEOUT);
     camera_2.assert_process_group_exited(SHUTDOWN_TIMEOUT);
 
-    let sessions = list_sessions(&data_root.join("sessions")).expect("list E2E sessions");
+    let sessions = list_sessions(&data_root.join("sessions"))
+        .expect("list E2E sessions")
+        .sessions;
     assert_eq!(sessions.len(), 1, "expected one completed E2E session");
     let stored = &sessions[0];
     let checkpoint =
@@ -351,7 +352,7 @@ fn desktop_recording_remains_usable_without_preview() {
     let result = wait_for_desktop_result(&mut app, &driver_ready, &driver_result);
     assert_eq!(
         result,
-        "ok\nrecording completed without preview",
+        "ok\nrecording continued across metadata failure and a second session",
         "{}",
         app.diagnostics()
     );
@@ -363,7 +364,35 @@ fn desktop_recording_remains_usable_without_preview() {
     camera_1.assert_process_group_exited(SHUTDOWN_TIMEOUT);
     camera_2.assert_process_group_exited(SHUTDOWN_TIMEOUT);
 
-    let sessions = list_sessions(&data_root.join("sessions")).expect("list E2E sessions");
+    let catalog = list_sessions(&data_root.join("sessions")).expect("list E2E sessions");
+    assert_eq!(
+        catalog.incomplete.len(),
+        1,
+        "metadata failure retains its recording folder"
+    );
+    let interrupted = &catalog.incomplete[0];
+    let events =
+        fs::read_to_string(interrupted.join("events.jsonl")).expect("read last saved events");
+    assert!(events.contains("monitoring_profile_changed"));
+    assert!(events.contains("camera_participation_changed"));
+    assert!(!events.contains("session_ended"));
+    let retained =
+        list_segments(&interrupted.join("recordings"), &[1, 2]).expect("probe retained video");
+    assert_eq!(retained.len(), 2);
+    for segment in retained {
+        assert!(
+            segment.end_utc_ms - segment.start_utc_ms >= 4500,
+            "video must span the failure"
+        );
+        let decoded = Command::new("ffmpeg")
+            .args(["-nostdin", "-v", "error", "-i"])
+            .arg(&segment.path)
+            .args(["-f", "null", "-"])
+            .output()
+            .expect("decode retained video");
+        assert!(decoded.status.success(), "retained video must be playable");
+    }
+    let sessions = catalog.sessions;
     assert_eq!(sessions.len(), 1, "expected one completed E2E session");
     let stored = &sessions[0];
     let marker = fs::symlink_metadata(stored.directory.join("recording-complete"))
@@ -417,7 +446,7 @@ fn desktop_settings_file_is_strict_private_and_complete() {
     assert!(bytes.ends_with(b"\n"), "settings should end with a newline");
     let settings: Value = serde_json::from_slice(&bytes).expect("parse desktop settings");
     let expected = json!({
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "nextCameraId": 3,
         "cameras": [
             {
@@ -425,23 +454,28 @@ fn desktop_settings_file_is_strict_private_and_complete() {
                 "name": "Salon 1",
                 "rtspUrl": format!("rtsp://{}/axis-media/media.amp", camera_addresses[0]),
                 "initiallyIncludedInAnalysis": true,
-                "sampleEveryMs": 1_000
+                "initialMonitoringProfileId": 1
             },
             {
                 "id": 2,
                 "name": "Salon 2",
                 "rtspUrl": format!("rtsp://{}/axis-media/media.amp", camera_addresses[1]),
                 "initiallyIncludedInAnalysis": true,
-                "sampleEveryMs": 1_000
+                "initialMonitoringProfileId": 2
             }
         ],
         "dataRoot": data_root,
         "recorderTimeoutSecs": 10,
-        "analysisFrameSetsPerPrompt": 5,
-        "analysisOverlapFrameSets": 0,
+        "monitoringProfiles": [
+            {"id": 1, "name": "Standard", "sampleEveryMs": 1000},
+            {"id": 2, "name": "Stable", "sampleEveryMs": 2000}
+        ],
+        "nextMonitoringProfileId": 3,
+        "analysisProfiles": [{"id": 1, "name": "Fixture", "model": "local-e2e-model", "maxImagesPerPrompt": 10, "maxPromptSpanMs": 4000, "overlapFrameSets": 0, "imageSize": "original", "imageDetail": "providerDefault", "maxOutputTokens": null}],
+        "nextAnalysisProfileId": 2,
+        "defaultAnalysisProfileId": 1,
         "openai": {
             "apiKey": "local-e2e-key",
-            "model": "local-e2e-model",
             "baseUrl": mock_base_url
         },
         "logLevel": "info"

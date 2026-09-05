@@ -27,23 +27,23 @@ fn write_completed_session(
         .expect("render session directories should be created");
     let events = [
         json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "sequence": 0,
             "session_id": session_id,
             "utc_ms": start_utc_ms,
             "session_offset_ms": 0,
             "action": {
-                "type": "session_started",
+                "type": "session_started", "monitoring_profiles": crate::test_monitoring_profiles(),
                 "cameras": [{
                     "camera_id": 17,
                     "name": "Salon 1",
                     "enabled": true,
-                    "sample_every_ms": 1_000
+                    "initial_monitoring_profile_id": 1
                 }]
             }
         }),
         json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "sequence": 1,
             "session_id": session_id,
             "utc_ms": start_utc_ms + 4_000,
@@ -69,11 +69,13 @@ fn checkpoint(
     responses: Vec<AnalysisResponse>,
 ) -> AnalysisCheckpoint {
     AnalysisCheckpoint {
-        schema_version: 2,
+        schema_version: 3,
         session_id,
         checklist: "Persisted correct-sequence checklist".into(),
         plan_fingerprint: "0123456789abcdef".into(),
         total_batches,
+        analysis_profile: crate::test_analysis_profile(5, 0),
+        resolved_batches: (0..total_batches).map(|i| i..i + 1).collect(),
         warnings,
         responses,
     }

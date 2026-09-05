@@ -5,10 +5,9 @@ use super::{
     OpenAiConfig,
 };
 
-fn openai_config(api_key: &str, model: &str) -> OpenAiConfig {
+fn openai_config(api_key: &str) -> OpenAiConfig {
     OpenAiConfig {
         api_key: api_key.into(),
-        model: model.into(),
         base_url: None,
     }
 }
@@ -16,11 +15,17 @@ fn openai_config(api_key: &str, model: &str) -> OpenAiConfig {
 #[test]
 fn explicit_provider_configuration_rejects_blank_values() {
     assert!(matches!(
-        OpenAiAgent::from_config(openai_config("", "model")),
+        OpenAiAgent::from_config(openai_config(""), &crate::tests::analysis_profile(5, 0)),
         Err(Error::BlankConfiguration("OpenAI API key"))
     ));
     assert!(matches!(
-        OpenAiAgent::from_config(openai_config("key", "  ")),
+        OpenAiAgent::from_config(
+            openai_config("key"),
+            &crate::profiles::AnalysisProfile {
+                model: "  ".into(),
+                ..crate::tests::analysis_profile(5, 0)
+            }
+        ),
         Err(Error::BlankConfiguration("OpenAI model"))
     ));
 }
@@ -58,7 +63,7 @@ async fn analyze_deserializes_the_structured_response() {
     let agent = Agent::new(model);
 
     let actual = agent
-        .analyze(Message::user("prebuilt analysis prompt"))
+        .analyze(Message::user("prebuilt analysis prompt"), None)
         .await
         .expect("analysis should succeed");
 
@@ -75,7 +80,7 @@ async fn analyze_rejects_a_response_without_text() {
     let agent = Agent::new(model);
 
     let result = agent
-        .analyze(Message::user("prebuilt analysis prompt"))
+        .analyze(Message::user("prebuilt analysis prompt"), None)
         .await;
 
     assert!(matches!(result, Err(Error::MissingTextResponse)));

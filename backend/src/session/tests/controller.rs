@@ -11,7 +11,7 @@ fn camera(camera_id: u32, sample_every: Duration) -> SessionCamera {
         id: camera_id,
         name: format!("Camera {camera_id}"),
         enabled: true,
-        sample_every,
+        initial_monitoring_profile_id: sample_every.as_millis() as u32,
     }
 }
 
@@ -35,14 +35,15 @@ fn create_writes_the_session_start_schema_immediately() {
             id: 7,
             name: "Front".into(),
             enabled: false,
-            sample_every: Duration::from_millis(2_500),
+            initial_monitoring_profile_id: 2_500,
         }],
+        crate::tests::monitoring_profiles(),
     )
     .expect("session should be created");
 
     let events = read_events(&path);
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0]["schema_version"], 1);
+    assert_eq!(events[0]["schema_version"], 2);
     assert_eq!(events[0]["sequence"], 0);
     assert_eq!(events[0]["session_offset_ms"], 0);
     assert!(events[0]["utc_ms"].as_i64().is_some_and(|utc| utc > 0));
@@ -55,12 +56,12 @@ fn create_writes_the_session_start_schema_immediately() {
     assert_eq!(
         events[0]["action"],
         json!({
-            "type": "session_started",
+            "type": "session_started", "monitoring_profiles": crate::tests::monitoring_profiles(),
             "cameras": [{
                 "camera_id": 7,
                 "name": "Front",
                 "enabled": false,
-                "sample_every_ms": 2_500
+                "initial_monitoring_profile_id": 2_500
             }]
         })
     );
@@ -70,9 +71,12 @@ fn create_writes_the_session_start_schema_immediately() {
 fn apply_routes_actions_and_assigns_contiguous_sequences() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let path = directory.path().join("events.jsonl");
-    let mut controller =
-        SessionController::create(path.clone(), vec![camera(1, Duration::from_secs(5))])
-            .expect("session should be created");
+    let mut controller = SessionController::create(
+        path.clone(),
+        vec![camera(1, Duration::from_secs(5))],
+        crate::tests::monitoring_profiles(),
+    )
+    .expect("session should be created");
 
     controller
         .apply(OperatorAction::SetCameraParticipation {
@@ -81,9 +85,9 @@ fn apply_routes_actions_and_assigns_contiguous_sequences() {
         })
         .expect("participation should be recorded");
     controller
-        .apply(OperatorAction::SetSamplingInterval {
-            camera_id: 1,
-            sample_every: Duration::from_millis(750),
+        .apply(OperatorAction::SetMonitoringProfile {
+            camera_ids: vec![1],
+            monitoring_profile_id: 750,
         })
         .expect("sampling interval should be recorded");
     controller
@@ -121,9 +125,7 @@ fn apply_routes_actions_and_assigns_contiguous_sequences() {
     assert_eq!(
         events[2]["action"],
         json!({
-            "type": "sampling_interval_changed",
-            "camera_id": 1,
-            "sample_every_ms": 750
+            "type": "monitoring_profile_changed", "camera_ids": [1], "monitoring_profile_id": 750
         })
     );
     assert_eq!(events[3]["action"], json!({"type": "session_ended"}));
@@ -151,13 +153,14 @@ fn create_rejects_invalid_camera_lists_before_writing() {
         (
             "zero interval",
             vec![camera(1, Duration::ZERO)],
-            "sampling interval",
+            "monitoring profile",
         ),
     ] {
         let path = directory.path().join(format!("{name}.jsonl"));
 
-        let error = SessionController::create(path.clone(), cameras)
-            .expect_err("invalid cameras should be rejected");
+        let error =
+            SessionController::create(path.clone(), cameras, crate::tests::monitoring_profiles())
+                .expect_err("invalid cameras should be rejected");
 
         assert!(error.to_string().contains(expected), "{name}");
         assert!(!path.exists(), "{name}");
@@ -165,21 +168,24 @@ fn create_rejects_invalid_camera_lists_before_writing() {
 }
 
 #[test]
-fn apply_rejects_zero_intervals_without_appending() {
+fn apply_rejects_unknown_profiles_without_appending() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let path = directory.path().join("events.jsonl");
-    let mut controller =
-        SessionController::create(path.clone(), vec![camera(1, Duration::from_secs(1))])
-            .expect("session should be created");
+    let mut controller = SessionController::create(
+        path.clone(),
+        vec![camera(1, Duration::from_secs(1))],
+        crate::tests::monitoring_profiles(),
+    )
+    .expect("session should be created");
 
     let error = controller
-        .apply(OperatorAction::SetSamplingInterval {
-            camera_id: 1,
-            sample_every: Duration::ZERO,
+        .apply(OperatorAction::SetMonitoringProfile {
+            camera_ids: vec![1],
+            monitoring_profile_id: 0,
         })
-        .expect_err("sampling intervals should be positive");
+        .expect_err("profile must belong to the snapshot");
 
-    assert!(error.to_string().contains("sampling interval"));
+    assert!(error.to_string().contains("monitoring profile"));
     assert_eq!(read_events(&path).len(), 1);
 }
 
@@ -187,18 +193,21 @@ fn apply_rejects_zero_intervals_without_appending() {
 fn apply_rejects_unknown_cameras_without_appending() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let path = directory.path().join("events.jsonl");
-    let mut controller =
-        SessionController::create(path.clone(), vec![camera(1, Duration::from_secs(1))])
-            .expect("session should be created");
+    let mut controller = SessionController::create(
+        path.clone(),
+        vec![camera(1, Duration::from_secs(1))],
+        crate::tests::monitoring_profiles(),
+    )
+    .expect("session should be created");
 
     for action in [
         OperatorAction::SetCameraParticipation {
             camera_id: 9,
             enabled: false,
         },
-        OperatorAction::SetSamplingInterval {
-            camera_id: 9,
-            sample_every: Duration::from_secs(1),
+        OperatorAction::SetMonitoringProfile {
+            camera_ids: vec![9],
+            monitoring_profile_id: 1000,
         },
     ] {
         let error = controller
@@ -214,9 +223,12 @@ fn apply_rejects_unknown_cameras_without_appending() {
 fn apply_rejects_actions_after_the_session_ends() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let path = directory.path().join("events.jsonl");
-    let mut controller =
-        SessionController::create(path.clone(), vec![camera(1, Duration::from_secs(1))])
-            .expect("session should be created");
+    let mut controller = SessionController::create(
+        path.clone(),
+        vec![camera(1, Duration::from_secs(1))],
+        crate::tests::monitoring_profiles(),
+    )
+    .expect("session should be created");
     controller
         .apply(OperatorAction::EndSession)
         .expect("session should end");
@@ -236,11 +248,60 @@ fn apply_rejects_actions_after_the_session_ends() {
 fn elapsed_advances_with_the_session_clock() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let path = directory.path().join("events.jsonl");
-    let controller = SessionController::create(path, vec![camera(1, Duration::from_secs(1))])
-        .expect("session should be created");
+    let controller = SessionController::create(
+        path,
+        vec![camera(1, Duration::from_secs(1))],
+        crate::tests::monitoring_profiles(),
+    )
+    .expect("session should be created");
     let first = controller.elapsed();
 
     std::thread::sleep(Duration::from_millis(1));
 
     assert!(controller.elapsed() > first);
+}
+
+#[test]
+fn bulk_profile_assignment_validates_every_target_before_one_durable_event() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("events.jsonl");
+    let profiles = crate::tests::monitoring_profiles();
+    let mut controller = SessionController::create(
+        path.clone(),
+        vec![
+            camera(1, Duration::from_secs(1)),
+            camera(2, Duration::from_secs(2)),
+        ],
+        profiles.clone(),
+    )
+    .unwrap();
+    let initial = std::fs::read(&path).unwrap();
+    for camera_ids in [vec![], vec![1, 1], vec![1, 9]] {
+        assert!(
+            controller
+                .apply(OperatorAction::SetMonitoringProfile {
+                    camera_ids,
+                    monitoring_profile_id: 500
+                })
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), initial);
+    }
+    controller
+        .apply(OperatorAction::SetMonitoringProfile {
+            camera_ids: vec![1, 2],
+            monitoring_profile_id: 500,
+        })
+        .unwrap();
+    controller.apply(OperatorAction::EndSession).unwrap();
+    let session = crate::session::Session::load(&path).unwrap();
+    assert_eq!(session.monitoring_profiles, profiles);
+    assert_eq!(session.actions.len(), 1);
+    assert_eq!(
+        session.actions[0].1,
+        OperatorAction::SetMonitoringProfile {
+            camera_ids: vec![1, 2],
+            monitoring_profile_id: 500
+        }
+    );
 }

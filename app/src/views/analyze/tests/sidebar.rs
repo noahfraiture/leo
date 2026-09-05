@@ -14,11 +14,13 @@ fn checkpoint(
         checklist_progress: Vec::new(),
     };
     Ok(Some(AnalysisCheckpoint {
-        schema_version: 2,
+        schema_version: 3,
         session_id: Uuid::from_u128(1),
         checklist: "Complete the exercise".into(),
         plan_fingerprint: "0123456789abcdef".into(),
         total_batches,
+        analysis_profile: crate::test_analysis_profile(5, 0),
+        resolved_batches: (0..total_batches).map(|i| i..i + 1).collect(),
         warnings,
         responses: vec![response; response_count],
     }))

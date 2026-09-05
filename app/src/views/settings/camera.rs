@@ -36,7 +36,7 @@ pub fn CameraSettingsSection() -> Element {
                             .cloned();
                         let cadence_error = page
                             .field_errors
-                            .get(&SettingsField::CameraSampleEvery(id))
+                            .get(&SettingsField::CameraMonitoringProfile(id))
                             .cloned();
                         (camera, name_error, url_error, cadence_error)
                     })
@@ -44,6 +44,7 @@ pub fn CameraSettingsSection() -> Element {
         )
     };
 
+    let profiles = state.read().draft.monitoring_profiles.clone();
     rsx! {
         section {
             class: "rounded-box min-w-0 border border-base-300 p-4",
@@ -71,11 +72,7 @@ pub fn CameraSettingsSection() -> Element {
                     for (camera, has_error) in cameras {
                         li { key: "{camera.id}",
                             button {
-                                class: if selected_camera_id == Some(camera.id) {
-                                    "btn h-auto w-full justify-start border-primary bg-base-100 p-3 text-left"
-                                } else {
-                                    "btn btn-ghost h-auto w-full justify-start p-3 text-left"
-                                },
+                                class: if selected_camera_id == Some(camera.id) { "btn h-auto w-full justify-start border-primary bg-base-100 p-3 text-left" } else { "btn btn-ghost h-auto w-full justify-start p-3 text-left" },
                                 r#type: "button",
                                 aria_pressed: selected_camera_id == Some(camera.id),
                                 onclick: move |_| state.write().selected_camera_id = Some(camera.id),
@@ -83,7 +80,9 @@ pub fn CameraSettingsSection() -> Element {
                                     span { class: "block font-medium", "{camera.name}" }
                                     span { class: "block text-xs font-normal", "Camera ID {camera.id}" }
                                     if has_error {
-                                        span { class: "badge badge-error badge-outline mt-1", "Needs attention" }
+                                        span { class: "badge badge-error badge-outline mt-1",
+                                            "Needs attention"
+                                        }
                                     }
                                 }
                             }
@@ -120,8 +119,8 @@ pub fn CameraSettingsSection() -> Element {
                             value: camera.name,
                             aria_invalid: name_error.as_ref().map(|_| "true"),
                             aria_describedby: name_error
-                                .as_ref()
-                                .map(|_| format!("camera-{}-name-error", camera.id)),
+                                                            .as_ref()
+                                                            .map(|_| format!("camera-{}-name-error", camera.id)),
                             oninput: move |event| {
                                 if let Some(camera) = state
                                     .write()
@@ -156,8 +155,8 @@ pub fn CameraSettingsSection() -> Element {
                             value: camera.rtsp_url,
                             aria_invalid: url_error.as_ref().map(|_| "true"),
                             aria_describedby: url_error
-                                .as_ref()
-                                .map(|_| format!("camera-{}-rtsp-url-error", camera.id)),
+                                                            .as_ref()
+                                                            .map(|_| format!("camera-{}-rtsp-url-error", camera.id)),
                             oninput: move |event| {
                                 if let Some(camera) = state
                                     .write()
@@ -203,20 +202,13 @@ pub fn CameraSettingsSection() -> Element {
                         label {
                             class: "text-sm font-medium",
                             r#for: "camera-{camera.id}-sample-every",
-                            "Sample every (seconds)"
+                            "Initial monitoring profile"
                         }
-                        input {
+                        select {
                             id: "camera-{camera.id}-sample-every",
-                            class: "input input-bordered w-full",
-                            r#type: "number",
-                            min: "1",
-                            step: "1",
-                            value: camera.sample_every_secs,
-                            aria_invalid: cadence_error.as_ref().map(|_| "true"),
-                            aria_describedby: cadence_error
-                                .as_ref()
-                                .map(|_| format!("camera-{}-sample-every-error", camera.id)),
-                            oninput: move |event| {
+                            class: "select select-bordered w-full",
+                            value: "{camera.initial_monitoring_profile_id}",
+                            onchange: move |event| {
                                 if let Some(camera) = state
                                     .write()
                                     .draft
@@ -224,9 +216,13 @@ pub fn CameraSettingsSection() -> Element {
                                     .iter_mut()
                                     .find(|draft| draft.id == camera.id)
                                 {
-                                    camera.sample_every_secs = event.value();
+                                    camera.initial_monitoring_profile_id = event.value().parse().unwrap_or(0);
                                 }
                             },
+                            option { value: "0", "Select a monitoring profile" }
+                            for profile in profiles {
+                                option { value: "{profile.id}", "{profile.name}" }
+                            }
                         }
                         if let Some(ref error) = cadence_error {
                             p {

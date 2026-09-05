@@ -1,5 +1,6 @@
 //! Resumable batch execution and durable progress checkpoints.
 
+mod batch;
 mod engine;
 mod progress;
 

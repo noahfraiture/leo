@@ -1,7 +1,6 @@
 //! Shared server-rendering support for view-owning test modules.
 
 use std::{
-    num::NonZeroUsize,
     path::PathBuf,
     rc::Rc,
     sync::{Arc, Mutex},
@@ -95,12 +94,9 @@ impl RenderHarness {
         )
         .expect("test recorder runtime should start");
         let operator = OperatorState::new(
-            cameras,
+            crate::test_settings(cameras, Some(crate::test_openai_config()), 5, 0),
             temporary.path().join("sessions"),
             recorder,
-            Some(crate::test_openai_config()),
-            NonZeroUsize::new(5).unwrap(),
-            0,
         )
         .expect("render operator state should initialize");
 
@@ -129,10 +125,14 @@ impl RenderHarness {
             .begin_start(START_UTC_MS)
             .expect("idle render state should begin starting");
         let directory = request.directory.clone();
-        let controller = SessionController::create(request.events_path, request.session_cameras)
-            .expect("active render controller should be created");
+        let controller = SessionController::create(
+            request.events_path,
+            request.session_cameras,
+            crate::test_monitoring_profiles(),
+        )
+        .expect("active render controller should be created");
         self.operator_mut()
-            .finish_start(directory.clone(), controller);
+            .finish_start(directory.clone(), Some(controller));
         directory
     }
 
@@ -181,14 +181,14 @@ pub fn camera_settings() -> Vec<CameraSettings> {
             name: "Salon 1".into(),
             rtsp_url: "rtsp://camera-one.example/live".into(),
             initially_included_in_analysis: true,
-            sample_every_ms: 1_000,
+            initial_monitoring_profile_id: 1,
         },
         CameraSettings {
             id: 42,
             name: "Salon 2".into(),
             rtsp_url: "rtsp://camera-two.example/live".into(),
             initially_included_in_analysis: false,
-            sample_every_ms: 2_000,
+            initial_monitoring_profile_id: 2,
         },
     ]
 }

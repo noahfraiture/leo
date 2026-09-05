@@ -39,16 +39,17 @@ const startSession = async () => {
     );
 };
 
-const changeFirstCameraCadence = async () => {
-    const cadence = await waitFor(
-        () => document.getElementById("sampling-interval-1"),
-        "camera one cadence input",
-    );
-    input(cadence, "2");
-    cadence.closest("form").dispatchEvent(new Event("submit", {
-        bubbles: true,
-        cancelable: true,
-    }));
+const changeFirstCameraProfile = async () => {
+    const select = await waitFor(() => document.getElementById("monitoring-profile-1"), "camera one monitoring selector");
+    select.value = "1";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await sleep(100);
+    (await waitFor(() => button("Apply to all cameras"), "bulk monitoring action")).click();
+    await sleep(100);
+    select.value = "2";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await sleep(100);
+    (await waitFor(() => button("Apply to selected camera"), "individual monitoring action")).click();
 };
 
 const stopSession = async () => {
@@ -123,7 +124,7 @@ const waitForFailedPartialAnalysis = async () => {
 const completeAnalysis = async () => {
     await waitForLivePreviews();
     await startSession();
-    await changeFirstCameraCadence();
+    await changeFirstCameraProfile();
     await sleep(3000);
     await stopSession();
     await beginAnalysis();
@@ -153,12 +154,29 @@ const recordWithoutPreview = async () => {
         "preview failure guidance",
     );
     await startSession();
+    await changeFirstCameraProfile();
+    (await waitFor(() => button("Exclude from analysis"), "participation control")).click();
+    await sleep(2000);
+    dioxus.send("inject-metadata-failure");
+    await dioxus.recv();
+    const select = document.getElementById("monitoring-profile-1");
+    select.value = "1";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await sleep(100);
+    (await waitFor(() => button("Apply to all cameras"), "bulk metadata write")).click();
+    await waitFor(() => document.body.innerText.includes("Last saved"), "last saved metadata warning");
+    await sleep(3000);
+    if (document.querySelectorAll('[aria-label$="recorder status: Recording"]').length !== 2) {
+        throw new Error("Metadata failure interrupted camera recording");
+    }
+    await stopSession();
+    await startSession();
     await sleep(3000);
     await stopSession();
-    return "ok\nrecording completed without preview";
+    return "ok\nrecording continued across metadata failure and a second session";
 };
 
-(async () => {
+await (async () => {
     if (scenario === "complete-analysis") {
         dioxus.send(await completeAnalysis());
     } else if (scenario === "analysis-recovery") {

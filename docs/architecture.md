@@ -56,11 +56,11 @@ Leo owns production configuration in one strict, versioned `settings.json`. The 
 | macOS | `~/Library/Application Support/Leo/settings.json` | `~/Library/Application Support/Leo/data/` |
 | Linux | `${XDG_CONFIG_HOME:-$HOME/.config}/leo/settings.json` | `${XDG_DATA_HOME:-$HOME/.local/share}/leo/` |
 
-The schema uses strict camel-case JSON and rejects unknown fields or unsupported schema versions. It persists `schemaVersion`, `nextCameraId`, an ordered `cameras` list, optional `dataRoot`, `recorderTimeoutSecs`, `analysisFrameSetsPerPrompt`, `analysisOverlapFrameSets`, OpenAI key/model/base URL fields, and `logLevel`. Leo generates nonzero camera IDs monotonically; IDs are visible but immutable, are not reused after removal, and remain shared by preview metadata, operator state, session events, recording directories, warnings, and results. Zero cameras and any configured camera count are valid.
+Settings schema 3 uses camel-case JSON, rejects unknown top-level fields and unsupported versions, and has separate recording, monitoring, and analysis validation. It stores cameras, storage, recorder timeout, logging level, monitoring definitions, analysis definitions, their monotonic ID allocators, a default analysis profile ID, and provider credentials. Camera and profile IDs are nonzero, immutable, and not reused. Profiles also require unique nonblank names. Zero cameras and any configured camera count are valid.
 
-Each camera requires a nonblank name, an `rtsp` URL, an initial analysis-participation flag, and a positive whole-second sampling cadence. Analysis sends a positive configured number of synchronized frame sets per prompt and can repeat fewer than that number between adjacent prompts; one frame set can contain one image per participating camera. The persisted recorder timeout is the initial all-camera readiness deadline and bounded FFmpeg RTSP network I/O timeout; it must fit both FFmpeg microseconds and a Rust deadline. Reconnect delay remains one second, and graceful Stop has five seconds before forced termination. An optional provider base URL must be absolute HTTP or HTTPS. A blank provider key or model disables Analyze with sanitized guidance but leaves Monitor and completed-session discovery available.
+Each camera requires a nonblank name and an `rtsp` URL for capture. Initial participation and a monitoring profile ID describe later analysis only. Monitoring profiles contain a positive millisecond interval, including subsecond values. Analysis profiles contain the model, maximum images per prompt, required maximum timestamp span, fixed overlap in complete frame sets, image-size policy, image-detail policy, and optional output-token cap. Counts, spans, dimensions, and optional caps must be positive. Provider credentials hold only the key and optional absolute HTTP(S) base URL. Invalid monitoring, analysis, or credentials disable their affected feature without disabling recording. The recorder timeout must fit FFmpeg microseconds and a Rust deadline; reconnect delay remains one second and graceful Stop five seconds.
 
-`dataRoot: null` selects the platform default. The one effective data root contains `sessions/` and `logs/` children. Save validates the draft, creates those directories, and writes an owner-only `settings.json`.
+`dataRoot: null` selects the platform default. Save validates recording fields, creates required settings and session directories, and writes owner-only settings. Invalid optional profile definitions can be saved with warnings so they cannot prevent correcting recording configuration. Malformed optional JSON sections load independently with a visible feature error; the original file is not rewritten on load. Diagnostic log-directory creation is best effort.
 
 Settings displays complete RTSP URLs for editing, but errors and logs omit them. The API key is masked by default. Save is allowed during recording or analysis. It neither interrupts active work nor changes logging, storage, cameras, preview, recorder, catalogue, or provider until restart, and changing the data root does not move existing sessions. There is no import, migration, hot reload, or automatic restart.
 
@@ -82,7 +82,7 @@ route table. The `operator` module owns route-independent state plus recording a
 coordination. Route views remain under `views`; the Settings view is composed from separate camera,
 storage, recording, provider, application, and sidebar sections.
 
-A missing file opens Settings with a valid zero-camera draft and does not create runtime directories. Any other settings load, validation, or directory-preparation error fails startup. Valid settings initialize compact stderr and daily JSON logging, spawn `RecorderRuntime` after its `ffmpeg`/`ffprobe` preflight, create `OperatorState` and discover completed sessions, and then start preview. Logging, recorder, or catalogue failure leaves the shell running with route-specific failure guidance and Settings reachable.
+A missing file opens Settings with a zero-camera draft. An unreadable file, unsupported schema, invalid recording fields, or unavailable required storage opens a recovery shell with Settings accessible. Optional metadata errors do not prevent recorder startup. Valid recording settings spawn `RecorderRuntime` after its FFmpeg/FFprobe preflight. Logging falls back to stderr and catalogue failure produces a warning while capture remains available. Preview startup remains independent.
 
 Every shell branch receives `RuntimeAvailability` and `SettingsContext`. Concrete `ResolvedSettings`, `PreviewState`, `RecorderBootstrap`, and initial operator-state contexts exist only in the ready branch; `ReadyApp` alone takes the recorder event receiver and provides `Signal<OperatorState>`. Setup, failed, and ready Settings routes therefore never require operational contexts. Missing settings initially select Settings. A runtime failure after valid settings initially selects Monitor, where the failure and a Settings link remain visible.
 
@@ -128,21 +128,21 @@ ffmpeg -hide_banner -loglevel info
   <camera directory>/.attempt-<uuid>.partial.mkv
 ```
 
-There is no video transcoding and no audio output. Matroska accepts H.264 or H.265 stream copy and allows useful finalization after interruptions. FFmpeg progress must report at least one output frame and the partial file must be nonempty before that camera is ready. The session becomes Active only after every configured camera is ready and `SessionController` durably creates `events.jsonl` with the start event.
+There is no video transcoding and no audio output. Matroska accepts H.264 or H.265 stream copy and allows useful finalization after interruptions. FFmpeg progress must report at least one output frame and the partial file must be nonempty before that camera is ready. The session becomes Active after every configured camera is ready. `SessionController` then attempts to create the start event; a metadata failure produces a warning while capture continues.
 
 If any initial recorder fails or times out, startup interrupts every attempt, stops or kills and reaps all children, removes the staging directory when cleanup is sound, and returns to Idle with one shared error. It creates neither a completed event log nor a completion marker.
 
 ### Operator Actions
 
-Participation and whole-second sampling cadence changes are appended to `events.jsonl` before UI state changes. They affect the later sampling schedule, not capture. Metadata write uncertainty faults the session and triggers recorder cleanup.
+Participation and monitoring profile changes affect the later sampling schedule only. Before Start they prepare initial selections. During recording, the app appends one durable event before changing visible state. A bulk assignment records all targeted camera IDs in a single event after validating the entire target set. Metadata write uncertainty leaves capture active, retains the last saved selections, disables further metadata changes, and keeps Stop usable. It does not trigger recorder cleanup.
 
-Each event includes schema version, contiguous sequence number, session UUID, UTC audit time, deterministic session-relative offset, and the operator action. The monotonic session clock determines action offsets.
+Event schema 2 includes a contiguous sequence number, session UUID, UTC audit time, deterministic monotonic session offset, and action. The start event snapshots all monitoring definitions and each camera's initial profile and participation. Replay resolves IDs only from this immutable snapshot, never from current Settings.
 
 | Operator intent | Durable event | Effect on recording | Effect on later analysis |
 | --- | --- | --- | --- |
-| Start | `SessionController::create` writes `session_started` after every recorder is ready. | All configured cameras are already recording. | Captures each camera's initial participation and cadence. |
+| Start | `SessionController::create` writes `session_started` after every recorder is ready. | All configured cameras are already recording. | Snapshots all profile definitions and each camera's initial participation and profile. |
 | Include or exclude a camera | `SetCameraParticipation` writes `camera_participation_changed`. | None; the camera keeps recording. | Starts or ends that camera's sampling period at the event offset. |
-| Change cadence | `SetSamplingInterval` writes `sampling_interval_changed`. | None. | While participating, samples immediately at the event offset and starts the new cadence. While excluded, the cadence applies when participation resumes. |
+| Apply monitoring profile | `SetMonitoringProfile` writes one `monitoring_profile_changed` with camera IDs and profile ID. | None. | A different profile starts a new cadence at that offset; excluded cameras use it when participation resumes. |
 | Stop | `EndSession` writes `session_ended` before the app separately stops the recorder. | The action itself does not control FFmpeg. | Establishes the exclusive end of the sampling timeline. |
 
 Session selection, route navigation, checklist edits, and Analyze do not append operator events. `SessionController::apply` flushes and synchronizes each JSONL line before returning. For participation and cadence changes, the workflow updates corresponding UI state only after that call succeeds.
@@ -170,7 +170,7 @@ Operator Stop first attempts the durable end event and always commands recorder 
 - valid media is atomically renamed to `<segment-start-UTC-ms>.mkv` without overwrite;
 - empty attempts are removed and invalid nonempty attempts remain for diagnosis.
 
-Only when the end event, all recorder cleanup, probing, and promotion succeed does Stop create `recording-complete`, return the workflow to Idle, and refresh completed sessions. Any uncertain finalization leaves the session Faulted and unavailable to Analyze.
+After recorder Stop, probing, and promotion succeed, the workflow returns to Idle even if the end event or completion marker failed. Such failures produce a metadata warning and keep the incomplete folder discoverable, allowing the next session. Only a valid ended log plus a durable completion marker makes a session eligible for analysis. Recorder cleanup or media-finalization failures still leave the session Faulted.
 
 ## Portable Session Storage
 
@@ -208,6 +208,8 @@ In practice, the files form a small commit protocol:
 
 `Session::load` reconstructs state by replaying `events.jsonl`; there is no separate mutable session snapshot. The catalogue requires both a valid ended log and the completion marker. Analysis then combines that replayed timeline with the finalized segments, so moving the whole completed directory does not change the plan identity.
 
+The catalogue also returns direct recording folders with missing or invalid metadata as incomplete. Analyze offers folder access without treating these as analyzable sessions. No automatic repair or crash-continuity subsystem is provided.
+
 Discovery scans direct children only and rejects symbolic links. A completed session requires both a valid ended event log and the marker. Finalized segment discovery accepts only direct regular files whose names are numeric UTC milliseconds with exact `.mkv` extension. It ignores partial and unrelated files, probes duration, rejects duplicate starts and same-camera overlap, and sorts by stable camera ID and start time.
 
 Absolute paths are excluded from checkpoint plan identity, so a completed directory can move intact to another local filesystem path. Leo does not perform that move.
@@ -222,20 +224,22 @@ Analyze operates only on a selected completed session while recording is Idle. `
 4. Replay participation and cadence events into deterministic sample schedules.
 5. Derive every uncovered camera interval as a persisted recording-gap warning.
 6. Omit samples without media, retain available frames from other cameras, and continue after reconnect gaps.
-7. Build configured overlapping frame-set batches and write or validate the initial zero-response `analysis.json` checkpoint.
+7. Plan the complete batch-range list under image and timestamp-span limits, then write or validate the initial zero-response checkpoint.
 8. Construct the provider only if an incomplete batch remains.
 9. Extract requested JPEG bytes directly from local MKVs with FFmpeg, send one structured batch request, and atomically replace the checkpoint after success.
 10. Emit each complete durable checkpoint snapshot to the real `OperatorState` callback.
 
-A frame set may contain any available subset of the session cameras. An offset with no available frame is omitted. No available frames across the complete plan fails before provider construction. Invalid or overlapping segments fail without replacing a valid prior checkpoint.
+Sampling periods use inclusive starts and exclusive ends. Same-profile assignments are no-ops; switching to a different profile restarts the cadence even if its interval is equal. At the same offset, ordered events reduce to their final state. There is no pre-roll or post-roll.
 
-The checkpoint stores schema version, session UUID, authoritative checklist, path-independent plan fingerprint, total batches, recording-gap warnings, and completed responses. Vector position is the batch number. Resume validates all plan identity and keeps prior responses. A completed checkpoint returns without provider construction.
+A frame set may contain any available subset of the session cameras. An offset with no available frame is omitted. No available frames, a frame set larger than the image limit, or fixed overlap that prevents new evidence fails before provider construction. Frame sets stay atomic. The maximum span is last timestamp minus first timestamp, allowing equality. Overlap counts toward both limits and never creates an overlap-only trailing batch. Invalid or overlapping segments fail without replacing a valid prior checkpoint.
 
-Frame extraction removes its temporary JPEG after reading the bytes. There are no downloaded clips, temporary MP4s, or persistent JPEGs in the session tree. Provider or checkpoint failures preserve the last durable response prefix for retry.
+Checkpoint schema 3 stores session UUID, authoritative checklist, the complete resolved analysis profile, exact frame-set batch ranges, path-independent plan fingerprint, recording-gap warnings, and the completed response prefix. The fingerprint includes every profile field and resolved range. Resume rebuilds and checks the input identity and ranges using the saved profile, independently of edited or deleted Settings profiles. An explicit confirmed "New analysis" removes only the old checkpoint. A completed checkpoint returns without provider construction.
+
+Frame extraction optionally resizes temporary JPEG evidence to a maximum long edge without upscaling or changing aspect ratio. Image detail and optional output-token limits are passed to the provider request. Original recordings are never resized. Temporary images are removed after reading; provider or checkpoint failures preserve the last durable response prefix. `AnalyzeSession` accepts an explicit analysis profile and optional checkpoint path for isolated evaluations. The session event snapshot supplies monitoring profiles. Production uses one `analysis.json` per session; no evaluation campaign or automatic profile selector runs here.
 
 ## End-To-End Coverage
 
-Leo has focused integration slices plus three opt-in macOS desktop E2E scenarios. They use the same explicit two-fixture setup: both fixture-camera binaries and the production WKWebView application entry point. The scenarios cover the complete Start-through-Analyze flow, resuming a partial checkpoint after one provider failure, and recording when preview startup fails. The fixed setup does not constrain production camera count.
+Leo has focused integration slices plus three opt-in macOS desktop E2E scenarios. They use the same explicit two-fixture setup: both fixture-camera binaries and the production WKWebView application entry point. The scenarios cover the complete Start-through-Analyze flow, resuming a partial checkpoint after one provider failure, and recording when preview startup fails, including mixed profiles, bulk assignment, participation changes, a forced metadata-write failure, retained playable video, and a subsequent session. The fixed setup does not constrain production camera count.
 
 | Coverage | What is real | What is substituted or absent |
 | --- | --- | --- |

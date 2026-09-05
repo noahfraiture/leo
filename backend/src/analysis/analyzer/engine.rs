@@ -1,6 +1,5 @@
 use std::{
     io::Write,
-    num::NonZeroUsize,
     ops::Range,
     path::{Path, PathBuf},
     time::Duration,
@@ -15,6 +14,7 @@ use crate::{
             recording_gap_warnings,
         },
     },
+    profiles::{AnalysisProfile, ImageDetailPolicy},
     recording::RecordingSegment,
     session::Session,
 };
@@ -26,7 +26,10 @@ use rig_core::{
 };
 use sha2::{Digest, Sha256};
 
-use super::progress::{ANALYSIS_SCHEMA_VERSION, AnalysisCheckpoint};
+use super::{
+    batch::plan_batches,
+    progress::{ANALYSIS_SCHEMA_VERSION, AnalysisCheckpoint},
+};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -35,8 +38,7 @@ pub struct Analyzer {
     session: Session,
     checklist: String,
     frame_sets: Vec<FrameSet>,
-    frame_sets_per_batch: NonZeroUsize,
-    overlap_frame_sets: usize,
+
     progress_path: PathBuf,
     checkpoint: AnalysisCheckpoint,
 }
@@ -47,35 +49,24 @@ impl Analyzer {
         segments: Vec<RecordingSegment>,
         session: Session,
         checklist: String,
-        frame_sets_per_batch: NonZeroUsize,
-        overlap_frame_sets: usize,
+        profile: AnalysisProfile,
         progress_path: PathBuf,
     ) -> Result<Self> {
         let session_id = session.id;
         tracing::info!(session_id = %session_id, "planning analysis");
 
-        Self::resume_inner(
-            segments,
-            session,
-            checklist,
-            frame_sets_per_batch,
-            overlap_frame_sets,
-            progress_path,
-        )
-        .inspect_err(|_| tracing::error!(session_id = %session_id, "analysis planning failed"))
+        Self::resume_inner(segments, session, checklist, profile, progress_path)
+            .inspect_err(|_| tracing::error!(session_id = %session_id, "analysis planning failed"))
     }
 
     fn resume_inner(
         segments: Vec<RecordingSegment>,
         session: Session,
         checklist: String,
-        frame_sets_per_batch: NonZeroUsize,
-        overlap_frame_sets: usize,
+        profile: AnalysisProfile,
         progress_path: PathBuf,
     ) -> Result<Self> {
-        if overlap_frame_sets >= frame_sets_per_batch.get() {
-            return Err(Error::InvalidBatchOverlap);
-        }
+        profile.validate()?;
         let mut schedules = Vec::new();
         for camera in &session.cameras {
             let schedule = SamplingSchedule::from_session(&session, camera.id)?;
@@ -94,21 +85,17 @@ impl Analyzer {
         if frame_sets.is_empty() {
             return Err(Error::NoAnalyzableFrames);
         }
-        let plan_fingerprint =
-            plan_fingerprint(&frame_sets, frame_sets_per_batch, overlap_frame_sets)?;
-        let stride = frame_sets_per_batch.get() - overlap_frame_sets;
-        let total_batches = frame_sets
-            .len()
-            .saturating_sub(frame_sets_per_batch.get())
-            .div_ceil(stride)
-            + 1;
+        let resolved_batches = plan_batches(&frame_sets, &profile)?;
+        let plan_fingerprint = plan_fingerprint(&frame_sets, &profile, &resolved_batches)?;
+        let total_batches = resolved_batches.len();
         tracing::info!(session_id = %session.id, total_batches, "analysis plan ready");
         let (checkpoint, is_new) = load_or_new(
             &progress_path,
             session.id,
             &checklist,
             &plan_fingerprint,
-            total_batches,
+            &profile,
+            &resolved_batches,
             &warnings,
         )?;
 
@@ -136,8 +123,6 @@ impl Analyzer {
             session,
             checklist,
             frame_sets,
-            frame_sets_per_batch,
-            overlap_frame_sets,
             progress_path,
             checkpoint,
         })
@@ -202,12 +187,7 @@ impl Analyzer {
 
     fn batch_range(&self, index: usize) -> Range<usize> {
         debug_assert!(index < self.checkpoint.total_batches);
-        let stride = self.frame_sets_per_batch.get() - self.overlap_frame_sets;
-        let start = index * stride;
-        start
-            ..start
-                .saturating_add(self.frame_sets_per_batch.get())
-                .min(self.frame_sets.len())
+        self.checkpoint.resolved_batches[index].clone()
     }
 
     async fn submit_prompt<M: CompletionModel>(
@@ -222,7 +202,9 @@ impl Analyzer {
             });
         }
 
-        let response = agent.analyze(prompt).await?;
+        let response = agent
+            .analyze(prompt, self.checkpoint.analysis_profile.max_output_tokens)
+            .await?;
         self.checkpoint.responses.push(response);
         if let Err(error) = save_checkpoint(&self.checkpoint, &self.progress_path) {
             self.checkpoint.responses.pop();
@@ -266,9 +248,17 @@ impl Analyzer {
                     })?;
                 let path = frame.path.clone();
                 let offset = frame.recording_offset;
-                let jpeg =
-                    tokio::task::spawn_blocking(move || extract_jpeg(&path, offset)).await??;
-                append_prompt_frame(&mut content, camera.id, &camera.name, &timestamp, &jpeg);
+                let size = self.checkpoint.analysis_profile.image_size;
+                let jpeg = tokio::task::spawn_blocking(move || extract_jpeg(&path, offset, size))
+                    .await??;
+                append_prompt_frame(
+                    &mut content,
+                    camera.id,
+                    &camera.name,
+                    &timestamp,
+                    &jpeg,
+                    self.checkpoint.analysis_profile.image_detail,
+                );
                 drop(jpeg);
             }
         }
@@ -282,15 +272,20 @@ fn load_or_new(
     session_id: uuid::Uuid,
     checklist: &str,
     plan_fingerprint: &str,
-    total_batches: usize,
+    profile: &AnalysisProfile,
+    resolved_batches: &[Range<usize>],
     warnings: &[AnalysisWarning],
 ) -> Result<(AnalysisCheckpoint, bool)> {
+    let total_batches = resolved_batches.len();
     match AnalysisCheckpoint::read(path, session_id) {
         Ok(checkpoint) => {
             if checkpoint.checklist != checklist {
                 return Err(Error::CheckpointChecklist);
             }
-            if checkpoint.plan_fingerprint != plan_fingerprint {
+            if checkpoint.plan_fingerprint != plan_fingerprint
+                || checkpoint.analysis_profile != *profile
+                || checkpoint.resolved_batches != resolved_batches
+            {
                 return Err(Error::CheckpointPlanFingerprint);
             }
             if checkpoint.total_batches != total_batches {
@@ -315,6 +310,8 @@ fn load_or_new(
                     checklist: checklist.to_owned(),
                     plan_fingerprint: plan_fingerprint.to_owned(),
                     total_batches,
+                    analysis_profile: profile.clone(),
+                    resolved_batches: resolved_batches.to_vec(),
                     warnings: warnings.to_vec(),
                     responses: Vec::new(),
                 },
@@ -339,25 +336,12 @@ fn save_checkpoint(checkpoint: &AnalysisCheckpoint, path: &Path) -> Result<()> {
 
 fn plan_fingerprint(
     frame_sets: &[FrameSet],
-    frame_sets_per_batch: NonZeroUsize,
-    overlap_frame_sets: usize,
+    profile: &AnalysisProfile,
+    resolved_batches: &[Range<usize>],
 ) -> Result<String> {
     let mut hash = Sha256::new();
-    hash.update(b"leo-analysis-plan-v3\0");
-    hash.update(
-        u64::try_from(frame_sets_per_batch.get())
-            .map_err(|_| Error::PlanValueOverflow {
-                field: "batch size",
-            })?
-            .to_le_bytes(),
-    );
-    hash.update(
-        u64::try_from(overlap_frame_sets)
-            .map_err(|_| Error::PlanValueOverflow {
-                field: "batch overlap",
-            })?
-            .to_le_bytes(),
-    );
+    hash.update(b"leo-analysis-plan-v4\0");
+    hash.update(serde_json::to_vec(&(profile, resolved_batches))?);
     hash.update(
         u64::try_from(frame_sets.len())
             .map_err(|_| Error::PlanValueOverflow {
@@ -443,6 +427,7 @@ fn append_prompt_frame(
     camera_name: &str,
     timestamp: &str,
     jpeg: &[u8],
+    detail: ImageDetailPolicy,
 ) {
     content.push(UserContent::text(format!(
         "Frame source: camera {camera_id} ({camera_name}) at {timestamp}"
@@ -450,7 +435,11 @@ fn append_prompt_frame(
     content.push(UserContent::image_base64(
         STANDARD.encode(jpeg),
         Some(ImageMediaType::JPEG),
-        None,
+        match detail {
+            ImageDetailPolicy::ProviderDefault => None,
+            ImageDetailPolicy::Low => Some(rig_core::message::ImageDetail::Low),
+            ImageDetailPolicy::High => Some(rig_core::message::ImageDetail::High),
+        },
     ));
 }
 

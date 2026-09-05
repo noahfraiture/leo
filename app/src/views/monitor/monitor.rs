@@ -44,19 +44,14 @@ pub fn Monitor() -> Element {
                         class: "alert alert-warning",
                         role: "alert",
                         aria_live: "assertive",
-                        span {
-                            "Live preview is unavailable: {message}. {PREVIEW_ERROR_GUIDANCE}"
-                        }
+                        span { "Live preview is unavailable: {message}. {PREVIEW_ERROR_GUIDANCE}" }
                     }
                     div { class: "flex flex-wrap gap-2",
                         for (camera_id, name, selected, button_label) in cameras {
                             button {
                                 class: "btn btn-sm",
                                 r#type: "button",
-                                aria_label: format!(
-                                    "{} {name}",
-                                    if selected { "Selected" } else { "Select" }
-                                ),
+                                aria_label: format!("{} {name}", if selected { "Selected" } else { "Select" }),
                                 aria_pressed: selected,
                                 onclick: move |_| {
                                     let mut state = operator.write();
@@ -65,6 +60,7 @@ pub fn Monitor() -> Element {
                                     }
                                 },
                                 "{button_label}"
+                                MonitoringBadge { camera_id }
                             }
                         }
                     }
@@ -93,30 +89,31 @@ pub fn Monitor() -> Element {
             };
 
             rsx! {
-                section {
-                    class: "p-2",
-                    aria_labelledby: "camera-monitor-title",
+                section { class: "p-2", aria_labelledby: "camera-monitor-title",
                     h1 {
                         id: "camera-monitor-title",
                         class: "mb-3 text-xl font-semibold",
                         "Camera monitor"
                     }
                     script { src: script_url, defer: true }
-                    div {
-                        class: "grid grid-cols-1 gap-4 lg:grid-cols-2",
+                    div { class: "grid grid-cols-1 gap-4 lg:grid-cols-2",
                         for (feed, selected, participating, recorder_status) in cards {
-                            CameraFeed {
+                            div {
                                 key: "{feed.camera_id}",
-                                feed,
-                                selected,
-                                participating,
-                                recorder_status,
-                                on_select: move |camera_id| {
-                                    let mut state = operator.write();
-                                    if let Err(error) = state.select_camera(camera_id) {
-                                        state.set_transient_message(Some(error.to_string()));
-                                    }
-                                },
+                                class: "flex flex-col gap-2",
+                                MonitoringBadge { camera_id: feed.camera_id }
+                                CameraFeed {
+                                    feed,
+                                    selected,
+                                    participating,
+                                    recorder_status,
+                                    on_select: move |camera_id| {
+                                        let mut state = operator.write();
+                                        if let Err(error) = state.select_camera(camera_id) {
+                                            state.set_transient_message(Some(error.to_string()));
+                                        }
+                                    },
+                                }
                             }
                         }
                     }
@@ -129,3 +126,32 @@ pub fn Monitor() -> Element {
 #[cfg(test)]
 #[path = "tests/monitor.rs"]
 mod tests;
+
+#[component]
+fn MonitoringBadge(camera_id: u32) -> Element {
+    let operator = use_context::<Signal<OperatorState>>();
+    let state = operator.read();
+    let id = state
+        .cameras
+        .iter()
+        .find(|c| c.config.id == camera_id)
+        .map(|c| c.active_monitoring_profile_id);
+    let name = state
+        .monitoring_profiles
+        .iter()
+        .find(|p| Some(p.id) == id)
+        .map(|p| p.name.as_str())
+        .unwrap_or("Monitoring unavailable");
+    let label = if state.metadata_error.is_some() {
+        format!("Last saved: {name}")
+    } else {
+        name.to_owned()
+    };
+    rsx! {
+        span {
+            class: "badge badge-outline",
+            aria_label: "Monitoring profile: {label}",
+            "{label}"
+        }
+    }
+}

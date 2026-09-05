@@ -14,13 +14,13 @@ fn camera(camera_id: u32, sample_every_ms: u64) -> Value {
         "camera_id": camera_id,
         "name": format!("Camera {camera_id}"),
         "enabled": true,
-        "sample_every_ms": sample_every_ms
+        "initial_monitoring_profile_id": sample_every_ms
     })
 }
 
 fn event(sequence: u64, session_id: &str, offset_ms: u64, action: Value) -> Value {
     json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "sequence": sequence,
         "session_id": session_id,
         "utc_ms": START_UTC_MS + i64::try_from(offset_ms).unwrap(),
@@ -34,7 +34,7 @@ fn started(cameras: Vec<Value>) -> Value {
         0,
         SESSION_ID,
         0,
-        json!({"type": "session_started", "cameras": cameras}),
+        json!({"type": "session_started", "monitoring_profiles": crate::tests::monitoring_profiles(), "cameras": cameras}),
     )
 }
 
@@ -78,10 +78,10 @@ fn loads_the_representative_log_with_its_utc_anchor_and_exclusive_end() {
                 SESSION_ID,
                 0,
                 json!({
-                    "type": "session_started",
+                    "type": "session_started", "monitoring_profiles": crate::tests::monitoring_profiles(),
                     "cameras": [
-                        {"camera_id": 1, "name": "Front", "enabled": true, "sample_every_ms": 5_000},
-                        {"camera_id": 2, "name": "Side", "enabled": true, "sample_every_ms": 2_000}
+                        {"camera_id": 1, "name": "Front", "enabled": true, "initial_monitoring_profile_id": 5_000},
+                        {"camera_id": 2, "name": "Side", "enabled": true, "initial_monitoring_profile_id": 2_000}
                     ]
                 }),
             ),
@@ -100,9 +100,7 @@ fn loads_the_representative_log_with_its_utc_anchor_and_exclusive_end() {
                 SESSION_ID,
                 15_000,
                 json!({
-                    "type": "sampling_interval_changed",
-                    "camera_id": 1,
-                    "sample_every_ms": 1_000
+                    "type": "monitoring_profile_changed", "camera_ids": [1], "monitoring_profile_id": 1_000
                 }),
             ),
             ended(3, SESSION_ID, 30_000),
@@ -121,13 +119,13 @@ fn loads_the_representative_log_with_its_utc_anchor_and_exclusive_end() {
                 id: 1,
                 name: "Front".into(),
                 enabled: true,
-                sample_every: Duration::from_secs(5),
+                initial_monitoring_profile_id: (5 * 1000) as u32,
             },
             SessionCamera {
                 id: 2,
                 name: "Side".into(),
                 enabled: true,
-                sample_every: Duration::from_secs(2),
+                initial_monitoring_profile_id: (2 * 1000) as u32,
             },
         ]
     );
@@ -143,9 +141,9 @@ fn loads_the_representative_log_with_its_utc_anchor_and_exclusive_end() {
             ),
             (
                 Duration::from_secs(15),
-                OperatorAction::SetSamplingInterval {
-                    camera_id: 1,
-                    sample_every: Duration::from_secs(1),
+                OperatorAction::SetMonitoringProfile {
+                    camera_ids: vec![1],
+                    monitoring_profile_id: 1000
                 },
             ),
         ]
@@ -188,11 +186,11 @@ fn rejects_a_missing_final_newline() {
 #[test]
 fn rejects_unsupported_schema_versions() {
     let mut events = vec![started(vec![camera(1, 1_000)]), ended(1, SESSION_ID, 1_000)];
-    events[1]["schema_version"] = json!(2);
+    events[1]["schema_version"] = json!(1);
 
     let error = load_error(&events);
 
-    assert!(error.contains("schema version 2"));
+    assert!(error.contains("schema version 1"));
 }
 
 #[test]
@@ -290,9 +288,7 @@ fn rejects_decreasing_action_offsets() {
             SESSION_ID,
             499,
             json!({
-                "type": "sampling_interval_changed",
-                "camera_id": 1,
-                "sample_every_ms": 2_000
+                "type": "monitoring_profile_changed", "camera_ids": [1], "monitoring_profile_id": 2_000
             }),
         ),
         ended(3, SESSION_ID, 1_000),
@@ -318,7 +314,7 @@ fn rejects_duplicate_initial_cameras() {
 }
 
 #[test]
-fn rejects_zero_initial_and_changed_intervals() {
+fn rejects_unknown_initial_and_changed_profiles() {
     let invalid_logs = [
         vec![started(vec![camera(1, 0)]), ended(1, SESSION_ID, 1_000)],
         vec![
@@ -328,9 +324,7 @@ fn rejects_zero_initial_and_changed_intervals() {
                 SESSION_ID,
                 500,
                 json!({
-                    "type": "sampling_interval_changed",
-                    "camera_id": 1,
-                    "sample_every_ms": 0
+                    "type": "monitoring_profile_changed", "camera_ids": [1], "monitoring_profile_id": 0
                 }),
             ),
             ended(2, SESSION_ID, 1_000),
@@ -338,7 +332,7 @@ fn rejects_zero_initial_and_changed_intervals() {
     ];
 
     for events in invalid_logs {
-        assert!(load_error(&events).contains("sampling interval"));
+        assert!(load_error(&events).contains("monitoring profile 0 does not exist"));
     }
 }
 
@@ -351,9 +345,7 @@ fn rejects_actions_for_unknown_cameras() {
             "enabled": false
         }),
         json!({
-            "type": "sampling_interval_changed",
-            "camera_id": 9,
-            "sample_every_ms": 1_000
+            "type": "monitoring_profile_changed", "camera_ids": [9], "monitoring_profile_id": 1_000
         }),
     ];
 

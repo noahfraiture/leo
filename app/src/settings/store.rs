@@ -1,7 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
-    num::NonZeroUsize,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     time::Duration,
@@ -18,8 +17,8 @@ pub struct ResolvedSettings {
     pub sessions_root: PathBuf,
     pub logs_root: PathBuf,
     pub recorder_settings: RecorderSettings,
-    pub analysis_frame_sets_per_prompt: NonZeroUsize,
-    pub analysis_overlap_frame_sets: usize,
+    pub monitoring_error: Option<String>,
+    pub analysis_error: Option<String>,
 }
 
 /// Platform or explicitly located application settings storage.
@@ -72,7 +71,9 @@ impl SettingsStore {
 
     /// Validates settings and derives paths and runtime configuration without I/O.
     pub fn resolve(&self, settings: Settings) -> Result<ResolvedSettings, Error> {
-        settings.validate().map_err(Error::InvalidSettings)?;
+        settings
+            .validate_recording()
+            .map_err(Error::InvalidSettings)?;
         let data_root = settings
             .data_root
             .clone()
@@ -84,20 +85,21 @@ impl SettingsStore {
             retry_delay: Duration::from_secs(1),
             stop_timeout: Duration::from_secs(5),
         };
-        let analysis_frame_sets_per_prompt = NonZeroUsize::new(
-            usize::try_from(settings.analysis_frame_sets_per_prompt)
-                .expect("validated analysis frame-set count should fit usize"),
-        )
-        .expect("validated analysis frame-set count should be nonzero");
-        let analysis_overlap_frame_sets = usize::try_from(settings.analysis_overlap_frame_sets)
-            .expect("validated analysis overlap should fit usize");
+        let monitoring_error = settings
+            .validate_monitoring()
+            .err()
+            .map(|error| error.to_string());
+        let analysis_error = settings
+            .validate_analysis()
+            .err()
+            .map(|error| error.to_string());
         Ok(ResolvedSettings {
             settings,
             sessions_root,
             logs_root,
             recorder_settings,
-            analysis_frame_sets_per_prompt,
-            analysis_overlap_frame_sets,
+            monitoring_error,
+            analysis_error,
         })
     }
 
@@ -114,10 +116,103 @@ impl SettingsStore {
             }
         };
         // Serde errors can echo field values, so expose only the file category and path.
-        let settings = serde_json::from_slice(&bytes).map_err(|_| Error::ParseSettings {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|_| Error::ParseSettings {
+                path: self.settings_path.clone(),
+            })?;
+        if let Some(version) = value
+            .get("schemaVersion")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|version| u32::try_from(version).ok())
+            && version != super::model::SETTINGS_SCHEMA_VERSION
+        {
+            return Err(Error::InvalidSettings(super::ValidationErrors(vec![
+                super::ValidationError::UnsupportedSchemaVersion {
+                    expected: super::model::SETTINGS_SCHEMA_VERSION,
+                    actual: version,
+                },
+            ])));
+        }
+        let mut monitoring_parse_error = None;
+        let mut analysis_parse_error = None;
+        if let Some(object) = value.as_object_mut() {
+            // Optional sections decode independently. Empty replacements disable the affected feature.
+            for (key, replacement, valid) in [
+                (
+                    "monitoringProfiles",
+                    serde_json::json!([]),
+                    object.get("monitoringProfiles").is_some_and(|v| {
+                        serde_json::from_value::<Vec<backend::profiles::MonitoringProfile>>(
+                            v.clone(),
+                        )
+                        .is_ok()
+                    }),
+                ),
+                (
+                    "analysisProfiles",
+                    serde_json::json!([]),
+                    object.get("analysisProfiles").is_some_and(|v| {
+                        serde_json::from_value::<Vec<backend::profiles::AnalysisProfile>>(v.clone())
+                            .is_ok()
+                    }),
+                ),
+                (
+                    "openai",
+                    serde_json::json!({"apiKey":"", "baseUrl":null}),
+                    object.get("openai").is_some_and(|v| {
+                        serde_json::from_value::<super::OpenAiSettings>(v.clone()).is_ok()
+                    }),
+                ),
+            ] {
+                if !valid {
+                    let message = Some(format!(
+                        "Invalid {key} section in Settings; correct it before using this feature."
+                    ));
+                    if key == "monitoringProfiles" {
+                        monitoring_parse_error = message;
+                    } else {
+                        analysis_parse_error = message;
+                    }
+                    object.insert(key.into(), replacement);
+                }
+            }
+            if let Some(cameras) = object
+                .get_mut("cameras")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for camera in cameras {
+                    if let Some(camera) = camera.as_object_mut()
+                        && !camera
+                            .get("initiallyIncludedInAnalysis")
+                            .is_some_and(serde_json::Value::is_boolean)
+                    {
+                        camera.insert(
+                            "initiallyIncludedInAnalysis".into(),
+                            serde_json::json!(false),
+                        );
+                        monitoring_parse_error = Some("Invalid initiallyIncludedInAnalysis in Settings; correct it before enabling monitoring metadata.".into());
+                    }
+                }
+            }
+            for key in [
+                "nextMonitoringProfileId",
+                "nextAnalysisProfileId",
+                "defaultAnalysisProfileId",
+            ] {
+                if !object
+                    .get(key)
+                    .is_some_and(|v| v.as_u64().is_some_and(|id| u32::try_from(id).is_ok()))
+                {
+                    object.insert(key.into(), serde_json::json!(0));
+                }
+            }
+        }
+        let settings = serde_json::from_value(value).map_err(|_| Error::ParseSettings {
             path: self.settings_path.clone(),
         })?;
-        let resolved = self.resolve(settings)?;
+        let mut resolved = self.resolve(settings)?;
+        resolved.monitoring_error = monitoring_parse_error.or(resolved.monitoring_error);
+        resolved.analysis_error = analysis_parse_error.or(resolved.analysis_error);
         prepare_directories(&resolved, &self.settings_path)?;
         Ok(Some(resolved))
     }
@@ -134,15 +229,14 @@ fn prepare_directories(resolved: &ResolvedSettings, settings_path: &Path) -> Res
     let settings_parent = settings_path
         .parent()
         .expect("settings store paths always have a parent");
-    for directory in [
-        settings_parent,
-        &resolved.sessions_root,
-        &resolved.logs_root,
-    ] {
+    for directory in [settings_parent, &resolved.sessions_root] {
         fs::create_dir_all(directory).map_err(|source| Error::CreateDirectory {
             path: directory.to_owned(),
             source,
         })?;
+    }
+    if let Err(error) = fs::create_dir_all(&resolved.logs_root) {
+        tracing::warn!(error = %error, "diagnostic file logging unavailable; recording storage is ready");
     }
     Ok(())
 }

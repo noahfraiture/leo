@@ -26,6 +26,7 @@ const DRIVER_SCRIPT: &str = include_str!("e2e/driver.js");
 pub fn DesktopE2eDriver() -> Element {
     let desktop = consume_context::<DesktopContext>();
     let resolved = consume_context::<ResolvedSettings>();
+    let mut operator = consume_context::<Signal<crate::operator::OperatorState>>();
     use_hook(move || {
         let ready_path = environment_path("LEO_DESKTOP_E2E_READY")?;
         let result_path = environment_path("LEO_DESKTOP_E2E_RESULT")?;
@@ -75,13 +76,34 @@ pub fn DesktopE2eDriver() -> Element {
 
         Some(spawn(async move {
             let mut driver = document::eval(DRIVER_SCRIPT);
-            let result = match driver.send(scenario) {
+            let mut result = match driver.send(scenario) {
                 Ok(()) => driver
                     .recv::<String>()
                     .await
                     .unwrap_or_else(|error| format!("error: desktop E2E driver failed: {error}")),
                 Err(error) => format!("error: desktop E2E driver failed to start: {error}"),
             };
+            if result == "inject-metadata-failure" && scenario == RECORD_WITHOUT_PREVIEW_SCENARIO {
+                {
+                    let mut state = operator.write();
+                    if let crate::operator::SessionRunState::Active {
+                        controller: Some(controller),
+                        ..
+                    } = &mut state.session
+                    {
+                        controller
+                            .fail_writes_for_test()
+                            .expect("inject metadata write failure into disposable E2E session");
+                    }
+                }
+                result = match driver.send("metadata writes disabled") {
+                    Ok(()) => driver
+                        .recv::<String>()
+                        .await
+                        .unwrap_or_else(|error| format!("error: {error}")),
+                    Err(error) => format!("error: {error}"),
+                };
+            }
             if let Err(error) = fs::write(&result_path, result) {
                 tracing::error!(path = %result_path.display(), %error, "desktop E2E result write failed");
             }
@@ -114,7 +136,7 @@ fn provider_configuration_is_safe(
     let Some(openai) = openai else {
         return false;
     };
-    if openai.api_key.trim().is_empty() || openai.model.trim().is_empty() {
+    if openai.api_key.trim().is_empty() {
         return false;
     }
     if let Some(base_url) = openai.base_url.as_deref() {

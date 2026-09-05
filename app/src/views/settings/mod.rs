@@ -1,6 +1,7 @@
 mod application;
 mod camera;
 mod page;
+mod profiles;
 mod provider;
 mod recording;
 #[cfg(all(test, unix))]

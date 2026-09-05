@@ -1,40 +1,23 @@
 use dioxus::prelude::*;
 
-use super::state::{SettingsContext, SettingsField};
+use super::state::SettingsContext;
 
-/// Edits provider credentials, endpoint, model, and batching controls.
+/// Edits provider credentials independently from profiles and recording setup.
 #[component]
 pub fn ProviderSettingsSection() -> Element {
     let SettingsContext { mut state, .. } = use_context::<SettingsContext>();
     let mut reveal_key = use_signal(|| false);
-    let (
-        api_key,
-        model,
-        base_url,
-        frame_sets,
-        overlap,
-        base_url_error,
-        frame_sets_error,
-        overlap_error,
-    ) = {
+    let (api_key, base_url) = {
         let page = state.read();
         (
             page.draft.openai.api_key.clone(),
-            page.draft.openai.model.clone(),
             page.draft.openai.base_url.clone(),
-            page.draft.analysis_frame_sets_per_prompt.clone(),
-            page.draft.analysis_overlap_frame_sets.clone(),
-            page.field_errors
-                .get(&SettingsField::OpenAiBaseUrl)
-                .cloned(),
-            page.field_errors
-                .get(&SettingsField::AnalysisFrameSetsPerPrompt)
-                .cloned(),
-            page.field_errors
-                .get(&SettingsField::AnalysisOverlapFrameSets)
-                .cloned(),
         )
     };
+    let base_url_error = (!base_url.trim().is_empty()
+        && !url::Url::parse(&base_url)
+            .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.has_host()))
+    .then(|| "Enter an absolute HTTP or HTTPS URL. Recording remains available.".to_owned());
     let key_type = if reveal_key() { "text" } else { "password" };
     let reveal_label = if reveal_key() {
         "Hide API key"
@@ -49,75 +32,11 @@ pub fn ProviderSettingsSection() -> Element {
             h2 {
                 id: "settings-provider-title",
                 class: "text-xl font-semibold",
-                "Analysis provider"
+                "Provider credentials"
             }
             p { class: "mt-2 text-sm",
-                "A blank API key or model disables Analyze."
+                "Missing credentials disable analysis. Recording remains available."
             }
-
-            div { class: "mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2",
-                div { class: "flex flex-col gap-1",
-                    label {
-                        class: "text-sm font-medium",
-                        r#for: "settings-analysis-frame-sets",
-                        "Frame sets per prompt"
-                    }
-                    input {
-                        id: "settings-analysis-frame-sets",
-                        class: "input input-bordered w-full",
-                        r#type: "number",
-                        min: "1",
-                        step: "1",
-                        value: frame_sets,
-                        aria_invalid: frame_sets_error.as_ref().map(|_| "true"),
-                        aria_describedby: frame_sets_error
-                            .as_ref()
-                            .map(|_| "settings-analysis-frame-sets-error"),
-                        oninput: move |event| {
-                            state.write().draft.analysis_frame_sets_per_prompt = event.value();
-                        },
-                    }
-                    if let Some(ref error) = frame_sets_error {
-                        p {
-                            id: "settings-analysis-frame-sets-error",
-                            class: "text-error text-sm",
-                            "{error}"
-                        }
-                    }
-                }
-
-                div { class: "flex flex-col gap-1",
-                    label {
-                        class: "text-sm font-medium",
-                        r#for: "settings-analysis-overlap",
-                        "Overlapping frame sets"
-                    }
-                    input {
-                        id: "settings-analysis-overlap",
-                        class: "input input-bordered w-full",
-                        r#type: "number",
-                        min: "0",
-                        step: "1",
-                        value: overlap,
-                        aria_invalid: overlap_error.as_ref().map(|_| "true"),
-                        aria_describedby: overlap_error
-                            .as_ref()
-                            .map(|_| "settings-analysis-overlap-error"),
-                        oninput: move |event| {
-                            state.write().draft.analysis_overlap_frame_sets = event.value();
-                        },
-                    }
-                    if let Some(ref error) = overlap_error {
-                        p {
-                            id: "settings-analysis-overlap-error",
-                            class: "text-error text-sm",
-                            "{error}"
-                        }
-                    }
-                }
-            }
-            p { class: "mt-2 text-sm", "Each frame set can contain one image per camera." }
-            p { class: "mt-1 text-sm", "Overlap repeats images and may increase provider cost." }
 
             div { class: "mt-4 flex flex-col gap-1",
                 label {
@@ -146,21 +65,6 @@ pub fn ProviderSettingsSection() -> Element {
                         onclick: move |_| state.write().draft.openai.api_key.clear(),
                         "Clear API key"
                     }
-                }
-            }
-
-            div { class: "mt-4 flex flex-col gap-1",
-                label {
-                    class: "text-sm font-medium",
-                    r#for: "settings-openai-model",
-                    "Model"
-                }
-                input {
-                    id: "settings-openai-model",
-                    class: "input input-bordered w-full",
-                    r#type: "text",
-                    value: model,
-                    oninput: move |event| state.write().draft.openai.model = event.value(),
                 }
             }
 
