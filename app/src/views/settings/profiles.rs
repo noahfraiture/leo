@@ -154,9 +154,9 @@ pub fn AnalysisProfilesSection() -> Element {
                         .parse()
                         .unwrap_or(0);
                 },
-                option { value: "0", "Select a profile" }
+                option { value: "0", selected: default_id == 0, "Select a profile" }
                 for profile in &profiles {
-                    option { value: "{profile.id}", "{profile.name}" }
+                    option { value: "{profile.id}", selected: default_id == profile.id, "{profile.name}" }
                 }
             }
             for profile in profiles {
@@ -335,9 +335,9 @@ fn AnalysisProfileEditor(profile: AnalysisProfileDraft) -> Element {
                         };
                     }
                 },
-                option { value: "default", "Provider default" }
-                option { value: "low", "Low" }
-                option { value: "high", "High" }
+                option { value: "default", selected: detail == "default", "Provider default" }
+                option { value: "low", selected: detail == "low", "Low" }
+                option { value: "high", selected: detail == "high", "High" }
             }
             button {
                 class: "btn btn-outline btn-sm",

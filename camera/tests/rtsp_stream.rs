@@ -184,6 +184,69 @@ async fn host_recorder_records_playable_mkv() {
 
 #[tokio::test]
 #[ignore = "requires MediaMTX, FFmpeg, and FFprobe from the Nix development shell"]
+async fn host_recorder_starts_with_low_bitrate_video() {
+    let directory = tempfile::tempdir().expect("create static-video test directory");
+    let fixture = directory.path().join("static.mp4");
+    let generated = Command::new("ffmpeg")
+        .args(["-nostdin", "-v", "error", "-f", "lavfi", "-i"])
+        .arg("color=c=black:s=1280x720:r=15")
+        .args(["-t", "4", "-an", "-c:v", "libx264", "-preset", "ultrafast"])
+        .args([
+            "-tune",
+            "zerolatency",
+            "-pix_fmt",
+            "yuv420p",
+            "-profile:v",
+            "baseline",
+        ])
+        .args(["-g", "15", "-bf", "0", "-movflags", "+faststart"])
+        .arg(&fixture)
+        .status()
+        .expect("generate a quiet camera scene");
+    assert!(generated.success());
+    assert!(fs::metadata(&fixture).unwrap().len() < 64 * 1024);
+    let (http_address, rtsp_address) = reserve_addresses();
+    let mut camera = start_camera(http_address, rtsp_address, &fixture);
+    let recordings_root = create_recordings_root(directory.path());
+    let (runtime, recorder, mut events) = test_support::spawn(
+        RecorderSettings {
+            io_timeout: Duration::from_secs(10),
+            ..recorder_settings()
+        },
+        PathBuf::from("ffmpeg"),
+        PathBuf::from("ffprobe"),
+    )
+    .expect("start recorder runtime");
+
+    // A healthy quiet stream must become ready before a large output buffer fills.
+    recorder
+        .start(
+            vec![RecordingCamera {
+                id: 1,
+                rtsp_url: format!("rtsp://{rtsp_address}/axis-media/media.amp"),
+            }],
+            recordings_root,
+        )
+        .await
+        .expect("quiet stream should not time out waiting for buffered file bytes");
+    wait_for_recorder_status(&mut events, RecorderStatus::Recording);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let segments = recorder.stop().await.expect("finalize quiet recording");
+    runtime.shutdown().expect("stop recorder runtime");
+    assert_eq!(segments.len(), 1);
+    assert_finalized_matroska_h264(&segments[0].path);
+    let decoded = Command::new("ffmpeg")
+        .args(["-nostdin", "-v", "error", "-i"])
+        .arg(&segments[0].path)
+        .args(["-map", "0:v:0", "-f", "null", "-"])
+        .output()
+        .expect("decode quiet recording");
+    assert!(decoded.status.success() && decoded.stderr.is_empty());
+    assert!(camera.stop(CAMERA_SHUTDOWN_TIMEOUT).success());
+}
+
+#[tokio::test]
+#[ignore = "requires MediaMTX, FFmpeg, and FFprobe from the Nix development shell"]
 async fn host_recorder_reconnects_into_a_second_segment() {
     let (http_address, rtsp_address) = reserve_addresses();
     let fixture = camera_fixture("salon-2.mp4");

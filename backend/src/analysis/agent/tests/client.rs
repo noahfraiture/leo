@@ -30,6 +30,29 @@ fn explicit_provider_configuration_rejects_blank_values() {
     ));
 }
 
+#[cfg(feature = "test-support")]
+#[test]
+fn local_chat_evaluation_rejects_paid_and_remote_endpoints() {
+    for base_url in [
+        None,
+        Some("https://api.openai.com/v1"),
+        Some("http://192.0.2.1/v1"),
+    ] {
+        let config = OpenAiConfig {
+            api_key: "local".into(),
+            base_url: base_url.map(str::to_owned),
+        };
+        assert!(matches!(
+            super::LocalChatAgent::from_local_config(
+                config,
+                &crate::tests::analysis_profile(5, 0),
+                None
+            ),
+            Err(Error::LocalEndpoint)
+        ));
+    }
+}
+
 #[test]
 fn response_schema_has_the_three_analysis_sections() {
     let schema = serde_json::to_value(rig_core::schemars::schema_for!(AnalysisResponse))

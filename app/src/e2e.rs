@@ -19,6 +19,10 @@ pub fn launch(settings_path: PathBuf) {
 const COMPLETE_ANALYSIS_SCENARIO: &str = "complete-analysis";
 const ANALYSIS_RECOVERY_SCENARIO: &str = "analysis-recovery";
 const RECORD_WITHOUT_PREVIEW_SCENARIO: &str = "record-without-preview";
+const RECORDING_REHEARSAL_SCENARIO: &str = "recording-rehearsal";
+const SAVE_PROFILES_SCENARIO: &str = "save-profiles";
+const RELOAD_PROFILES_SCENARIO: &str = "reload-profiles";
+const ANALYZE_EXISTING_SCENARIO: &str = "analyze-existing";
 const DRIVER_SCRIPT: &str = include_str!("e2e/driver.js");
 
 /// Drives the mounted production UI when the E2E result paths are configured.
@@ -118,6 +122,10 @@ fn selected_driver_scenario(configured: Option<&str>) -> Option<&'static str> {
         COMPLETE_ANALYSIS_SCENARIO => Some(COMPLETE_ANALYSIS_SCENARIO),
         ANALYSIS_RECOVERY_SCENARIO => Some(ANALYSIS_RECOVERY_SCENARIO),
         RECORD_WITHOUT_PREVIEW_SCENARIO => Some(RECORD_WITHOUT_PREVIEW_SCENARIO),
+        RECORDING_REHEARSAL_SCENARIO => Some(RECORDING_REHEARSAL_SCENARIO),
+        SAVE_PROFILES_SCENARIO => Some(SAVE_PROFILES_SCENARIO),
+        RELOAD_PROFILES_SCENARIO => Some(RELOAD_PROFILES_SCENARIO),
+        ANALYZE_EXISTING_SCENARIO => Some(ANALYZE_EXISTING_SCENARIO),
         _ => None,
     }
 }

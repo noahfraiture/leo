@@ -1100,6 +1100,8 @@ printf '%s' "$quit" > "$0.quit""#
             "copy",
             "-avoid_negative_ts",
             "make_zero",
+            "-flush_packets",
+            "1",
             "-f",
             "matroska",
             partial_path.to_str().unwrap(),

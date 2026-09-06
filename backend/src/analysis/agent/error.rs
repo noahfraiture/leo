@@ -17,6 +17,14 @@ pub enum Error {
 
     #[error("analysis response contained no text")]
     MissingTextResponse,
+
+    #[cfg(feature = "test-support")]
+    #[error("evaluation metering failed: {0}")]
+    Metering(#[from] std::io::Error),
+
+    #[cfg(feature = "test-support")]
+    #[error("local evaluation requires a loopback endpoint")]
+    LocalEndpoint,
 }
 
 pub(super) type Result<T> = std::result::Result<T, Error>;

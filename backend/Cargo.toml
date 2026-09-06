@@ -23,3 +23,7 @@ tokio = { workspace = true, features = ["macros", "rt"] }
 
 [features]
 test-support = []
+
+[[example]]
+name = "evaluate"
+required-features = ["test-support"]

@@ -501,7 +501,7 @@ fn AnalysisProfileSelection(disabled: bool) -> Element {
                         .unwrap_or(0);
                 },
                 for profile in profiles {
-                    option { value: "{profile.id}", "{profile.name}" }
+                    option { value: "{profile.id}", selected: selected == profile.id, "{profile.name}" }
                 }
             }
         }

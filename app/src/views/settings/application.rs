@@ -33,14 +33,14 @@ pub fn ApplicationSettingsSection() -> Element {
                             state.write().draft.log_level = level;
                         }
                     },
-                    for level in [
+                    for option in [
                         LogLevel::Error,
                         LogLevel::Warn,
                         LogLevel::Info,
                         LogLevel::Debug,
                         LogLevel::Trace,
                     ] {
-                        option { value: level.as_str(), "{level.as_str()}" }
+                        option { value: option.as_str(), selected: level == option, "{option.as_str()}" }
                     }
                 }
             }

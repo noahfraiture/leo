@@ -31,6 +31,7 @@ test-e2e:
     nix develop --command cargo test -p backend analysis::session::tests::full_local_ffmpeg_and_mock_model_analysis_uses_pre_and_post_gap_segments -- --ignored --exact --nocapture
     nix develop --command cargo test -p camera --test rtsp_stream fixture_streams_h264_to_two_readers_and_stops_cleanly -- --ignored --exact
     nix develop --command cargo test -p camera --test rtsp_stream host_recorder_records_playable_mkv -- --ignored --exact --nocapture
+    nix develop --command cargo test -p camera --test rtsp_stream host_recorder_starts_with_low_bitrate_video -- --ignored --exact --nocapture
     nix develop --command cargo test -p camera --test rtsp_stream host_recorder_reconnects_into_a_second_segment -- --ignored --exact --nocapture
     LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 nix develop --command cargo test -p camera --features desktop-e2e --test desktop_e2e desktop_operator_flow_records_two_cameras_and_analyzes -- --ignored --exact --nocapture --test-threads=1
     LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 nix develop --command cargo test -p camera --features desktop-e2e --test desktop_e2e desktop_analysis_resumes_after_transient_provider_failure -- --ignored --exact --nocapture --test-threads=1

@@ -176,6 +176,69 @@ const recordWithoutPreview = async () => {
     return "ok\nrecording continued across metadata failure and a second session";
 };
 
+// A deliberately opt-in 15-minute capture plus two short restart cycles.
+// Analysis is omitted so model inference cannot compete with capture.
+const recordingRehearsal = async () => {
+    await waitForLivePreviews();
+    await startSession();
+    const started = Date.now();
+    await changeFirstCameraProfile();
+    await sleep(30000);
+    (await waitFor(() => button("Exclude from analysis"), "participation control")).click();
+    await sleep(10000);
+    (await waitFor(() => button("Include in analysis"), "participation control")).click();
+    await sleep(Math.max(0, 900000 - (Date.now() - started)));
+    if (document.querySelectorAll('[aria-label$="recorder status: Recording"]').length !== 2) {
+        throw new Error("Both recorders did not remain active through the rehearsal");
+    }
+    await stopSession();
+    for (let cycle = 0; cycle < 2; cycle++) {
+        await startSession();
+        await changeFirstCameraProfile();
+        await sleep(10000);
+        await stopSession();
+    }
+    return "ok\n15-minute recording and two subsequent sessions completed";
+};
+
+const profileSettings = async (save) => {
+    (await waitFor(() => Array.from(document.querySelectorAll("a"))
+        .find((link) => link.textContent.trim() === "Settings"), "Settings navigation")).click();
+    await waitFor(() => document.getElementById("application-settings-title"), "settings form");
+    await waitFor(() => document.getElementById("settings-log-level")?.value === "info", "initial log-level selection");
+    if (save) {
+        (await waitFor(() => button("Add camera"), "add temporary camera")).click();
+        await waitFor(() => document.querySelector('select[id^="camera-"][id$="-sample-every"]')?.value === "1", "initial camera profile selection");
+        (await waitFor(() => button("Remove camera"), "remove temporary camera")).click();
+        (await waitFor(() => button("Add monitoring profile"), "add monitoring profile")).click();
+        await waitFor(() => document.getElementById("monitoring-3-name"), "new monitoring profile");
+        input(document.getElementById("monitoring-3-name"), "Evaluation slow");
+        input(document.getElementById("monitoring-3-cadence"), "2000");
+        (await waitFor(() => button("Add analysis profile"), "add analysis profile")).click();
+        await waitFor(() => document.getElementById("analysis-2-name"), "new analysis profile");
+        for (const [field, value] of Object.entries({name: "Evaluation balanced", model: "gpt-5.6-luna",
+            max_images: "32", max_span_ms: "30000", overlap: "2", maximum_edge: "512", max_output_tokens: "2048"})) {
+            input(document.getElementById(`analysis-2-${field}`), value);
+        }
+        const selected = document.getElementById("default-analysis-profile");
+        selected.value = "2";
+        selected.dispatchEvent(new Event("change", { bubbles: true }));
+        const detail = document.getElementById("analysis-2-detail");
+        detail.value = "high";
+        detail.dispatchEvent(new Event("change", { bubbles: true }));
+        (await waitFor(() => button("Save settings"), "save settings")).click();
+        await waitFor(() => document.body.innerText.includes("Settings saved."), "saved confirmation");
+    }
+    for (const [id, expected] of Object.entries({"monitoring-3-name": "Evaluation slow",
+        "monitoring-3-cadence": "2000", "analysis-2-name": "Evaluation balanced",
+        "analysis-2-model": "gpt-5.6-luna", "analysis-2-max_images": "32",
+        "analysis-2-max_span_ms": "30000", "analysis-2-maximum_edge": "512",
+        "analysis-2-max_output_tokens": "2048", "analysis-2-detail": "high", "default-analysis-profile": "2"})) {
+        await waitFor(() => document.getElementById(id)?.value === expected, `persisted ${id}`);
+    }
+    return `ok\nprofiles ${save ? "saved" : "reloaded"} through the desktop settings form`;
+};
+
 await (async () => {
     if (scenario === "complete-analysis") {
         dioxus.send(await completeAnalysis());
@@ -183,9 +246,18 @@ await (async () => {
         dioxus.send(await recoverAnalysis());
     } else if (scenario === "record-without-preview") {
         dioxus.send(await recordWithoutPreview());
+    } else if (scenario === "recording-rehearsal") {
+        dioxus.send(await recordingRehearsal());
+    } else if (scenario === "save-profiles" || scenario === "reload-profiles") {
+        dioxus.send(await profileSettings(scenario === "save-profiles"));
+    } else if (scenario === "analyze-existing") {
+        const checklist = await openAnalysis();
+        input(checklist, "Describe only visible actions. If no exercise is visible, say not observed.");
+        (await waitFor(() => button("Analyze"), "Analyze action")).click();
+        dioxus.send(`ok\n${await waitForCompletedAnalysis()}`);
     } else {
         throw new Error(`Unknown desktop E2E scenario: ${scenario}`);
     }
 })().catch((error) => {
-    dioxus.send(`error: ${error?.stack ?? error}`);
+    dioxus.send(`error: ${error?.message ?? error}\n${error?.stack ?? ""}`);
 });

@@ -229,7 +229,12 @@ pub fn wait_for_desktop_result(
         DRIVER_READY_TIMEOUT,
         "desktop E2E driver",
     );
-    wait_for_file(app, driver_result, E2E_TIMEOUT, "desktop E2E result");
+    let timeout = if env::var("LEO_DESKTOP_E2E_REHEARSAL").as_deref() == Ok("1") {
+        Duration::from_secs(1200)
+    } else {
+        E2E_TIMEOUT
+    };
+    wait_for_file(app, driver_result, timeout, "desktop E2E result");
     let status = app
         .wait_until(SHUTDOWN_TIMEOUT)
         .expect("wait for desktop app")

@@ -349,9 +349,9 @@ fn SelectedCameraControls(
                 disabled,
                 value: "{chosen_profile}",
                 onchange: move |event| chosen_profile.set(event.value().parse().unwrap_or(0)),
-                option { value: "0", "Select a profile" }
+                option { value: "0", selected: chosen_profile() == 0, "Select a profile" }
                 for profile in profiles {
-                    option { value: "{profile.id}", "{profile.name}" }
+                    option { value: "{profile.id}", selected: chosen_profile() == profile.id, "{profile.name}" }
                 }
             }
             button {

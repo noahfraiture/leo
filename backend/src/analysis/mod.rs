@@ -10,3 +10,8 @@ pub use agent::{AnalysisResponse, ChecklistProgress, Observation, OpenAiConfig};
 pub use analyzer::{AnalysisCheckpoint, AnalysisWarning};
 pub use error::Error;
 pub use session::{AnalyzeSession, analyze_session};
+
+#[cfg(feature = "test-support")]
+pub use agent::{Agent, Error as ProviderError, LocalChatAgent, OpenAiAgent};
+#[cfg(feature = "test-support")]
+pub use analyzer::{Analyzer, BatchSummary, PlanSummary};

@@ -185,6 +185,30 @@ impl Analyzer {
         &self.checkpoint
     }
 
+    /// Summarizes the production plan without extracting images or contacting a provider.
+    #[cfg(feature = "test-support")]
+    pub fn plan_summary(&self) -> super::PlanSummary {
+        let batches = self
+            .checkpoint
+            .resolved_batches
+            .iter()
+            .map(|range| {
+                let sets = &self.frame_sets[range.clone()];
+                super::BatchSummary {
+                    frame_sets: range.len(),
+                    images: sets.iter().map(|set| set.frames.len()).sum(),
+                    first_offset_ms: sets[0].session_offset.as_millis(),
+                    last_offset_ms: sets[sets.len() - 1].session_offset.as_millis(),
+                }
+            })
+            .collect();
+        super::PlanSummary {
+            frame_sets: self.frame_sets.len(),
+            unique_images: self.frame_sets.iter().map(|set| set.frames.len()).sum(),
+            batches,
+        }
+    }
+
     fn batch_range(&self, index: usize) -> Range<usize> {
         debug_assert!(index < self.checkpoint.total_batches);
         self.checkpoint.resolved_batches[index].clone()

@@ -1019,6 +1019,9 @@ fn run_attempt_with_ready(
         .arg(config.rtsp_url)
         .args(["-map", "0:v:0", "-an", "-c:v", "copy"])
         .args(["-avoid_negative_ts", "make_zero"])
+        // Quiet streams may take tens of seconds to fill FFmpeg's output buffer.
+        // Readiness requires real file bytes as well as encoded-frame progress.
+        .args(["-flush_packets", "1"])
         .args(["-f", "matroska"])
         .arg(config.partial_path);
 

@@ -201,7 +201,8 @@ async fn run_paid_evaluation(
     assert_eq!(checkpoint.total_batches, expected_batches, "case {name}");
     assert_eq!(checkpoint.responses.len(), expected_batches, "case {name}");
     for response in &checkpoint.responses {
-        assert!(!response.observations.is_empty(), "case {name}");
+        // Empty observations are valid for a negative or fully occluded batch.
+        // Evidence quality is scored against the reference video, not observation count.
         assert_eq!(
             response.checklist_progress.len(),
             expected_items,

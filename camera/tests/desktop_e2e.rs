@@ -15,6 +15,9 @@ use serde_json::{Value, json};
 #[path = "desktop_e2e/support.rs"]
 mod support;
 
+#[path = "desktop_e2e/rehearsal.rs"]
+mod rehearsal;
+
 use support::{
     MockOpenAi, ProcessGuard, SHUTDOWN_TIMEOUT, assert_preview_ports_available, fixture,
     process_group_exists, read_application_log, real_openai_root, redacted_requests,

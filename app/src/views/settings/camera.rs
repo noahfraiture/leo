@@ -219,9 +219,9 @@ pub fn CameraSettingsSection() -> Element {
                                     camera.initial_monitoring_profile_id = event.value().parse().unwrap_or(0);
                                 }
                             },
-                            option { value: "0", "Select a monitoring profile" }
+                            option { value: "0", selected: camera.initial_monitoring_profile_id == 0, "Select a monitoring profile" }
                             for profile in profiles {
-                                option { value: "{profile.id}", "{profile.name}" }
+                                option { value: "{profile.id}", selected: camera.initial_monitoring_profile_id == profile.id, "{profile.name}" }
                             }
                         }
                         if let Some(ref error) = cadence_error {
