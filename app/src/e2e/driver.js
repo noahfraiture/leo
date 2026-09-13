@@ -102,6 +102,10 @@ const inspectAndCorrect = async () => {
         const candidate = document.querySelector('video[id^="analysis-evidence-video-"]');
         return candidate?.readyState >= 2 && candidate.videoWidth > 0 ? candidate : null;
     }, "decoded candidate footage", 45000);
+    video.scrollIntoView({ block: "center", behavior: "instant" });
+    await sleep(100);
+    const rect = video.getBoundingClientRect();
+    if (rect.bottom <= 0 || rect.top >= innerHeight) throw new Error("Candidate player is outside the viewport");
     const before = video.currentTime;
     await video.play();
     await waitFor(() => video.currentTime > before + 0.1, "actual video playback");
@@ -109,6 +113,9 @@ const inspectAndCorrect = async () => {
     const target = Math.max(0, video.duration / 2);
     video.currentTime = target;
     await waitFor(() => !video.seeking && Math.abs(video.currentTime - target) < 0.2, "video seek");
+    const decoded = await waitForVideoPixels(video);
+    globalThis.leoPlaybackDiagnostics = decoded;
+    if (!decoded.pixels?.nonBlack) throw new Error("Candidate player pixel check failed after waiting for decoded pixels: " + JSON.stringify(decoded));
     const judgment = document.getElementById("analysis-correction-judgment");
     judgment.value = "cannotVerify";
     judgment.dispatchEvent(new Event("change", { bubbles: true }));

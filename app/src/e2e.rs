@@ -84,7 +84,12 @@ pub fn DesktopE2eDriver() -> Element {
         }
 
         Some(spawn(async move {
-            let mut driver = document::eval(DRIVER_SCRIPT);
+            let script = format!(
+                "{}\n{}",
+                include_str!("media/pixel_probe.js"),
+                DRIVER_SCRIPT
+            );
+            let mut driver = document::eval(&script);
             let mut result = match driver.send(scenario) {
                 Ok(()) => driver
                     .recv::<String>()
@@ -112,6 +117,19 @@ pub fn DesktopE2eDriver() -> Element {
                         .unwrap_or_else(|error| format!("error: {error}")),
                     Err(error) => format!("error: {error}"),
                 };
+            }
+            if let Some(path) = environment_path("LEO_DESKTOP_E2E_PIXEL_RESULT") {
+                let mut inspection =
+                    document::eval("dioxus.send(globalThis.leoPlaybackDiagnostics ?? null)");
+                if let Ok(value) = inspection.recv::<serde_json::Value>().await {
+                    if !value.is_null() {
+                        fs::write(
+                            path,
+                            serde_json::to_vec_pretty(&value).expect("pixel report serializes"),
+                        )
+                        .expect("write requested pixel diagnostic");
+                    }
+                }
             }
             if let Err(error) = fs::write(&result_path, result) {
                 tracing::error!(path = %result_path.display(), %error, "desktop E2E result write failed");

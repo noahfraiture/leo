@@ -29,7 +29,7 @@ pub use desktop::launch;
 #[cfg(feature = "desktop-e2e")]
 pub use e2e::launch as launch_desktop_e2e;
 #[cfg(feature = "desktop-e2e")]
-pub use media::launch_playback_probe;
+pub use media::{launch_clip_playback_probe, launch_playback_probe};
 use route::Route;
 
 #[cfg(test)]
