@@ -10,8 +10,7 @@ use crate::{
     Route,
     preview::PreviewState,
     settings::{
-        CameraSettings, LogLevel, OpenAiSettings, ResolvedSettings,
-        Settings as ApplicationSettings, SettingsStore,
+        CameraSettings, LogLevel, ResolvedSettings, Settings as ApplicationSettings, SettingsStore,
     },
     test_support::{RenderHarness, opening_tag_before, opening_tag_with_marker, ready_preview},
 };
@@ -51,14 +50,18 @@ fn settings_snapshot(root: &Path) -> (SettingsStore, ResolvedSettings) {
             initial_monitoring_profile_id: 1,
         }],
         data_root: Some(root.join("loaded-data")),
-        openai: OpenAiSettings {
-            api_key: "loaded-secret-key".into(),
-            base_url: Some("https://loaded.provider.example/v1".into()),
+        workflow: {
+            let mut workflow = crate::test_workflow(
+                Some(backend::analysis::OpenAiConfig {
+                    api_key: "loaded-secret-key".into(),
+                    base_url: Some("https://loaded.provider.example/v1".into()),
+                }),
+                16,
+                2,
+            );
+            workflow.models[0].model = "loaded-model".into();
+            workflow
         },
-        analysis_profiles: vec![backend::profiles::AnalysisProfile {
-            model: "loaded-model".into(),
-            ..ApplicationSettings::default().analysis_profiles.remove(0)
-        }],
         log_level: LogLevel::Info,
         ..ApplicationSettings::default()
     };
@@ -151,7 +154,7 @@ fn runtime_failure_keeps_guidance_and_saved_settings_available() {
 
 #[test]
 fn operator_failure_alert_precedes_route_content() {
-    for (path, content) in [("/", "Camera monitor"), ("/analyze", "Analyze sessions")] {
+    for (path, content) in [("/", "Camera monitor"), ("/analyze", "Analyze exercises")] {
         let mut harness = RenderHarness::new();
         harness.operator_mut().message = Some("The requested action failed".into());
 

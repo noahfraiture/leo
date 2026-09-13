@@ -54,9 +54,13 @@ pub fn App() -> Element {
     };
     use_context_provider(move || availability);
     let body = match bootstrap {
-        Bootstrap::Ready { .. } => rsx! { ReadyApp { initial_route } },
+        Bootstrap::Ready { .. } => rsx! {
+            ReadyApp { initial_route }
+        },
         Bootstrap::SetupRequired | Bootstrap::Failed { .. } => {
-            rsx! { ShellRouter { initial_route } }
+            rsx! {
+                ShellRouter { initial_route }
+            }
         }
     };
 
@@ -70,6 +74,16 @@ pub fn App() -> Element {
 /// Transfers one-shot operator state and recorder events into root-scoped UI state.
 #[component]
 fn ReadyApp(initial_route: Route) -> Element {
+    crate::inference::use_inference_gate();
+    crate::analysis::use_analysis_context();
+    crate::media::use_media_registry();
+    let config = use_context::<crate::settings::ResolvedSettings>();
+    let exercise_root = config
+        .sessions_root
+        .parent()
+        .expect("sessions have a data root")
+        .join("exercises");
+    crate::exercises::use_exercise_context(backend::exercise::ExerciseStore::new(exercise_root));
     let initial_operator = use_context::<InitialOperatorState>();
     let recorder = use_context::<RecorderBootstrap>();
     let event_recorder = recorder.clone();
@@ -115,7 +129,9 @@ fn ReadyApp(initial_route: Route) -> Element {
     let desktop_e2e: Element = {
         #[cfg(feature = "desktop-e2e")]
         {
-            rsx! { crate::e2e::DesktopE2eDriver {} }
+            rsx! {
+                crate::e2e::DesktopE2eDriver {}
+            }
         }
         #[cfg(not(feature = "desktop-e2e"))]
         {
@@ -135,7 +151,8 @@ fn ShellRouter(initial_route: Route) -> Element {
     rsx! {
         HistoryProvider {
             history: move |_| {
-                Rc::new(MemoryHistory::with_initial_path(initial_path.clone())) as Rc<dyn History>
+                Rc::new(MemoryHistory::with_initial_path(initial_path.clone()))
+                    as Rc<dyn History>
             },
             Router::<Route> {}
         }

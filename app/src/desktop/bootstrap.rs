@@ -212,7 +212,6 @@ fn initialize_operator(
     )
     .map(|mut operator| {
         operator.monitoring_config_error = config.monitoring_error.clone();
-        operator.model_config_error = config.analysis_error.clone();
         if !file_logging_available {
             let warning = "Diagnostic file logging is unavailable. Recording remains available.";
             operator.message = Some(match operator.message.take() {

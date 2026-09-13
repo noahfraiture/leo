@@ -10,6 +10,8 @@ desktop-e2e = ["backend/test-support"]
 paid-openai-evaluations = []
 
 [dependencies]
+base64 = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 backend = { path = "../backend" }
 dirs = "6"
 dioxus = {
@@ -32,3 +34,7 @@ uuid = { workspace = true }
 backend = { path = "../backend", features = ["test-support"] }
 dioxus-ssr = "=0.7.9"
 tokio = { workspace = true, features = ["macros", "rt"] }
+
+[[example]]
+name = "playback_probe"
+required-features = ["desktop-e2e"]
