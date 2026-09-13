@@ -40,6 +40,14 @@ pub fn answer(request: &Value) -> Value {
             .map(|review| review["jobId"].clone())
             .collect();
         let evidence = reviews[0]["completion"]["value"]["evidenceIds"].clone();
+        if document["contract"] == "aliases-v2-typed-ids" {
+            return json!({
+                "reason":"One directly reviewed event establishes the fixture criterion.",
+                "reviews":[{"visualReviewIds":review_ids,"kind":"supporting","reason":"Same visible event in the fixture windows.",
+                    "decisiveCandidateFrameIds":evidence,"requiredForDecision":true}],
+                "supportingCandidateFrameIds":evidence,"contradictingCandidateFrameIds":[],"contextCandidateFrameIds":[]
+            });
+        }
         return json!({
             "reason":"One directly reviewed event establishes the fixture criterion.",
             "reviews":[{"reviewIds":review_ids,"kind":"supporting","reason":"Same visible event in the fixture windows.",

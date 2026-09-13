@@ -223,15 +223,25 @@ fn desktop_operator_flow_records_two_cameras_and_analyzes() {
             );
         }
         let documents: Vec<_> = requests.iter().map(workflow_mock::input_document).collect();
+        assert!(
+            documents
+                .iter()
+                .any(|document| document["contract"] == "aliases-v2-typed-ids"),
+            "new runs must exercise the typed selector contract"
+        );
         let formatting: Vec<_> = documents
             .iter()
             .filter(|document| document.is_array())
             .collect();
         assert_eq!(formatting.len(), 1);
         for document in documents.iter().filter(|document| !document.is_array()) {
-            let text = document["operatorChecklist"]["criteria"][0]["text"]
-                .as_str()
-                .unwrap();
+            let checklist = &document["operatorChecklist"];
+            let text = if document["contract"] == "aliases-v2-typed-ids" {
+                checklist[0].as_str()
+            } else {
+                checklist["criteria"][0]["text"].as_str()
+            }
+            .expect("request preserves the operator checklist");
             assert!(
                 text == "Keep movement controlled. Pauses are allowed."
                     || text == "Movement is visible. Pauses are allowed."
