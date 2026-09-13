@@ -9,7 +9,7 @@ mod playback;
 mod tests;
 
 pub use error::EvidenceError;
-pub use gather::{gather_evidence,gather_evidence_with_budget};
+pub use gather::{gather_evidence, gather_evidence_with_budget};
 pub use materialize::{materialize_frame, verify_sources};
 pub use model::{
     CandidateFrame, EligiblePeriod, EvidenceInterval, EvidenceManifest, EvidenceWindow,

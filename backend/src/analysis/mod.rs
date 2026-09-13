@@ -8,18 +8,29 @@ mod reconcile;
 mod run;
 mod session;
 mod video;
+pub use evidence::gather_evidence_with_budget;
+pub use evidence::{PlaybackClip, prepare_playback};
 
 pub use agent::{AnalysisResponse, ChecklistProgress, Observation, OpenAiConfig};
 pub use analyzer::{AnalysisCheckpoint, AnalysisWarning};
 pub use error::Error;
+pub use evidence::{
+    CandidateFrame, EligiblePeriod, EvidenceError, EvidenceInterval, EvidenceManifest,
+    EvidenceWindow, RecordingSource, SentImage, build_evidence, gather_evidence, materialize_frame,
+    plan_windows, verify_sources,
+};
+pub use reconcile::{
+    CriterionAssessment, EvidenceRequest, EvidenceSelection, FinalFinding, Judgment, ReaderFinding,
+    ReviewDisposition, ReviewDispositionKind, ReviewFinding, VisualFact,
+};
+pub use run::{
+    CreateRun, CriterionWindows, EvidencePolicy, ExecuteRun, FinalResult, HumanCorrection, JobKind,
+    JobRecord, JobState, ReaderResult, ReviewResult, RunCheckpoint, RunError, RunInputs, RunResult,
+    RunSnapshot, RunStage, RunStore, SelectionResult, create_run, execute_run,
+};
 pub use session::{AnalyzeSession, analyze_session};
 
 #[cfg(feature = "test-support")]
 pub use agent::{Agent, Error as ProviderError, LocalChatAgent, OpenAiAgent};
 #[cfg(feature = "test-support")]
 pub use analyzer::{Analyzer, BatchSummary, PlanSummary};
-
-pub use evidence::{CandidateFrame, EligiblePeriod, EvidenceInterval, EvidenceError, EvidenceManifest, EvidenceWindow, RecordingSource, SentImage, PlaybackClip, build_evidence, plan_windows, materialize_frame, verify_sources, gather_evidence, gather_evidence_with_budget, prepare_playback};
-
-pub use reconcile::{CriterionAssessment, EvidenceRequest, EvidenceSelection, ReviewDisposition, ReviewDispositionKind, FinalFinding, Judgment, ReaderFinding, ReviewFinding, VisualFact};
-pub use run::{EvidencePolicy, HumanCorrection, JobKind, JobRecord, JobState, RunCheckpoint, RunError, RunInputs, RunResult, RunSnapshot, RunStage, RunStore, CriterionWindows, ReaderResult, ReviewResult, FinalResult, SelectionResult};

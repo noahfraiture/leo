@@ -1,4 +1,5 @@
 //! Immutable analysis runs, durable independent jobs, and operator correction history.
+mod engine;
 mod error;
 mod jobs;
 mod media;
@@ -8,6 +9,7 @@ mod store;
 mod workflow;
 
 
+pub use engine::{CreateRun, ExecuteRun, create_run, execute_run};
 pub use error::{RunError, RunResult};
 pub use model::{CriterionWindows, FinalResult, ReaderResult, ReviewResult, SelectionResult};
 pub use model::{
