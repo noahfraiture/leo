@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use super::{
-    citations::{CitationLinks, EvidenceButton, citation_labels},
+    citations::{CitationLinks, citation_labels},
     correction::CorrectionEditor,
     labels::{judgment_label, timestamp},
 };
@@ -223,18 +223,7 @@ fn CandidatePlayback(
     rsx! {
         section { class: "min-w-0", aria_label: "Candidate recording playback",
             h4 { class: "font-semibold", "Candidate footage" }
-            div { class: "mt-2 flex flex-wrap gap-2",
-                for id in citations {
-                    if let Some(frame) = snapshot.checkpoint.evidence.frame(&id) {
-                        EvidenceButton {
-                            session_id,
-                            run_id,
-                            frame_id: id.clone(),
-                            label: format!("Camera {} · {}", frame.camera_id, timestamp(frame.session_offset_ms)),
-                        }
-                    }
-                }
-            }
+            CitationLinks { session_id, run_id, citations }
             label { class: "form-control mt-3",
                 span { class: "label-text mb-1", "Browse sampled candidate frames" }
                 select {
@@ -351,7 +340,7 @@ fn CandidatePlayback(
     }
 }
 
-fn criterion_citations(snapshot: &RunSnapshot, criterion_id: Uuid) -> BTreeSet<String> {
+fn criterion_citations(snapshot: &RunSnapshot, criterion_id: Uuid) -> Vec<(String, String)> {
     let jobs = snapshot
         .checkpoint
         .jobs
@@ -365,7 +354,7 @@ fn criterion_citations(snapshot: &RunSnapshot, criterion_id: Uuid) -> BTreeSet<S
         .iter()
         .filter(|assessment| assessment.criterion_id == criterion_id)
         .flat_map(|assessment| assessment.evidence_ids.clone())
-        .collect::<BTreeSet<_>>();
+        .collect::<Vec<_>>();
     for result in &snapshot.reader_results {
         if jobs.contains(result.job_id.as_str()) {
             citations.extend(result.completion.value.evidence_ids.clone());
@@ -376,7 +365,7 @@ fn criterion_citations(snapshot: &RunSnapshot, criterion_id: Uuid) -> BTreeSet<S
             citations.extend(result.completion.value.evidence_ids.clone());
         }
     }
-    citations
+    citation_labels(snapshot, &citations)
 }
 
 #[component]
