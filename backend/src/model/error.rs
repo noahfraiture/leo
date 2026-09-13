@@ -41,6 +41,10 @@ pub enum Error {
         "model provider rejected the request (HTTP {status}); check the connection and model settings"
     )]
     ProviderStatus { status: u16 },
+    #[error("model provider stopped at its output-token limit before completing the response")]
+    OutputLimitReached,
+    #[error("model provider reported an unfinished response; no structured result was accepted")]
+    IncompleteResponse,
     #[error("model response contained no text")]
     MissingText,
     #[error(

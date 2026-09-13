@@ -18,6 +18,45 @@ enum ClientTransport {
     Chat(openai::completion::CompletionModel),
 }
 
+// Check provider-declared completion before accepting any text, even syntactically valid JSON.
+// Only known metadata values affect diagnostics; raw reasons and response payloads stay private.
+trait CompletionStatus {
+    fn ensure_complete(&self) -> Result<()>;
+}
+
+impl CompletionStatus for openai::responses_api::CompletionResponse {
+    fn ensure_complete(&self) -> Result<()> {
+        use openai::responses_api::ResponseStatus;
+        match self.status {
+            ResponseStatus::Completed => Ok(()),
+            ResponseStatus::Incomplete
+                if self
+                    .incomplete_details
+                    .as_ref()
+                    .is_some_and(|details| details.reason == "max_output_tokens") =>
+            {
+                Err(Error::OutputLimitReached)
+            }
+            _ => Err(Error::IncompleteResponse),
+        }
+    }
+}
+
+impl CompletionStatus for openai::completion::CompletionResponse {
+    fn ensure_complete(&self) -> Result<()> {
+        // Rig projects the first choice into its generic response; check that same choice only.
+        match self
+            .choices
+            .first()
+            .map(|choice| choice.finish_reason.as_str())
+        {
+            Some("stop") => Ok(()),
+            Some("length") => Err(Error::OutputLimitReached),
+            _ => Err(Error::IncompleteResponse),
+        }
+    }
+}
+
 /// Executes stateless structured requests through exactly the configured provider and transport.
 /// Evaluation callers own their authorization and usage journal; this client reads no environment.
 pub struct ModelClient {
@@ -116,7 +155,10 @@ async fn complete<M: CompletionModel, T: DeserializeOwned + JsonSchema>(
     timeout: Duration,
     token_limit: Option<u64>,
     additional_parameters: Option<serde_json::Value>,
-) -> Result<Completion<T>> {
+) -> Result<Completion<T>>
+where
+    M::Response: CompletionStatus,
+{
     let mut request = model
         .completion_request(job.message()?)
         .preamble(job.instructions.clone())
@@ -133,6 +175,7 @@ async fn complete<M: CompletionModel, T: DeserializeOwned + JsonSchema>(
         .map_err(|_| Error::Timeout)?
         // Raw provider errors may contain credentials, prompts, or returned image bytes.
         .map_err(Error::from)?;
+    response.raw_response.ensure_complete()?;
     let text = response
         .choice
         .iter()

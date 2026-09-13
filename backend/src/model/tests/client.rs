@@ -12,6 +12,12 @@ struct Answer {
     observed: bool,
 }
 
+impl CompletionStatus for rig_core::test_utils::MockResponse {
+    fn ensure_complete(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
 fn job(role: JobRole) -> StructuredJob {
     StructuredJob {
         role,
@@ -124,13 +130,99 @@ async fn chat_transport_sends_the_explicit_model_and_json_schema() {
     wire_contract(Transport::ChatCompletions).await;
 }
 
+#[tokio::test]
+async fn responses_output_limit_metadata_rejects_both_partial_and_valid_json() {
+    for text in [r#"{"observed":"#, r#"{"observed":true}"#] {
+        let error = wire_failure(Transport::Responses, move |response| {
+            response["status"] = serde_json::json!("incomplete");
+            response["incomplete_details"] = serde_json::json!({"reason":"max_output_tokens"});
+            response["output"][0]["status"] = serde_json::json!("incomplete");
+            response["output"][0]["content"][0]["text"] = serde_json::json!(text);
+        })
+        .await;
+        assert!(matches!(error, Error::OutputLimitReached));
+    }
+}
+
+#[tokio::test]
+async fn chat_length_metadata_rejects_both_partial_and_valid_json() {
+    for text in [r#"{"observed":"#, r#"{"observed":true}"#] {
+        let error = wire_failure(Transport::ChatCompletions, move |response| {
+            response["choices"][0]["finish_reason"] = serde_json::json!("length");
+            response["choices"][0]["message"]["content"] = serde_json::json!(text);
+        })
+        .await;
+        assert!(matches!(error, Error::OutputLimitReached));
+    }
+}
+
+#[tokio::test]
+async fn other_incomplete_reasons_stay_sanitized_and_are_not_mislabeled_as_token_limits() {
+    for transport in [Transport::Responses, Transport::ChatCompletions] {
+        let error = wire_failure(transport, move |response| match transport {
+            Transport::Responses => {
+                response["status"] = serde_json::json!("incomplete");
+                response["incomplete_details"] =
+                    serde_json::json!({"reason":"private-provider-detail"});
+            }
+            Transport::ChatCompletions => {
+                response["choices"][0]["finish_reason"] =
+                    serde_json::json!("private-provider-detail");
+            }
+        })
+        .await;
+        assert!(matches!(error, Error::IncompleteResponse));
+        assert!(!format!("{error} {error:?}").contains("private-provider-detail"));
+    }
+}
+
+#[tokio::test]
+async fn partial_json_without_truncation_metadata_keeps_the_parse_diagnostic() {
+    let error = wire_failure(Transport::Responses, |response| {
+        response["output"][0]["content"][0]["text"] = serde_json::json!(r#"{"observed":"#);
+    })
+    .await;
+    assert!(matches!(error, Error::InvalidResponse { .. }));
+}
+
+async fn wire_failure(
+    transport: Transport,
+    edit_response: impl FnOnce(&mut serde_json::Value) + Send + 'static,
+) -> Error {
+    let (base_url, received) = wire_server(transport, edit_response);
+    let provider = ProviderConnection {
+        id: "provider".into(),
+        name: "Loopback incomplete response".into(),
+        base_url,
+        transport,
+        api_key: "local-test-key".into(),
+    };
+    let profile = ModelProfile {
+        id: "profile".into(),
+        name: "Model status".into(),
+        provider_id: provider.id.clone(),
+        model: "explicit-model".into(),
+        memory_cost_mib: 0,
+        image_limit: 4,
+        max_output_tokens: Some(128),
+        reasoning_effort: None,
+    };
+    let client = ModelClient::new(&provider, &profile, Duration::from_secs(5)).unwrap();
+    let error = client
+        .complete::<Answer>(&job(JobRole::VisualReviewer))
+        .await
+        .unwrap_err();
+    received.join().unwrap();
+    error
+}
+
 async fn wire_contract(transport: Transport) {
     for role in [
         JobRole::ChecklistFormatter,
         JobRole::VisualReader,
         JobRole::VisualReviewer,
     ] {
-        let (base_url, received) = wire_server(transport);
+        let (base_url, received) = wire_server(transport, |_| {});
         let provider = ProviderConnection {
             id: "provider".into(),
             name: "Loopback contract test".into(),
@@ -188,6 +280,7 @@ async fn wire_contract(transport: Transport) {
 
 fn wire_server(
     transport: Transport,
+    edit_response: impl FnOnce(&mut serde_json::Value) + Send + 'static,
 ) -> (String, std::thread::JoinHandle<(String, serde_json::Value)>) {
     use std::{
         io::{Read, Write},
@@ -247,7 +340,7 @@ fn wire_server(
             bytes.extend_from_slice(&buffer[..count]);
         }
         let request = serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
-        let response = match transport {
+        let mut response = match transport {
             Transport::Responses => serde_json::json!({
                 "id":"response-test", "object":"response", "created_at":1,
                 "status":"completed", "model":"explicit-model", "tools":[],
@@ -260,8 +353,9 @@ fn wire_server(
                 "model":"explicit-model", "choices":[{"index":0,"finish_reason":"stop",
                     "message":{"role":"assistant","content":"{\"observed\":true}"}}]
             }),
-        }
-        .to_string();
+        };
+        edit_response(&mut response);
+        let response = response.to_string();
         write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
         (path, request)
     });
