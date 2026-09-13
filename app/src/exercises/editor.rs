@@ -80,7 +80,7 @@ pub fn ExerciseEditor() -> Element {
 fn ConfigurationBody(exercise_id: Uuid) -> Element {
     let context = use_context::<ExerciseContext>();
     let mut state = context.state;
-    let Some((name, dirty, published, busy, error, valid)) =
+    let Some((name, dirty, published, busy, error, validation_error)) =
         state.read().configurations.get(&exercise_id).map(|editor| {
             (
                 editor.draft.name.clone(),
@@ -91,7 +91,11 @@ fn ConfigurationBody(exercise_id: Uuid) -> Element {
                     .is_some_and(|revision| revision.edit_version == editor.saved.edit_version),
                 editor.saving || editor.importing,
                 editor.error.clone(),
-                editor.draft.validate_for_publication().is_ok(),
+                editor
+                    .draft
+                    .validate_for_publication()
+                    .err()
+                    .map(|error| error.to_string()),
             )
         })
     else {
@@ -114,6 +118,14 @@ fn ConfigurationBody(exercise_id: Uuid) -> Element {
         if let Some(error) = error {
             p { class: "alert alert-error", role: "alert", "{error}" }
         }
+        if let Some(error) = &validation_error {
+            p {
+                id: "exercise-publication-error",
+                class: "alert alert-warning text-sm",
+                role: "status",
+                "Before saving this configuration: {error}"
+            }
+        }
         div { class: "flex flex-wrap items-center gap-3 border-t border-base-300 pt-4",
             button {
                 id: "exercise-save-draft",
@@ -125,7 +137,8 @@ fn ConfigurationBody(exercise_id: Uuid) -> Element {
             button {
                 id: "exercise-publish",
                 class: "btn btn-primary",
-                disabled: busy || !valid || (!dirty && published),
+                disabled: busy || validation_error.is_some() || (!dirty && published),
+                aria_describedby: validation_error.as_ref().map(|_| "exercise-publication-error"),
                 onclick: move |_| tasks::save(publisher.clone(), exercise_id, true),
                 "Save configuration"
             }

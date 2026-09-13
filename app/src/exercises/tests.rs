@@ -6,6 +6,34 @@ use uuid::Uuid;
 
 use super::state::{ExerciseEditorState, ExercisePageState};
 
+#[cfg(unix)]
+#[test]
+fn incomplete_reference_metadata_explains_why_configuration_cannot_be_saved() {
+    use crate::test_support::{RenderHarness, assert_button_disabled, ready_preview};
+    for missing_object in [true, false] {
+        let mut draft = draft("Reference validation");
+        let mut image = reference(draft.checklist.criteria[0].id);
+        if missing_object {
+            image.object_label.clear();
+        } else {
+            image.purpose.clear();
+        }
+        draft.references.push(image);
+        let mut harness = RenderHarness::new();
+        harness.exercises.selected_id = Some(draft.id);
+        harness
+            .exercises
+            .configurations
+            .insert(draft.id, ExerciseEditorState::new(draft, None));
+        let html = harness.render_at(ready_preview(), "/analyze");
+        assert_button_disabled(&html, "Save configuration", true);
+        assert!(
+            html.contains("each reference needs an object label, purpose, and criterion link",),
+        );
+        assert!(html.contains("aria-describedby=\"exercise-publication-error\""));
+    }
+}
+
 fn draft(name: &str) -> ExerciseDraft {
     ExerciseDraft {
         schema_version: 1,
