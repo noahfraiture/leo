@@ -4,6 +4,8 @@ mod agent;
 mod analyzer;
 mod error;
 mod evidence;
+mod reconcile;
+mod run;
 mod session;
 mod video;
 
@@ -18,3 +20,6 @@ pub use agent::{Agent, Error as ProviderError, LocalChatAgent, OpenAiAgent};
 pub use analyzer::{Analyzer, BatchSummary, PlanSummary};
 
 pub use evidence::{CandidateFrame, EligiblePeriod, EvidenceInterval, EvidenceError, EvidenceManifest, EvidenceWindow, RecordingSource, SentImage, PlaybackClip, build_evidence, plan_windows, materialize_frame, verify_sources, gather_evidence, gather_evidence_with_budget, prepare_playback};
+
+pub use reconcile::{CriterionAssessment, EvidenceRequest, EvidenceSelection, ReviewDisposition, ReviewDispositionKind, FinalFinding, Judgment, ReaderFinding, ReviewFinding, VisualFact};
+pub use run::{EvidencePolicy, HumanCorrection, JobKind, JobRecord, JobState, RunCheckpoint, RunError, RunInputs, RunResult, RunSnapshot, RunStage, RunStore, CriterionWindows, ReaderResult, ReviewResult, FinalResult, SelectionResult};
