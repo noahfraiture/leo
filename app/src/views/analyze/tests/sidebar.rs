@@ -1,54 +1,19 @@
-use backend::analysis::{AnalysisCheckpoint, AnalysisResponse, AnalysisWarning};
+use super::row_status;
+use crate::analysis::{AnalysisPageState, test_snapshot};
+use backend::analysis::RunStage;
 use uuid::Uuid;
 
-use super::row_status;
-
-fn checkpoint(
-    total_batches: usize,
-    response_count: usize,
-    warnings: Vec<AnalysisWarning>,
-) -> Result<Option<AnalysisCheckpoint>, String> {
-    let response = AnalysisResponse {
-        observations: Vec::new(),
-        sequence_summary: String::new(),
-        checklist_progress: Vec::new(),
-    };
-    Ok(Some(AnalysisCheckpoint {
-        schema_version: 3,
-        session_id: Uuid::from_u128(1),
-        checklist: "Complete the exercise".into(),
-        plan_fingerprint: "0123456789abcdef".into(),
-        total_batches,
-        analysis_profile: crate::test_analysis_profile(5, 0),
-        resolved_batches: (0..total_batches).map(|i| i..i + 1).collect(),
-        warnings,
-        responses: vec![response; response_count],
-    }))
-}
-
 #[test]
-fn row_status_uses_the_approved_priority_and_zero_response_rule() {
-    let none = Ok(None);
-    let invalid = Err("invalid".into());
-    let zero = checkpoint(2, 0, Vec::new());
-    let partial = checkpoint(2, 1, Vec::new());
-    let complete = checkpoint(1, 1, Vec::new());
-    let warning = checkpoint(
-        1,
-        1,
-        vec![AnalysisWarning::RecordingGap {
-            camera_id: 1,
-            start_offset_ms: 0,
-            end_offset_ms: 1,
-        }],
-    );
-
-    assert_eq!(row_status(&invalid, true, true), "Invalid checkpoint");
-    assert_eq!(row_status(&none, true, true), "Running");
-    assert_eq!(row_status(&none, false, true), "Failed");
-    assert_eq!(row_status(&zero, false, false), "In progress");
-    assert_eq!(row_status(&partial, false, false), "In progress");
-    assert_eq!(row_status(&complete, false, false), "Complete");
-    assert_eq!(row_status(&warning, false, false), "Complete with warning");
-    assert_eq!(row_status(&none, false, false), "Not started");
+fn sidebar_distinguishes_unloaded_history_paused_work_and_ready_results() {
+    let id = Uuid::new_v4();
+    let mut page = AnalysisPageState::default();
+    assert_eq!(row_status(&page, id), "Select to load runs");
+    let mut run = test_snapshot(id, Uuid::new_v4(), RunStage::Paused);
+    page.apply_snapshot(run.clone());
+    assert_eq!(row_status(&page, id), "Processing paused");
+    run.checkpoint.stage = RunStage::Ready;
+    page.apply_snapshot(run);
+    assert_eq!(row_status(&page, id), "Ready for review");
+    page.sessions.get_mut(&id).unwrap().error = Some("Could not load".into());
+    assert_eq!(row_status(&page, id), "Needs attention");
 }

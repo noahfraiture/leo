@@ -1,11 +1,15 @@
+use super::labels::recorded_at;
+use crate::analysis::{AnalysisContext, AnalysisPageState, AnalysisTab};
 use crate::operator::OperatorState;
-use backend::analysis::AnalysisCheckpoint;
 use dioxus::prelude::*;
 
 /// Renders completed sessions and their derived analysis state.
 #[component]
 pub fn Sidebar() -> Element {
     let mut operator = use_context::<Signal<OperatorState>>();
+    let AnalysisContext {
+        state: mut analysis_state,
+    } = use_context::<AnalysisContext>();
     let rows = {
         let state = operator.read();
         state
@@ -16,14 +20,7 @@ pub fn Sidebar() -> Element {
                 (
                     session_id,
                     row.stored.session.start_utc_ms,
-                    row_status(
-                        &row.checkpoint,
-                        state.running_analysis_id == Some(session_id),
-                        state
-                            .analysis_error
-                            .as_ref()
-                            .is_some_and(|(failed_id, _)| *failed_id == session_id),
-                    ),
+                    row_status(&analysis_state.read(), session_id),
                     state.selected_session_id == Some(session_id),
                 )
             })
@@ -64,17 +61,16 @@ pub fn Sidebar() -> Element {
                             button {
                                 class: if selected { "btn h-auto w-full justify-start border-primary bg-base-100 p-3 text-left" } else { "btn btn-ghost h-auto w-full justify-start p-3 text-left" },
                                 r#type: "button",
-                                aria_label: "Session {session_id}, UTC milliseconds: {start_utc_ms}, status: {status}",
+                                aria_label: "Session {session_id}, {recorded_at(start_utc_ms)}, status: {status}",
                                 aria_pressed: selected,
                                 onclick: move |_| {
                                     let mut state = operator.write();
                                     state.selected_session_id = Some(session_id);
                                     state.set_transient_message(None);
+                                    analysis_state.write().tab = AnalysisTab::Evaluate;
                                 },
                                 span { class: "flex min-w-0 flex-1 flex-col gap-1",
-                                    span { class: "text-xs font-normal",
-                                        "UTC milliseconds: {start_utc_ms}"
-                                    }
+                                    span { class: "text-xs font-normal", "{recorded_at(start_utc_ms)}" }
                                     span { class: "badge badge-outline", "{status}" }
                                 }
                             }
@@ -115,28 +111,28 @@ pub fn Sidebar() -> Element {
     }
 }
 
-fn row_status(
-    checkpoint: &Result<Option<AnalysisCheckpoint>, String>,
-    running: bool,
-    failed: bool,
-) -> &'static str {
-    if checkpoint.is_err() {
-        "Invalid checkpoint"
-    } else if running {
-        "Running"
-    } else if failed {
-        "Failed"
-    } else if let Ok(Some(checkpoint)) = checkpoint {
-        if checkpoint.responses.is_empty() || checkpoint.responses.len() < checkpoint.total_batches
-        {
-            "In progress"
-        } else if checkpoint.warnings.is_empty() {
-            "Complete"
-        } else {
-            "Complete with warning"
-        }
-    } else {
-        "Not started"
+fn row_status(page: &AnalysisPageState, session_id: uuid::Uuid) -> &'static str {
+    if page
+        .active
+        .is_some_and(|active| active.session_id == session_id)
+    {
+        return "Running";
+    }
+    let Some(session) = page.sessions.get(&session_id) else {
+        return "Select to load runs";
+    };
+    if session.error.is_some() {
+        return "Needs attention";
+    }
+    let latest = session
+        .runs
+        .values()
+        .max_by_key(|entry| entry.snapshot.inputs.created_utc_ms);
+    match latest.map(|entry| entry.snapshot.checkpoint.stage) {
+        Some(backend::analysis::RunStage::Ready) => "Ready for review",
+        Some(backend::analysis::RunStage::Paused) => "Processing paused",
+        Some(_) => "Incomplete run",
+        None => "Not analyzed",
     }
 }
 
