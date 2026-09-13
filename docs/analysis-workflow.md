@@ -15,7 +15,7 @@ Leo prepares an exercise once, then evaluates completed recordings against the o
 | Save my assessment | Append a reasoned correction and optional candidate citations | Human history separate from machine results |
 | Revise configuration and rerun | Publish another revision and another run | Previous inputs, outputs and corrections remain intact |
 
-Draft edits and formatting comments never become grading requirements without the operator saving them into the checklist. The assistant cannot silently publish a revision. An outstanding proposal is marked stale if its source draft changes.
+Draft edits and formatting comments never become grading requirements without the operator saving them into the checklist. The assistant cannot silently publish a revision. An outstanding proposal is marked stale if its source draft changes. Formatter comments use the tested source-linked question format; they are not a second checklist. Save explains missing required reference metadata before publication.
 
 ## Runtime flow
 
@@ -47,7 +47,7 @@ Met / Not met / Cannot verify + evidence + preserved raw findings
 
 Every criterion receives the recording's eligible initial coverage. A reader cannot inspect another reader's output. The visual reviewer sees individual findings and actual footage. The selector organizes existing reviews; it does not claim to see images or produce the final candidate judgment.
 
-Selection must account for every review exactly once as supporting, contradictory, irrelevant or unresolved, with reasons and source IDs. Explicit negative observations from either readers or reviewers are automatically included in the required final comparison. An oversized comparison is not truncated to obtain a result. The final reviewer receives actual selected images and must retain uncertainty when order, identity or attempts cannot be established together. There is no majority vote.
+Selection must account for every review exactly once as supporting, contradictory, irrelevant or unresolved, with reasons and source IDs. New runs give the selector short, separate review and candidate-frame aliases. The exact alias dictionaries and original typed reply are saved; translation back to source IDs still validates complete accounting and review-window membership. Existing frozen v1 runs retain their original request contract. Explicit negative observations from either readers or reviewers are automatically included in the required final comparison. An oversized comparison is not truncated to obtain a result. The final reviewer receives actual selected images and must retain uncertainty when order, identity or attempts cannot be established together. There is no majority vote.
 
 These are evidence and provenance checks, not a guarantee that a model correctly understands the footage. The operator must still inspect important judgments. Pauses or checklist reading alone do not establish failure; exercise policy comes from the operator's checklist. Missing samples do not prove an omitted step. Hidden state stays unverified.
 
@@ -91,7 +91,7 @@ Settings schema 4 stores named provider connections, model profiles, sets, execu
 
 Each run snapshots endpoint and transport choices without credentials. Resume requires matching connection identity and obtains credentials from current private settings. A changed source recording is rejected. Moving the whole recording directory preserves relative source identities.
 
-Responses are durably saved before checkpoints. On restart, a saved response repairs an interrupted checkpoint projection. Successful jobs are reused; pending or failed jobs can be retried by Resume. A network request interrupted before its response was saved may be sent again. Processing failure is shown separately from candidate failure.
+Responses are durably saved before checkpoints. On restart, a saved response repairs an interrupted checkpoint projection. Successful jobs are reused; pending or failed jobs can be retried by Resume. The review screen exposes the frozen model identities, output/image limits, sampling settings and resource limits; changing current Settings never changes an existing run. A network request interrupted before its response was saved may be sent again. Processing failure is shown separately from candidate failure.
 
 Human corrections include criterion, judgment, reason, citations, time and any superseded correction ID. Corrections using outside information are marked. They do not alter original model output or future prompts.
 
