@@ -118,6 +118,9 @@ pub fn RunProgress(session_id: Uuid, run_id: Uuid, snapshot: RunSnapshot) -> Ele
                 p { class: "alert alert-warning",
                     "Processing paused. Completed findings are preserved; unfinished requests are not candidate failures."
                 }
+                p { class: "text-sm",
+                    "Resume keeps this run's original settings. If you change the model or its limits, start a new analysis to use those changes."
+                }
             }
             if let Some(error) = snapshot.checkpoint.error {
                 p { class: "alert alert-error", role: "alert", "{error}" }
