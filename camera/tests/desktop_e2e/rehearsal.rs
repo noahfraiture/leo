@@ -38,12 +38,10 @@ fn desktop_profiles_save_and_reload() {
         assert!(message.starts_with("ok\n"), "{message}");
     }
     let saved: Value = serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
-    assert_eq!(saved["defaultAnalysisProfileId"], 2);
+    assert_eq!(saved["workflow"]["execution"]["memoryBudgetMib"], 4096);
+    assert_eq!(saved["workflow"]["execution"]["maxConcurrentJobs"], 3);
     assert_eq!(saved["monitoringProfiles"].as_array().unwrap().len(), 3);
-    assert_eq!(
-        saved["analysisProfiles"][1]["imageSize"]["maximumLongEdge"],
-        512
-    );
+    assert_eq!(saved["workflow"]["models"][0]["imageLimit"], 24);
     assert!(mock.requests.lock().unwrap().is_empty());
 }
 

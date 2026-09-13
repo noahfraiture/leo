@@ -73,8 +73,8 @@ pub fn write_desktop_settings(
             })
         })
         .collect::<Vec<_>>();
-    let settings = json!({
-        "schemaVersion": 3,
+    let mut settings = json!({
+        "schemaVersion": 4,
         "nextCameraId": 3,
         "cameras": cameras,
         "dataRoot": data_root,
@@ -84,20 +84,40 @@ pub fn write_desktop_settings(
             {"id": 2, "name": "Stable", "sampleEveryMs": 2000}
         ],
         "nextMonitoringProfileId": 3,
-        "analysisProfiles": [{
-            "id": 1, "name": "Fixture", "model": model,
-            "maxImagesPerPrompt": analysis_frame_sets_per_prompt * 2,
-            "maxPromptSpanMs": (analysis_frame_sets_per_prompt.saturating_sub(1) * 1000).max(1),
-            "overlapFrameSets": 0, "imageSize": "original", "imageDetail": "providerDefault", "maxOutputTokens": null
-        }],
-        "nextAnalysisProfileId": 2,
-        "defaultAnalysisProfileId": 1,
-        "openai": {
-            "apiKey": api_key,
-            "baseUrl": base_url
+        "workflow": {
+            "providers": [{
+                "id": "fixture", "name": "Fixture provider", "apiKey": api_key,
+                "baseUrl": base_url.unwrap_or("https://api.openai.com/v1"), "transport": "responses"
+            }],
+            "models": [{
+                "id": "fixture", "name": "Fixture model", "providerId": "fixture", "model": model,
+                "memoryCostMib": 0, "imageLimit": analysis_frame_sets_per_prompt * 2,
+                "maxOutputTokens": null, "reasoningEffort": null
+            }],
+            "modelSets": [{
+                "id": "fixture", "name": "Fixture set", "readerIds": ["fixture"],
+                "reviewerId": "fixture", "formatterId": "fixture"
+            }],
+            "execution": {"memoryBudgetMib": 0, "maxConcurrentJobs": 4, "maxJobsPerModel": 1, "requestTimeoutSeconds": 30},
+            "evidence": {
+                "maxPromptSpanMs": (analysis_frame_sets_per_prompt.saturating_sub(1) * 1000).max(1),
+                "overlapFrameSets": 0, "imageSize": "original", "imageDetail": "providerDefault"
+            }
         },
         "logLevel": "info"
     });
+    if base_url.is_some() {
+        // The loopback scenarios exercise two genuinely distinct model identities.
+        let mut second = settings["workflow"]["models"][0].clone();
+        second["id"] = json!("second-reader");
+        second["name"] = json!("Second fixture reader");
+        second["model"] = json!(format!("{model}-second"));
+        settings["workflow"]["models"]
+            .as_array_mut()
+            .unwrap()
+            .push(second);
+        settings["workflow"]["modelSets"][0]["readerIds"] = json!(["fixture", "second-reader"]);
+    }
     let path = directory.join("settings.json");
     let mut file = OpenOptions::new()
         .write(true)
@@ -335,7 +355,7 @@ pub fn read_application_log(logs: &Path) -> String {
 }
 
 pub fn request_contains_camera_frame(request: &Value, camera_id: u32) -> bool {
-    let source = format!("Frame source: camera {camera_id} ");
+    let source = format!("Camera {camera_id}, session offset ");
     let Some(messages) = request.get("input").and_then(Value::as_array) else {
         return false;
     };
@@ -470,7 +490,7 @@ async fn mock_response(
 ) -> Response {
     let request_number = {
         let mut requests = state.requests.lock().expect("mock requests mutex");
-        requests.push(request);
+        requests.push(request.clone());
         requests.len()
     };
     if state.fail_on_request == Some(request_number) {
@@ -486,18 +506,7 @@ async fn mock_response(
         )
             .into_response();
     }
-    let response = json!({
-        "observations": [{
-            "timestamp": "00:00:00.000",
-            "description": "The fixture student begins the exercise."
-        }],
-        "sequence_summary": "E2E mock analysis complete.",
-        "checklist_progress": [{
-            "item": "Keep movement controlled",
-            "status": "respected",
-            "note": "Deterministic local E2E response."
-        }]
-    });
+    let response = super::workflow_mock::answer(&request);
     Json(json!({
         "id": "resp_e2e",
         "object": "response",

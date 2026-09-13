@@ -1,84 +1,71 @@
-use backend::analysis::OpenAiConfig;
+use backend::model::{ProviderConnection, Transport};
 
 use super::{
     ANALYSIS_RECOVERY_SCENARIO, COMPLETE_ANALYSIS_SCENARIO, RECORD_WITHOUT_PREVIEW_SCENARIO,
     loopback_proxy_is_bypassed, provider_configuration_is_safe, selected_driver_scenario,
 };
 
-fn openai_config(api_key: &str, base_url: Option<&str>) -> OpenAiConfig {
-    OpenAiConfig {
-        api_key: api_key.into(),
-        base_url: base_url.map(str::to_owned),
+fn provider(base_url: &str, key: &str) -> ProviderConnection {
+    ProviderConnection {
+        id: "test".into(),
+        name: "Test".into(),
+        base_url: base_url.into(),
+        transport: Transport::Responses,
+        api_key: key.into(),
     }
 }
 
 #[test]
-fn active_provider_configuration_requires_loopback_or_both_paid_gates() {
-    assert!(provider_configuration_is_safe(
-        Some(&openai_config("key", Some("http://127.42.0.1:3000/v1"),)),
-        None,
-        None,
-    ));
-    assert!(provider_configuration_is_safe(
-        Some(&openai_config("key", Some("http://[::1]:3000/v1"))),
-        None,
-        None,
-    ));
-    assert!(provider_configuration_is_safe(
-        Some(&openai_config("key", None)),
-        Some("1"),
-        Some("1"),
-    ));
-
-    for configuration in [
-        (None, None, None),
-        (
-            Some(openai_config("key", Some("https://api.openai.com/v1"))),
+fn model_connections_require_loopback_or_explicit_direct_openai_test_opt_in() {
+    for endpoint in ["http://127.42.0.1:3000/v1", "http://[::1]:3000/v1"] {
+        assert!(provider_configuration_is_safe(
+            &provider(endpoint, ""),
             None,
-            None,
-        ),
-        (
-            Some(openai_config("key", Some("http://localhost:3000/v1"))),
-            None,
-            None,
-        ),
-        (Some(openai_config("key", None)), Some("1"), None),
-        (Some(openai_config(" ", None)), Some("1"), Some("1")),
-        (
-            Some(openai_config("key", Some("https://api.openai.com/v1"))),
-            Some("1"),
-            Some("1"),
-        ),
-        (
-            Some(openai_config(" ", Some("http://127.0.0.1:3000/v1"))),
-            None,
-            None,
-        ),
-    ] {
-        assert!(!provider_configuration_is_safe(
-            configuration.0.as_ref(),
-            configuration.1,
-            configuration.2,
+            None
         ));
     }
+    let openai = provider("https://api.openai.com/v1", "test-key");
+    assert!(provider_configuration_is_safe(
+        &openai,
+        Some("1"),
+        Some("1")
+    ));
+    assert!(!provider_configuration_is_safe(&openai, Some("1"), None));
+    assert!(!provider_configuration_is_safe(&openai, None, Some("1")));
+    for endpoint in [
+        "http://localhost:3000/v1",
+        "https://example.com/v1",
+        "https://api.openai.com/v1/other",
+        "https://secret@api.openai.com/v1",
+    ] {
+        assert!(!provider_configuration_is_safe(
+            &provider(endpoint, "key"),
+            Some("1"),
+            Some("1")
+        ));
+    }
+    assert!(!provider_configuration_is_safe(
+        &provider("https://api.openai.com/v1", ""),
+        Some("1"),
+        Some("1")
+    ));
 }
 
 #[test]
-fn loopback_provider_rejects_a_proxy_without_a_global_bypass() {
-    let base_url = Some("http://127.0.0.1:3000/v1");
-
-    assert!(loopback_proxy_is_bypassed(base_url, false, None));
+fn loopback_requests_cannot_escape_through_an_inherited_proxy() {
+    let local = "http://127.0.0.1:3000/v1";
+    assert!(loopback_proxy_is_bypassed(local, false, None));
+    assert!(loopback_proxy_is_bypassed(local, true, Some("*, .local")));
     assert!(loopback_proxy_is_bypassed(
-        base_url,
+        "https://api.openai.com/v1",
         true,
-        Some("*, .local")
+        None
     ));
-    assert!(loopback_proxy_is_bypassed(None, true, None));
-    assert!(!loopback_proxy_is_bypassed(base_url, true, None));
+    assert!(!loopback_proxy_is_bypassed(local, true, None));
     assert!(!loopback_proxy_is_bypassed(
-        base_url,
+        local,
         true,
-        Some("127.0.0.1, localhost"),
+        Some("127.0.0.1, localhost")
     ));
 }
 

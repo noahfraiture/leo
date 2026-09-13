@@ -15,13 +15,19 @@ const waitFor = async (predicate, description, timeout = 30000) => {
 const button = (label) => Array.from(document.querySelectorAll("button"))
     .find((candidate) => candidate.textContent.trim() === label && !candidate.disabled);
 
-const input = (element, value) => {
+const enabled = (id) => {
+    const element = document.getElementById(id);
+    return element && !element.disabled ? element : null;
+};
+
+const input = async (element, value) => {
     const setter = Object.getOwnPropertyDescriptor(
         Object.getPrototypeOf(element),
         "value",
     ).set;
     setter.call(element, value);
     element.dispatchEvent(new Event("input", { bubbles: true }));
+    await sleep(100);
 };
 
 const waitForLivePreviews = () => waitFor(() => ["camera-0-video", "camera-1-video"].every((id) => {
@@ -58,67 +64,59 @@ const stopSession = async () => {
 };
 
 const openAnalysis = async () => {
-    const analyze = await waitFor(
-        () => Array.from(document.querySelectorAll("a"))
-            .find((candidate) => candidate.textContent.trim() === "Analyze"),
-        "Analyze navigation",
-    );
-    analyze.click();
-    await waitFor(() => document.getElementById("completed-sessions-title"), "completed sessions");
+    (await waitFor(() => Array.from(document.querySelectorAll("a"))
+        .find((candidate) => candidate.textContent.trim() === "Analyze"), "Analyze navigation")).click();
+    await waitFor(() => document.getElementById("exercise-create"), "exercise setup");
+};
 
-    let checklist = document.getElementById("analysis-checklist");
-    if (!checklist) {
-        const row = await waitFor(
-            () => document.querySelector('button[aria-label^="Session "]'),
-            "completed session row",
-        );
-        row.click();
-        checklist = await waitFor(
-            () => document.getElementById("analysis-checklist"),
-            "analysis checklist",
-        );
-    }
-    return checklist;
+const configureExercise = async () => {
+    await openAnalysis();
+    (await waitFor(() => document.getElementById("analysis-configure-tab"), "configuration tab")).click();
+    (await waitFor(() => document.getElementById("exercise-create"), "create exercise")).click();
+    await input(await waitFor(() => document.getElementById("exercise-name"), "exercise name"), "Operator workflow test");
+    await input(document.getElementById("exercise-pasted-checklist"), "Keep movement controlled");
+    (await waitFor(() => enabled("exercise-add-pasted"), "pasted checklist ready")).click();
+    (await waitFor(() => button("Format and review"), "formatting action")).click();
+    (await waitFor(() => document.getElementById("exercise-apply-proposal"), "formatting proposal")).click();
+    await waitFor(() => !document.getElementById("exercise-apply-proposal"), "proposal applied to draft");
+    await input(await waitFor(() => document.querySelector('textarea[aria-label="Step 1"]'), "operator step editor"), "Keep movement controlled. Pauses are allowed.");
+    (await waitFor(() => enabled("exercise-publish"), "valid exercise")).click();
+    await waitFor(() => document.body.innerText.includes("Configuration saved and ready for analysis."), "published exercise");
 };
 
 const beginAnalysis = async () => {
-    const checklist = await openAnalysis();
-    input(checklist, "Keep movement controlled");
-    (await waitFor(() => button("Analyze"), "Analyze action")).click();
+    (await waitFor(() => document.getElementById("analysis-evaluate-tab"), "evaluation tab")).click();
+    (await waitFor(() => document.querySelector('button[aria-label^="Session "]'), "completed recording")).click();
+    (await waitFor(() => enabled("analysis-start"), "analysis start")).click();
 };
 
 const waitForCompletedAnalysis = async () => {
-    await waitFor(
-        () => document.querySelector('button[aria-label*="status: Complete"]'),
-        "completed analysis",
-        90000,
-    );
-    await waitFor(() => document.getElementById("analysis-results-title"), "analysis results");
-    return waitFor(
-        () => document.querySelector('[aria-labelledby="sequence-summary-title"] p')
-            ?.textContent.trim() || null,
-        "rendered sequence summary",
-    );
+    await waitFor(() => document.querySelector('section[aria-label="Analysis run progress"]')?.innerText.includes("Ready for review"), "completed run", 120000);
+    return waitFor(() => document.querySelector('[data-assessment-criterion]'), "rendered criterion assessment");
 };
 
-const waitForFailedPartialAnalysis = async () => {
-    await waitFor(
-        () => document.querySelector('button[aria-label*="status: Failed"]'),
-        "failed analysis",
-        90000,
-    );
-    await waitFor(
-        () => document.querySelector('[role="alert"]')?.textContent.trim() || null,
-        "visible analysis error",
-    );
-    return waitFor(() => {
-        const progress = document.querySelector('[aria-label^="Analysis progress: "]');
-        const label = progress?.getAttribute("aria-label");
-        const match = label?.match(/^Analysis progress: (\d+) of (\d+) batches$/);
-        return match && Number(match[1]) > 0 && Number(match[1]) < Number(match[2])
-            ? label
-            : null;
-    }, "saved partial analysis progress");
+const inspectAndCorrect = async () => {
+    (await waitForCompletedAnalysis()).click();
+    (await waitFor(() => document.querySelector('[data-evidence-id]'), "candidate citation")).click();
+    const video = await waitFor(() => {
+        const candidate = document.querySelector('video[id^="analysis-evidence-video-"]');
+        return candidate?.readyState >= 2 && candidate.videoWidth > 0 ? candidate : null;
+    }, "decoded candidate footage", 45000);
+    const before = video.currentTime;
+    await video.play();
+    await waitFor(() => video.currentTime > before + 0.1, "actual video playback");
+    video.pause();
+    const target = Math.max(0, video.duration / 2);
+    video.currentTime = target;
+    await waitFor(() => !video.seeking && Math.abs(video.currentTime - target) < 0.2, "video seek");
+    const judgment = document.getElementById("analysis-correction-judgment");
+    judgment.value = "cannotVerify";
+    judgment.dispatchEvent(new Event("change", { bubbles: true }));
+    await input(document.getElementById("analysis-correction-reason"), "Operator inspected the actual footage; the interpretation remains uncertain.");
+    (await waitFor(() => button("Attach currently viewed timestamp"), "correction evidence")).click();
+    await waitFor(() => document.querySelector('[aria-label^="Remove correction citation"]'), "attached correction citation");
+    (await waitFor(() => enabled("analysis-save-correction"), "valid human correction")).click();
+    await waitFor(() => document.body.innerText.includes("Saved correction history"), "durable correction");
 };
 
 const completeAnalysis = async () => {
@@ -127,9 +125,25 @@ const completeAnalysis = async () => {
     await changeFirstCameraProfile();
     await sleep(3000);
     await stopSession();
+    await configureExercise();
     await beginAnalysis();
-    const renderedSummary = await waitForCompletedAnalysis();
-    return `ok\n${renderedSummary}`;
+    await inspectAndCorrect();
+    const history = document.getElementById("analysis-run-history");
+    const firstRun = history.value;
+    (await waitFor(() => document.getElementById("analysis-configure-tab"), "configuration tab")).click();
+    await input(await waitFor(() => document.querySelector('textarea[aria-label="Step 1"]'), "existing criterion"), "Movement is visible. Pauses are allowed.");
+    (await waitFor(() => enabled("exercise-publish"), "save edited configuration")).click();
+    await waitFor(() => document.body.innerText.includes("Configuration saved and ready for analysis."), "revised configuration");
+    await beginAnalysis();
+    await waitFor(() => document.getElementById("analysis-run-history")?.value !== firstRun, "new run identity");
+    await waitForCompletedAnalysis();
+    const chooser = document.getElementById("analysis-run-history");
+    if (chooser.options.length !== 2) throw new Error("Rerun did not preserve both histories");
+    chooser.value = firstRun;
+    chooser.dispatchEvent(new Event("change", { bubbles: true }));
+    (await waitFor(() => document.querySelector('[data-assessment-criterion]'), "first result")).click();
+    await waitFor(() => document.body.innerText.includes("Keep movement controlled. Pauses are allowed.") && document.body.innerText.includes("Saved correction history"), "original checklist and correction");
+    return "ok\nWorkflow complete";
 };
 
 const recoverAnalysis = async () => {
@@ -137,11 +151,16 @@ const recoverAnalysis = async () => {
     await startSession();
     await sleep(4000);
     await stopSession();
+    await configureExercise();
     await beginAnalysis();
-    const partialProgress = await waitForFailedPartialAnalysis();
-    (await waitFor(() => button("Resume"), "Resume action")).click();
-    const renderedSummary = await waitForCompletedAnalysis();
-    return `ok\n${partialProgress}\n${renderedSummary}`;
+    await waitFor(() => document.body.innerText.includes("Processing paused."), "failed provider request", 120000);
+    const progress = await waitFor(() => {
+        const element = document.querySelector('progress[aria-label^="Completed model requests:"]');
+        return element && Number(element.value) > 0 && Number(element.value) < Number(element.max) ? element.getAttribute("aria-label") : null;
+    }, "preserved independent results");
+    (await waitFor(() => button("Resume saved run"), "resume action")).click();
+    await waitForCompletedAnalysis();
+    return `ok\n${progress}\nWorkflow resumed`;
 };
 
 const recordWithoutPreview = async () => {
@@ -212,30 +231,19 @@ const profileSettings = async (save) => {
         (await waitFor(() => button("Remove camera"), "remove temporary camera")).click();
         (await waitFor(() => button("Add monitoring profile"), "add monitoring profile")).click();
         await waitFor(() => document.getElementById("monitoring-3-name"), "new monitoring profile");
-        input(document.getElementById("monitoring-3-name"), "Evaluation slow");
-        input(document.getElementById("monitoring-3-cadence"), "2000");
-        (await waitFor(() => button("Add analysis profile"), "add analysis profile")).click();
-        await waitFor(() => document.getElementById("analysis-2-name"), "new analysis profile");
-        for (const [field, value] of Object.entries({name: "Evaluation balanced", model: "gpt-5.6-luna",
-            max_images: "32", max_span_ms: "30000", overlap: "2", maximum_edge: "512", max_output_tokens: "2048"})) {
-            input(document.getElementById(`analysis-2-${field}`), value);
-        }
-        const selected = document.getElementById("default-analysis-profile");
-        selected.value = "2";
-        selected.dispatchEvent(new Event("change", { bubbles: true }));
-        const detail = document.getElementById("analysis-2-detail");
-        detail.value = "high";
-        detail.dispatchEvent(new Event("change", { bubbles: true }));
+        await input(document.getElementById("monitoring-3-name"), "Evaluation slow");
+        await input(document.getElementById("monitoring-3-cadence"), "2000");
+        await input(document.getElementById("workflow-policy-memory"), "4096");
+        await input(document.getElementById("workflow-policy-concurrent"), "3");
+        await input(document.querySelector('[id^="workflow-"][id$="-images"]'), "24");
         (await waitFor(() => button("Save settings"), "save settings")).click();
         await waitFor(() => document.body.innerText.includes("Settings saved."), "saved confirmation");
     }
     for (const [id, expected] of Object.entries({"monitoring-3-name": "Evaluation slow",
-        "monitoring-3-cadence": "2000", "analysis-2-name": "Evaluation balanced",
-        "analysis-2-model": "gpt-5.6-luna", "analysis-2-max_images": "32",
-        "analysis-2-max_span_ms": "30000", "analysis-2-maximum_edge": "512",
-        "analysis-2-max_output_tokens": "2048", "analysis-2-detail": "high", "default-analysis-profile": "2"})) {
+        "monitoring-3-cadence": "2000", "workflow-policy-memory": "4096", "workflow-policy-concurrent": "3"})) {
         await waitFor(() => document.getElementById(id)?.value === expected, `persisted ${id}`);
     }
+    await waitFor(() => document.querySelector('[id^="workflow-"][id$="-images"]')?.value === "24", "persisted model image capacity");
     return `ok\nprofiles ${save ? "saved" : "reloaded"} through the desktop settings form`;
 };
 
@@ -251,10 +259,10 @@ await (async () => {
     } else if (scenario === "save-profiles" || scenario === "reload-profiles") {
         dioxus.send(await profileSettings(scenario === "save-profiles"));
     } else if (scenario === "analyze-existing") {
-        const checklist = await openAnalysis();
-        input(checklist, "Describe only visible actions. If no exercise is visible, say not observed.");
-        (await waitFor(() => button("Analyze"), "Analyze action")).click();
-        dioxus.send(`ok\n${await waitForCompletedAnalysis()}`);
+        await configureExercise();
+        await beginAnalysis();
+        await waitForCompletedAnalysis();
+        dioxus.send("ok\nExisting recording analyzed");
     } else {
         throw new Error(`Unknown desktop E2E scenario: ${scenario}`);
     }

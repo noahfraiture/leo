@@ -6,7 +6,7 @@ use std::{
 };
 
 use backend::{
-    analysis::AnalysisCheckpoint,
+    analysis::{JobState, RunStage, RunStore},
     recording::list_segments,
     session::{OperatorAction, list_sessions},
 };
@@ -14,6 +14,9 @@ use serde_json::{Value, json};
 
 #[path = "desktop_e2e/support.rs"]
 mod support;
+
+#[path = "desktop_e2e/workflow_mock.rs"]
+mod workflow_mock;
 
 #[path = "desktop_e2e/rehearsal.rs"]
 mod rehearsal;
@@ -168,31 +171,74 @@ fn desktop_operator_flow_records_two_cameras_and_analyzes() {
     assert!(segments.iter().any(|segment| segment.camera_id == 1));
     assert!(segments.iter().any(|segment| segment.camera_id == 2));
 
-    let checkpoint =
-        AnalysisCheckpoint::read(&stored.directory.join("analysis.json"), stored.session.id)
-            .expect("read E2E analysis checkpoint");
-    assert!(checkpoint.total_batches > 0);
-    assert_eq!(checkpoint.responses.len(), checkpoint.total_batches);
-    if let Some(mock) = &mock_openai {
-        assert_eq!(rendered_summary, "E2E mock analysis complete.");
+    let runs = RunStore::new(stored.directory.clone())
+        .list()
+        .expect("read saved runs");
+    assert_eq!(
+        runs.len(),
+        2,
+        "rerunning creates a distinct immutable result"
+    );
+    let first = runs
+        .iter()
+        .find(|run| {
+            run.inputs.exercise.checklist.criteria[0]
+                .text
+                .starts_with("Keep movement")
+        })
+        .expect("original operator checklist");
+    let second = runs
+        .iter()
+        .find(|run| {
+            run.inputs.exercise.checklist.criteria[0]
+                .text
+                .starts_with("Movement is visible")
+        })
+        .expect("revised operator checklist");
+    assert_ne!(first.inputs.id, second.inputs.id);
+    assert_ne!(first.inputs.exercise.id, second.inputs.exercise.id);
+    assert_eq!(first.corrections.len(), 1);
+    assert!(!first.corrections[0].evidence_ids.is_empty());
+    assert!(second.corrections.is_empty());
+    for run in &runs {
+        assert_eq!(run.checkpoint.stage, RunStage::Ready);
         assert!(
-            checkpoint
-                .responses
+            run.checkpoint
+                .jobs
                 .iter()
-                .all(|response| response.sequence_summary == "E2E mock analysis complete.")
+                .all(|job| job.state == JobState::Complete)
         );
+        assert_eq!(run.checkpoint.assessments.len(), 1);
+    }
+    if let Some(mock) = &mock_openai {
+        assert_eq!(rendered_summary, "Workflow complete");
         let requests = mock.requests.lock().expect("mock requests mutex");
-        assert!(
-            !requests.is_empty(),
-            "mock OpenAI server received no requests"
-        );
         for camera_id in [1, 2] {
             assert!(
                 requests
                     .iter()
                     .any(|request| request_contains_camera_frame(request, camera_id)),
-                "mock requests contained no JPEG frame for camera {camera_id}:\n{}",
-                redacted_requests(&requests),
+                "no recorded JPEG for camera {camera_id}: {}",
+                redacted_requests(&requests)
+            );
+        }
+        let documents: Vec<_> = requests.iter().map(workflow_mock::input_document).collect();
+        let formatting: Vec<_> = documents
+            .iter()
+            .filter(|document| document.is_array())
+            .collect();
+        assert_eq!(formatting.len(), 1);
+        for document in documents.iter().filter(|document| !document.is_array()) {
+            let text = document["operatorChecklist"]["criteria"][0]["text"]
+                .as_str()
+                .unwrap();
+            assert!(
+                text == "Keep movement controlled. Pauses are allowed."
+                    || text == "Movement is visible. Pauses are allowed."
+            );
+            assert!(
+                !document.to_string().contains("Should pauses be allowed?"),
+                "proposal comments entered assessment input"
             );
         }
     }
@@ -275,43 +321,40 @@ fn desktop_analysis_resumes_after_transient_provider_failure() {
         .sessions;
     assert_eq!(sessions.len(), 1, "expected one completed E2E session");
     let stored = &sessions[0];
-    let checkpoint =
-        AnalysisCheckpoint::read(&stored.directory.join("analysis.json"), stored.session.id)
-            .expect("read resumed E2E analysis checkpoint");
+    let runs = RunStore::new(stored.directory.clone())
+        .list()
+        .expect("load resumed run");
+    assert_eq!(runs.len(), 1);
+    let run = &runs[0];
+    assert_eq!(run.checkpoint.stage, RunStage::Ready);
     assert!(
-        checkpoint.total_batches > 1,
-        "recovery scenario needs more than one batch"
+        run.checkpoint
+            .jobs
+            .iter()
+            .all(|job| job.state == JobState::Complete)
     );
-    assert_eq!(checkpoint.responses.len(), checkpoint.total_batches);
-    assert_eq!(
-        partial_progress,
-        format!(
-            "Analysis progress: 1 of {} batches",
-            checkpoint.total_batches
-        )
-    );
-    assert_eq!(rendered_summary, "E2E mock analysis complete.");
+    assert!(partial_progress.starts_with("Completed model requests: "));
+    assert_eq!(rendered_summary, "Workflow resumed");
     assert_eq!(mock_openai.failed_requests.load(Ordering::SeqCst), 1);
-
     let requests = mock_openai.requests.lock().expect("mock requests mutex");
-    assert_eq!(
-        requests.len(),
-        checkpoint.total_batches + 1,
-        "only the failed provider request should be repeated"
-    );
-    assert_ne!(
-        requests[0], requests[1],
-        "the first batch must not be retried"
-    );
-    assert_eq!(
-        requests[1], requests[2],
-        "Resume should retry the failed batch from the saved prefix"
-    );
+    // One formatting request, one failed request, and one accepted response per durable job.
+    assert_eq!(requests.len(), run.checkpoint.jobs.len() + 2);
+    let repeated = requests
+        .iter()
+        .filter(|request| **request == requests[1])
+        .count();
+    assert_eq!(repeated, 2, "the failed request is retried exactly once");
+    for (index, request) in requests.iter().enumerate().filter(|(index, _)| *index != 1) {
+        if request != &requests[1] {
+            assert_eq!(
+                requests.iter().filter(|other| *other == request).count(),
+                1,
+                "successful request {index} repeated"
+            );
+        }
+    }
 
     let application_log = read_application_log(&data_root.join("logs"));
-    assert!(application_log.contains("analysis failed"));
-    assert!(application_log.contains("analysis resumed"));
-    assert!(application_log.contains("analysis completed"));
     assert!(!application_log.contains("recorder runtime shutdown failed"));
     assert!(!application_log.contains("preview stop failed"));
 }
@@ -448,45 +491,19 @@ fn desktop_settings_file_is_strict_private_and_complete() {
     let bytes = fs::read(&path).expect("read desktop settings");
     assert!(bytes.ends_with(b"\n"), "settings should end with a newline");
     let settings: Value = serde_json::from_slice(&bytes).expect("parse desktop settings");
-    let expected = json!({
-        "schemaVersion": 3,
-        "nextCameraId": 3,
-        "cameras": [
-            {
-                "id": 1,
-                "name": "Salon 1",
-                "rtspUrl": format!("rtsp://{}/axis-media/media.amp", camera_addresses[0]),
-                "initiallyIncludedInAnalysis": true,
-                "initialMonitoringProfileId": 1
-            },
-            {
-                "id": 2,
-                "name": "Salon 2",
-                "rtspUrl": format!("rtsp://{}/axis-media/media.amp", camera_addresses[1]),
-                "initiallyIncludedInAnalysis": true,
-                "initialMonitoringProfileId": 2
-            }
-        ],
-        "dataRoot": data_root,
-        "recorderTimeoutSecs": 10,
-        "monitoringProfiles": [
-            {"id": 1, "name": "Standard", "sampleEveryMs": 1000},
-            {"id": 2, "name": "Stable", "sampleEveryMs": 2000}
-        ],
-        "nextMonitoringProfileId": 3,
-        "analysisProfiles": [{"id": 1, "name": "Fixture", "model": "local-e2e-model", "maxImagesPerPrompt": 10, "maxPromptSpanMs": 4000, "overlapFrameSets": 0, "imageSize": "original", "imageDetail": "providerDefault", "maxOutputTokens": null}],
-        "nextAnalysisProfileId": 2,
-        "defaultAnalysisProfileId": 1,
-        "openai": {
-            "apiKey": "local-e2e-key",
-            "baseUrl": mock_base_url
-        },
-        "logLevel": "info"
-    });
-    assert!(
-        settings == expected,
-        "settings should match the complete strict E2E schema"
-    );
+    let workflow = &settings["workflow"];
+    let providers: Vec<backend::model::ProviderConnection> =
+        serde_json::from_value(workflow["providers"].clone()).unwrap();
+    let models: Vec<backend::model::ModelProfile> =
+        serde_json::from_value(workflow["models"].clone()).unwrap();
+    let sets: Vec<backend::model::ModelSet> =
+        serde_json::from_value(workflow["modelSets"].clone()).unwrap();
+    assert_eq!(settings["schemaVersion"], 4);
+    assert_eq!(settings["cameras"].as_array().unwrap().len(), 2);
+    assert_eq!(settings.as_object().unwrap().len(), 9);
+    assert_eq!(providers[0].base_url, mock_base_url);
+    assert_eq!(models[0].image_limit, 10);
+    assert!(sets[0].resolve(&models, &providers).is_ok());
     assert!(
         settings
             .get("dataRoot")
@@ -525,9 +542,9 @@ fn process_group_probe_detects_a_live_descendant_after_the_leader_exits() {
 fn camera_frame_request_requires_a_source_followed_by_a_jpeg() {
     let request = json!({
         "input": [
-            {"content": [{"type": "input_text", "text": "Frame source: camera 1 (Front) at 00:00:00.000"}]},
+            {"content": [{"type": "input_text", "text": "CANDIDATE RECORDING: cite this image ID for visible evidence\nImage ID: C-example\nCamera 1, session offset 0 ms"}]},
             {"content": [{"type": "input_image", "image_url": "data:image/jpeg;base64,abc"}]},
-            {"content": [{"type": "input_text", "text": "Frame source: camera 2 (Side) at 00:00:00.000"}]}
+            {"content": [{"type": "input_text", "text": "Camera 2, session offset 0 ms"}]}
         ]
     });
 

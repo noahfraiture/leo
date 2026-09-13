@@ -2,7 +2,7 @@
 
 use std::{fs, path::PathBuf};
 
-use backend::analysis::OpenAiConfig;
+use backend::model::ProviderConnection;
 use dioxus::{desktop::DesktopContext, prelude::*};
 
 use crate::settings::{ResolvedSettings, SettingsStore};
@@ -47,9 +47,6 @@ pub fn DesktopE2eDriver() -> Element {
             return None;
         };
 
-        let openai = resolved.settings.openai_config();
-        let openai = openai.as_ref();
-        let base_url = openai.and_then(|config| config.base_url.as_deref());
         let real_openai = std::env::var("LEO_E2E_REAL_OPENAI").ok();
         let paid_openai = std::env::var("LEO_RUN_PAID_OPENAI_TEST").ok();
         let proxy_configured = [
@@ -65,9 +62,17 @@ pub fn DesktopE2eDriver() -> Element {
         let no_proxy = std::env::var("NO_PROXY")
             .ok()
             .or_else(|| std::env::var("no_proxy").ok());
-        if !provider_configuration_is_safe(openai, real_openai.as_deref(), paid_openai.as_deref())
-            || !loopback_proxy_is_bypassed(base_url, proxy_configured, no_proxy.as_deref())
-        {
+        if resolved.settings.workflow.providers.iter().any(|provider| {
+            !provider_configuration_is_safe(
+                provider,
+                real_openai.as_deref(),
+                paid_openai.as_deref(),
+            ) || !loopback_proxy_is_bypassed(
+                &provider.base_url,
+                proxy_configured,
+                no_proxy.as_deref(),
+            )
+        }) {
             if let Err(error) = fs::write(
                 &result_path,
                 b"error: desktop E2E provider safety gate rejected configuration\n",
@@ -137,36 +142,34 @@ fn environment_path(name: &str) -> Option<PathBuf> {
 }
 
 fn provider_configuration_is_safe(
-    openai: Option<&OpenAiConfig>,
+    provider: &ProviderConnection,
     real_openai: Option<&str>,
     paid_openai: Option<&str>,
 ) -> bool {
-    let Some(openai) = openai else {
+    if provider.snapshot().is_err() {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(&provider.base_url) else {
         return false;
     };
-    if openai.api_key.trim().is_empty() {
-        return false;
-    }
-    if let Some(base_url) = openai.base_url.as_deref() {
-        return url::Url::parse(base_url).is_ok_and(|url| {
-            matches!(url.scheme(), "http" | "https")
-                && match url.host() {
-                    Some(url::Host::Ipv4(address)) => address.is_loopback(),
-                    Some(url::Host::Ipv6(address)) => address.is_loopback(),
-                    _ => false,
-                }
-        });
-    }
-
-    real_openai == Some("1") && paid_openai == Some("1")
+    let local = match url.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        _ => false,
+    };
+    local
+        || (url.as_str().trim_end_matches('/') == "https://api.openai.com/v1"
+            && !provider.api_key.trim().is_empty()
+            && real_openai == Some("1")
+            && paid_openai == Some("1"))
 }
 
 fn loopback_proxy_is_bypassed(
-    base_url: Option<&str>,
+    base_url: &str,
     proxy_configured: bool,
     no_proxy: Option<&str>,
 ) -> bool {
-    base_url.is_none()
+    base_url.trim_end_matches('/') == "https://api.openai.com/v1"
         || !proxy_configured
         || no_proxy.is_some_and(|value| value.split(',').any(|entry| entry.trim() == "*"))
 }
