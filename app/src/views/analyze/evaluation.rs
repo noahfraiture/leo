@@ -3,6 +3,7 @@ use super::{
     evidence::EvidenceViewer,
     labels::{recorded_at, stage_label, timeline},
     progress::RunProgress,
+    run_settings::FrozenRunSettings,
     setup::RunSetup,
 };
 use crate::{
@@ -191,6 +192,11 @@ fn SelectedRun(session_id: Uuid, run_id: Uuid) -> Element {
                 }
             }
             RunProgress { session_id, run_id, snapshot: snapshot.clone() }
+            FrozenRunSettings {
+                models: snapshot.inputs.model_set.clone(),
+                execution: snapshot.inputs.execution.clone(),
+                evidence: snapshot.inputs.evidence_policy.clone(),
+            }
             AssessmentList { session_id, run_id, snapshot }
             EvidenceViewer { session_id, run_id }
         }

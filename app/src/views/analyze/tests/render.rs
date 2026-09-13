@@ -15,6 +15,85 @@ use std::{
 };
 use uuid::Uuid;
 
+#[test]
+fn run_settings_summary_shows_frozen_limits_instead_of_current_model_settings() {
+    let session_id = Uuid::new_v4();
+    let mut run = test_snapshot(session_id, Uuid::new_v4(), RunStage::Paused);
+    run.inputs.model_set.readers[0].profile.model = "saved-reader-model".into();
+    run.inputs.model_set.readers[0].provider.base_url = "https://private.saved.example/v1".into();
+    let mut harness = prepared(session_id, Some(run));
+    harness.workflow = crate::test_workflow(Some(crate::test_openai_config()), 99, 2);
+    harness.workflow.models[0].model = "new-active-model".into();
+    harness.workflow.models[0].max_output_tokens = Some(24000);
+    harness.workflow.evidence.max_prompt_span_ms = 30000;
+    let html = harness.render_at(ready_preview(), "/analyze");
+    let summary = html
+        .split("Settings saved with this run")
+        .nth(1)
+        .unwrap()
+        .split("</details>")
+        .next()
+        .unwrap();
+    assert!(summary.contains("saved-reader-model"));
+    assert!(summary.contains("6000"));
+    assert!(summary.contains("Window span: 7000 ms"));
+    assert!(summary.contains("Memory budget: 32768 MiB"));
+    assert!(!summary.contains("new-active-model"));
+    assert!(!summary.contains("24000"));
+    assert!(!summary.contains("private.saved.example"));
+}
+#[test]
+fn checklist_summary_counts_model_outcomes_without_applying_human_corrections() {
+    let session_id = Uuid::new_v4();
+    let mut run = test_snapshot(session_id, Uuid::new_v4(), RunStage::Ready);
+    let template = run.checkpoint.assessments[0].clone();
+    let ids = [201, 202, 203, 204].map(Uuid::from_u128);
+    run.inputs.exercise.checklist.criteria = ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| backend::exercise::Criterion {
+            id: *id,
+            text: format!("Step {}", index + 1),
+        })
+        .collect();
+    run.checkpoint.assessments = [Judgment::Met, Judgment::NotMet, Judgment::CannotVerify]
+        .into_iter()
+        .enumerate()
+        .map(|(index, judgment)| {
+            let mut assessment = template.clone();
+            assessment.criterion_id = ids[index];
+            assessment.judgment = judgment;
+            assessment
+        })
+        .collect();
+    run.corrections.push(HumanCorrection {
+        id: Uuid::new_v4(),
+        criterion_id: ids[1],
+        judgment: Judgment::Met,
+        reason: "Human correction remains separate.".into(),
+        evidence_ids: Vec::new(),
+        uses_outside_information: true,
+        created_utc_ms: START_UTC_MS as u64,
+        supersedes: None,
+    });
+    let html = prepared(session_id, Some(run)).render_at(ready_preview(), "/analyze");
+    let counts = html
+        .split("Model result counts")
+        .nth(1)
+        .unwrap()
+        .split("</div>")
+        .next()
+        .unwrap();
+    for expected in [
+        "Met: 1",
+        "Not met: 1",
+        "Cannot verify: 1",
+        "Not assessed: 1",
+    ] {
+        assert!(counts.contains(expected), "missing {expected}: {counts}");
+    }
+}
+
 fn write_completed_session(
     root: &Path,
     name: &str,

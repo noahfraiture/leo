@@ -1,7 +1,7 @@
 use super::labels::{judgment_class, judgment_label};
 use crate::analysis::AnalysisContext;
 use backend::{
-    analysis::{CriterionAssessment, HumanCorrection, JobKind, RunSnapshot},
+    analysis::{CriterionAssessment, HumanCorrection, JobKind, Judgment, RunSnapshot},
     exercise::Criterion,
 };
 use dioxus::prelude::*;
@@ -18,9 +18,33 @@ pub fn AssessmentList(session_id: Uuid, run_id: Uuid, snapshot: RunSnapshot) -> 
         .get(&session_id)
         .and_then(|session| session.runs.get(&run_id))
         .and_then(|entry| entry.selected_criterion);
+    let (mut met, mut not_met, mut cannot_verify, mut not_assessed) = (0, 0, 0, 0);
+    for criterion in &snapshot.inputs.exercise.checklist.criteria {
+        let judgment = snapshot
+            .checkpoint
+            .assessments
+            .iter()
+            .find(|assessment| assessment.criterion_id == criterion.id)
+            .map(|assessment| assessment.judgment);
+        match judgment {
+            Some(Judgment::Met) => met += 1,
+            Some(Judgment::NotMet) => not_met += 1,
+            Some(Judgment::CannotVerify) => cannot_verify += 1,
+            None => not_assessed += 1,
+        }
+    }
     rsx! {
         section { aria_label: "Checklist assessments",
             h3 { class: "font-semibold", "Checklist results" }
+            div {
+                class: "mt-2 flex flex-wrap items-center gap-2 text-sm",
+                aria_label: "Model result counts",
+                span { "Model results:" }
+                span { class: judgment_class(Judgment::Met), "Met: {met}" }
+                span { class: judgment_class(Judgment::NotMet), "Not met: {not_met}" }
+                span { class: judgment_class(Judgment::CannotVerify), "Cannot verify: {cannot_verify}" }
+                span { class: "badge badge-outline", "Not assessed: {not_assessed}" }
+            }
             p { class: "mt-1 text-sm opacity-70",
                 "Select a step to inspect source footage, independent findings, and the reviewer reasoning."
             }
@@ -33,8 +57,18 @@ pub fn AssessmentList(session_id: Uuid, run_id: Uuid, snapshot: RunSnapshot) -> 
                         criterion: criterion.clone(),
                         index,
                         selected: selected == Some(criterion.id),
-                        assessment: snapshot.checkpoint.assessments.iter().find(|item| item.criterion_id == criterion.id).cloned(),
-                        correction: snapshot.corrections.iter().rev().find(|item| item.criterion_id == criterion.id).cloned(),
+                        assessment: snapshot
+                            .checkpoint
+                            .assessments
+                            .iter()
+                            .find(|item| item.criterion_id == criterion.id)
+                            .cloned(),
+                        correction: snapshot
+                            .corrections
+                            .iter()
+                            .rev()
+                            .find(|item| item.criterion_id == criterion.id)
+                            .cloned(),
                         disagreement: reader_disagreement(&snapshot, criterion.id),
                     }
                 }
