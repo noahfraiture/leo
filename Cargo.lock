@@ -347,6 +347,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "ffmpeg-sidecar",
+ "image",
  "rig-core",
  "serde",
  "serde_json",

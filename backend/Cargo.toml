@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 base64 = { workspace = true }
 ffmpeg-sidecar = { version = "=2.5.2", default-features = false }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 rig-core = "0.41.0"
 serde = { workspace = true }
 serde_json = { workspace = true }
