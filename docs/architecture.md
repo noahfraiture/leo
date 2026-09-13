@@ -2,7 +2,7 @@
 
 Leo is a local, session-scoped recording and analysis application for zero or more configured RTSP cameras. The desktop process owns preview, direct host recording, operator metadata, completed-session discovery, and explicit model analysis. A session is portable under one configured data root.
 
-Open the [visual architecture map](architecture-map.html) for the same system as process, data, and ownership flows.
+The [analysis workflow](analysis-workflow.md) details exercise configuration, independent model jobs, evidence review and storage. The earlier [capture architecture map](architecture-map.html) documents recording ownership; its single-model analysis path has been replaced.
 
 ## Workspace
 
@@ -26,9 +26,12 @@ each configured camera RTSP (0..N)
 
 events.jsonl + finalized MKVs + recording-complete
                                 |
-                                `--> local FFprobe/FFmpeg analysis plan
-                                      --> explicit provider batches
-                                      --> analysis.json
+                                `--> frozen exercise + reference pack + model set
+                                      --> timestamped candidate images
+                                      --> independent readers -> visual review
+                                      --> one optional evidence revisit
+                                      --> evidence selection -> final visual comparison
+                                      --> analyses/<run-id>/ + separate human corrections
 ```
 
 Preview and recording make independent RTSP/TCP connections. Preview availability does not establish recording health, and a failed preview does not stop a recorder. Camera participation and cadence are analysis settings only: an excluded camera remains visible and records for the complete active session.
@@ -42,8 +45,12 @@ Preview and recording make independent RTSP/TCP connections. Preview availabilit
 | `session::controller` | Creates an active event log and durably appends validated operator actions. |
 | `session::event_log` | Defines and strictly replays the private versioned JSONL schema into a completed `Session`. |
 | `session::catalog` | Lists only ended, marker-gated sessions and durably creates the completion marker. |
-| `analysis::session` | Validates a selected completed directory, discovers its segments, resumes analysis, and emits durable checkpoints. |
-| `analysis::analyzer` | Builds the deterministic sampling plan, materializes model batches, and maintains `analysis.json`. |
+| `exercise` | Saves one operator-owned checklist, immutable revisions and manually imported reference originals; AI assistance produces temporary proposals only. |
+| `model` | Explicit provider transports, structured request contracts and scheduling under a shared memory allowance. |
+| `analysis::evidence` | Reuses recorded sampling schedules, resolves source identities, extracts bounded images and seekable playback clips. |
+| `analysis::run` | Freezes inputs and schedules independent readers, visual reviews, bounded extra evidence, selection and final comparison; resumes durable jobs. |
+| `analysis::reconcile` | Typed findings, citations, evidence selection and separate human corrections. |
+| `analysis::session` / `analyzer` | Historical single-model evaluator retained for reproducible prior experiments; not the desktop Analyze flow. |
 
 `recording::recorder` remains one module despite its size. Its command actor, camera supervisors, FFmpeg attempt pump, and cleanup paths share stop and fault ownership. Splitting them would require a wider process-lifecycle API without removing state-machine complexity. About three fifths of the file is colocated concurrency and cleanup coverage.
 
@@ -56,9 +63,13 @@ Leo owns production configuration in one strict, versioned `settings.json`. The 
 | macOS | `~/Library/Application Support/Leo/settings.json` | `~/Library/Application Support/Leo/data/` |
 | Linux | `${XDG_CONFIG_HOME:-$HOME/.config}/leo/settings.json` | `${XDG_DATA_HOME:-$HOME/.local/share}/leo/` |
 
-Settings schema 3 uses camel-case JSON, rejects unknown top-level fields and unsupported versions, and has separate recording, monitoring, and analysis validation. It stores cameras, storage, recorder timeout, logging level, monitoring definitions, analysis definitions, their monotonic ID allocators, a default analysis profile ID, and provider credentials. Camera and profile IDs are nonzero, immutable, and not reused. Profiles also require unique nonblank names. Zero cameras and any configured camera count are valid.
+Settings schema 4 uses camel-case JSON and rejects unknown fields and unsupported versions. No migration is provided. Recording settings remain independent from model configuration. It stores cameras, storage, recorder timeout, logging, monitoring profiles and named model connections/profiles/sets. Camera and monitoring IDs are nonzero, immutable and not reused. Zero cameras is valid.
 
-Each camera requires a nonblank name and an `rtsp` URL for capture. Initial participation and a monitoring profile ID describe later analysis only. Monitoring profiles contain a positive millisecond interval, including subsecond values. Analysis profiles contain the model, maximum images per prompt, required maximum timestamp span, fixed overlap in complete frame sets, image-size policy, image-detail policy, and optional output-token cap. Counts, spans, dimensions, and optional caps must be positive. Provider credentials hold only the key and optional absolute HTTP(S) base URL. Invalid monitoring, analysis, or credentials disable their affected feature without disabling recording. The recorder timeout must fit FFmpeg microseconds and a Rust deadline; reconnect delay remains one second and graceful Stop five seconds.
+Each camera has a nonblank name and an RTSP URL. Participation and monitoring cadence affect later sampling, not capture. `workflow.providers` stores names, explicit Responses or Chat Completions transport, normalized HTTP(S) addresses and private keys. Each model selects a provider, its served identifier, memory allowance in MiB, total image limit, optional output-token cap and optional reasoning effort. A model set chooses independent readers, one visual reviewer and one checklist assistant. Different sets may share model profiles.
+
+Execution policy controls total local model memory, simultaneous requests, requests per model and timeout. Hosted profiles have memory cost zero but still count toward concurrency. Local model allowances are estimates supplied by the operator, not measured RAM. A local server must evict idle models when required; request scheduling does not unload them. Evidence window span, overlap and image derivatives are shared across readers. All request image limits include reference images.
+
+Invalid optional model configuration cannot disable recording. Each selected set resolves independently, so an unrelated incomplete set cannot block a usable one. Numeric editor text is retained and validated instead of silently replacing an invalid entry with its previous value. Recorder timeout must fit FFmpeg microseconds and a Rust deadline; reconnect delay remains one second and graceful Stop five seconds.
 
 `dataRoot: null` selects the platform default. Save validates recording fields, creates required settings and session directories, and writes owner-only settings. Invalid optional profile definitions can be saved with warnings so they cannot prevent correcting recording configuration. Malformed optional JSON sections load independently with a visible feature error; the original file is not rewritten on load. Diagnostic log-directory creation is best effort.
 
@@ -78,9 +89,7 @@ platform settings.json
 The desktop crate keeps these responsibilities in explicit modules: `desktop::bootstrap` loads
 settings and prepares runtime dependencies, `desktop::launch` binds process owners to the native
 event loop, `desktop::shell` installs Dioxus contexts and root-scoped tasks, and `route` defines the
-route table. The `operator` module owns route-independent state plus recording and analysis task
-coordination. Route views remain under `views`; the Settings view is composed from separate camera,
-storage, recording, provider, application, and sidebar sections.
+route table. The `operator` module owns recording and session selection. `exercises` owns configuration editor state; `analysis` owns run histories, execution, playback and corrections. `inference` shares admission between formatting and analysis; `media` serves registered playback assets. Route views remain under `views`; Settings groups capture, monitoring and model configuration.
 
 A missing file opens Settings with a zero-camera draft. An unreadable file, unsupported schema, invalid recording fields, or unavailable required storage opens a recovery shell with Settings accessible. Optional metadata errors do not prevent recorder startup. Valid recording settings spawn `RecorderRuntime` after its FFmpeg/FFprobe preflight. Logging falls back to stderr and catalogue failure produces a warning while capture remains available. Preview startup remains independent.
 
@@ -180,11 +189,21 @@ All files needed to move and resume a completed session remain below one directo
 <data-root>/
 |-- logs/
 |   `-- leo.jsonl.<date>
+|-- exercises/<exercise-id>/
+|   |-- draft.json
+|   |-- revisions/<revision-id>.json
+|   `-- assets/<asset-id>.<jpg|png>
 `-- sessions/
     `-- <start-request-UTC-ms>/
         |-- events.jsonl
         |-- recording-complete
-        |-- analysis.json
+        |-- analyses/<run-id>/
+        |   |-- inputs.json
+        |   |-- checkpoint.json
+        |   |-- responses/
+        |   |-- references/
+        |   |-- review.json
+        |   `-- cache/
         `-- recordings/
             `-- camera-<id>/
                 |-- <segment-start-UTC-ms>.mkv
@@ -194,7 +213,7 @@ All files needed to move and resume a completed session remain below one directo
 
 The `camera-<id>/` directory repeats for every camera recorded in the session.
 
-The directory timestamp is a collision-resistant creation key; the UUID in `events.jsonl` is the durable session identity. After Stop finalization, `recording-complete` is installed without overwrite as a synchronized one-byte sentinel, the parent directory is synchronized, and the marker is truncated and synchronized to its accepted zero-byte state. `analysis.json` appears after analysis planning. An active or crashed session can lack the marker and checkpoint.
+The directory timestamp is a collision-resistant creation key; the UUID in `events.jsonl` is the durable session identity. After Stop finalization, `recording-complete` is installed without overwrite as a synchronized one-byte sentinel, the parent directory is synchronized, and the marker is truncated and synchronized to its accepted zero-byte state. A complete run directory is atomically published after analysis planning. An active or crashed recording can lack the completion marker.
 
 In practice, the files form a small commit protocol:
 
@@ -204,7 +223,7 @@ In practice, the files form a small commit protocol:
 | `recordings/camera-<id>/.attempt-*.partial.mkv` | Written during one FFmpeg connection attempt. | In-progress or diagnostically retained media; never consumed by analysis. |
 | `recordings/camera-<id>/<UTC-ms>.mkv` | Atomically promoted after a nonempty attempt passes FFprobe validation. | Finalized media whose filename estimates its first frame's UTC time. |
 | `recording-complete` | After the end event and every recorder cleanup and promotion succeed, installs a synced one-byte sentinel, syncs the directory, then truncates and syncs it to zero. | Only the final zero-byte state makes the directory visible to the session catalogue. |
-| `analysis.json` | Created when a deterministic plan is built and atomically replaced after each model response. | Resumable checkpoint; absence means analysis has not started. |
+| `analyses/<run-id>/` | Complete frozen inputs are published before execution; accepted responses precede atomic checkpoint updates. | Independent saved runs, durable job progress and separate human review history. |
 
 `Session::load` reconstructs state by replaying `events.jsonl`; there is no separate mutable session snapshot. The catalogue requires both a valid ended log and the completion marker. Analysis then combines that replayed timeline with the finalized segments, so moving the whole completed directory does not change the plan identity.
 
@@ -214,32 +233,23 @@ Discovery scans direct children only and rejects symbolic links. A completed ses
 
 Absolute paths are excluded from checkpoint plan identity, so a completed directory can move intact to another local filesystem path. Leo does not perform that move.
 
-## Direct Local Analysis
+## Reference-Based Analysis
 
-Analyze operates only on a selected completed session while recording is Idle. `backend::analysis::analyze_session` performs these steps:
+Analyze has two operator steps: prepare an exercise, then evaluate a completed recording. The operator saves exactly one checklist with optional manually labeled JPEG/PNG references. AI formatting remains a proposal until the operator applies, edits and saves it. Draft changes or comments cannot silently reach analysis.
 
-1. Require a nonblank checklist, direct session directory, and valid completion marker.
-2. Load and validate the ended `events.jsonl`.
-3. Discover and FFprobe finalized MKV segments under every camera directory.
-4. Replay participation and cadence events into deterministic sample schedules.
-5. Derive every uncovered camera interval as a persisted recording-gap warning.
-6. Omit samples without media, retain available frames from other cameras, and continue after reconnect gaps.
-7. Plan the complete batch-range list under image and timestamp-span limits, then write or validate the initial zero-response checkpoint.
-8. Construct the provider only if an incomplete batch remains.
-9. Extract requested JPEG bytes directly from local MKVs with FFmpeg, send one structured batch request, and atomically replace the checkpoint after success.
-10. Emit each complete durable checkpoint snapshot to the real `OperatorState` callback.
+`create_run` freezes the published exercise revision, copied reference originals, model set, execution policy, source hashes and full planned coverage. It validates the reference-plus-candidate image capacity and memory policy before publishing the run. `execute_run` progresses through independent reading, visual review of every window, at most one additional evidence round per criterion, explicit evidence selection and a final visual comparison. It saves original outputs separately from the derived result. Reference examples cannot be cited as candidate evidence.
 
-Sampling periods use inclusive starts and exclusive ends. Same-profile assignments are no-ops; switching to a different profile restarts the cadence even if its interval is equal. At the same offset, ordered events reduce to their final state. There is no pre-roll or post-roll.
+The evidence selector accounts for every visual review. Explicit negative observations from readers or reviewers remain in the required final evidence pack even if the selector would omit them. Selection is not a judgment: the final reviewer receives actual candidate images. Required unresolved comparisons or an oversized decisive pack produce Cannot verify, not a pass obtained by dropping evidence. Matching model answers alone cannot establish correctness.
 
-A frame set may contain any available subset of the session cameras. An offset with no available frame is omitted. No available frames, a frame set larger than the image limit, or fixed overlap that prevents new evidence fails before provider construction. Frame sets stay atomic. The maximum span is last timestamp minus first timestamp, allowing equality. Overlap counts toward both limits and never creates an overlap-only trailing batch. Invalid or overlapping segments fail without replacing a valid prior checkpoint.
+Sampling periods retain inclusive starts, exclusive ends, recorded camera participation and cadence. Frame sets remain atomic across available cameras. Recording gaps are explicit; no automatic pre-roll, post-roll or native-video inference is added. Denser revisits are bounded and only use eligible recorded periods. Sampled absence cannot prove omission or hidden state.
 
-Checkpoint schema 3 stores session UUID, authoritative checklist, the complete resolved analysis profile, exact frame-set batch ranges, path-independent plan fingerprint, recording-gap warnings, and the completed response prefix. The fingerprint includes every profile field and resolved range. Resume rebuilds and checks the input identity and ranges using the saved profile, independently of edited or deleted Settings profiles. An explicit confirmed "New analysis" removes only the old checkpoint. A completed checkpoint returns without provider construction.
+Accepted responses are saved before checkpoint projection. Resume reconstructs completed jobs and retries unfinished work using the original model/input snapshots and current matching credentials. Reruns create new UUID directories. Corrections append to a separate history, leaving model judgments unchanged.
 
-Frame extraction optionally resizes temporary JPEG evidence to a maximum long edge without upscaling or changing aspect ratio. Image detail and optional output-token limits are passed to the provider request. Original recordings are never resized. Temporary images are removed after reading; provider or checkpoint failures preserve the last durable response prefix. `AnalyzeSession` accepts an explicit analysis profile and optional checkpoint path for isolated evaluations. The session event snapshot supplies monitoring profiles. Production uses one `analysis.json` per session; no evaluation campaign or automatic profile selector runs here.
+The candidate viewer prepares a bounded MP4 derivative from the cited MKV segment and serves it through an opaque registered asset with byte-range support. Playback opens at the cited session time, can seek, and can extend context to at most one minute within the same segment. Reference examples remain separately labeled. See [analysis workflow](analysis-workflow.md) for component contracts and failure handling.
 
 ## End-To-End Coverage
 
-Leo has focused integration slices plus three opt-in macOS desktop E2E scenarios. They use the same explicit two-fixture setup: both fixture-camera binaries and the production WKWebView application entry point. The scenarios cover the complete Start-through-Analyze flow, resuming a partial checkpoint after one provider failure, and recording when preview startup fails, including mixed profiles, bulk assignment, participation changes, a forced metadata-write failure, retained playable video, and a subsequent session. The fixed setup does not constrain production camera count.
+Leo has focused integration slices plus three opt-in macOS desktop E2E scenarios. They use the same explicit two-fixture setup: both fixture-camera binaries and the production WKWebView application entry point. The scenarios cover the complete Start-through-Analyze flow, resuming unfinished jobs after one provider failure, and recording when preview startup fails, including mixed profiles, bulk assignment, participation changes, a forced metadata-write failure, retained playable video, and a subsequent session. The fixed setup does not constrain production camera count.
 
 | Coverage | What is real | What is substituted or absent |
 | --- | --- | --- |
@@ -248,7 +258,7 @@ Leo has focused integration slices plus three opt-in macOS desktop E2E scenarios
 | Virtual-camera and recorder checks | MediaMTX, RTSP/TCP, two simultaneous readers, FFmpeg stream copy, playable MKV output, reconnect, and process cleanup. | Fixture video replaces physical cameras. |
 | Local analysis check | Completed session directory, real FFprobe/FFmpeg extraction, gap-aware planning, durable callbacks, and checkpoint output. | A deterministic Rig mock replaces the model provider. |
 | Desktop E2E scenarios | Two fixture-camera processes, WKWebView and Dioxus event handlers, FFmpeg recording, Stop finalization, session discovery, local extraction, production OpenAI HTTP transport, checkpoint recovery, degraded preview handling, results UI, and shutdown. | The fixed pair is a test setup; fixture video and a loopback OpenAI-compatible server are the default, and DOM events are programmatic rather than OS pointer events. |
-| Paid evaluation compile check | The feature-gated application path type-checks through the real `OperatorState` callback. | It does not run or contact OpenAI without separate approval. |
+| Paid evaluation compile check | The historical evaluator type-checks through the backend checkpoint API. | It does not run or contact OpenAI without separate approval. |
 
 The desktop E2E creates a strict owner-only temporary settings file and injects its explicit path through a feature-gated launcher; this is a test seam, not a production override. Provider variables are removed from the app child. The mounted driver reads the ready-only active `ResolvedSettings` context and permits only a numeric loopback provider or real mode with both paid gates, which keeps its safety decision aligned with the runtime actually under test.
 
@@ -277,13 +287,14 @@ just app
 
 On first run, `just app` opens Settings. Add the two fixture RTSP URLs shown in the README, save, and restart to activate the example. `just vlc` inspects camera 1 independently. `just css` regenerates the app's checked-in Tailwind CSS and daisyUI output.
 
-The five local media checks must be selected by these exact test names; never run a blanket ignored suite:
+The six local media checks must be selected by these exact test names; never run a blanket ignored suite:
 
 ```bash
 nix develop --command cargo test -p backend analysis::video::extractor::tests::extracts_fixture_frame_as_jpeg -- --ignored --exact
 nix develop --command cargo test -p backend analysis::session::tests::full_local_ffmpeg_and_mock_model_analysis_uses_pre_and_post_gap_segments -- --ignored --exact --nocapture
 nix develop --command cargo test -p camera --test rtsp_stream fixture_streams_h264_to_two_readers_and_stops_cleanly -- --ignored --exact
 nix develop --command cargo test -p camera --test rtsp_stream host_recorder_records_playable_mkv -- --ignored --exact --nocapture
+nix develop --command cargo test -p camera --test rtsp_stream host_recorder_starts_with_low_bitrate_video -- --ignored --exact --nocapture
 nix develop --command cargo test -p camera --test rtsp_stream host_recorder_reconnects_into_a_second_segment -- --ignored --exact --nocapture
 ```
 
@@ -297,7 +308,7 @@ LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 cargo test -p camera --features
 
 ## Paid Evaluation Gates
 
-The paid application evaluations are absent unless Cargo feature `paid-openai-evaluations` is enabled, remain ignored with explicit cost warnings, and assert `LEO_RUN_PAID_OPENAI_TEST=1` before constructing temporary storage, recorder runtime, `OperatorState`, session, or provider. `OPENAI_API_KEY` and `ANALYSIS_MODEL` are evaluation-process inputs only; production gets the corresponding values from Settings. The documented paid recipe rejects `OPENAI_BASE_URL` because desktop paid validation targets OpenAI directly. The focused workflow evaluation uses one short local MKV and applies backend checkpoints through the real `OperatorState` callback.
+The paid application evaluations are absent unless Cargo feature `paid-openai-evaluations` is enabled, remain ignored with explicit cost warnings, and assert `LEO_RUN_PAID_OPENAI_TEST=1` before constructing temporary storage, session, or provider. `OPENAI_API_KEY` and `ANALYSIS_MODEL` are evaluation-process inputs only; production gets the corresponding values from Settings. The documented paid recipe rejects `OPENAI_BASE_URL` because desktop paid validation targets OpenAI directly. The historical checkpoint evaluation uses one short local MKV and calls the preserved backend evaluator directly. The current desktop workflow is covered by the run coordinator and desktop scenarios.
 
 The safe verification is compile-only:
 
@@ -307,7 +318,7 @@ cargo test -p app --features paid-openai-evaluations openai_evaluations::natural
 
 The complete desktop scenario uses a loopback mock unless both `LEO_E2E_REAL_OPENAI=1` and `LEO_RUN_PAID_OPENAI_TEST=1` are set; the recovery scenario always uses a loopback failure, and the preview-degraded scenario makes no provider request. These variables are test gates, not app configuration. Mock mode disables inherited HTTP proxies so fixture images remain on loopback. The mounted driver independently permits only a numeric loopback base URL or real mode with both gates, no base override, and nonblank credentials. Real mode preserves its session for inspection under `target/desktop-e2e-real/` or `LEO_E2E_OUTPUT_DIR`. Every successful scenario proves the app and fixture-camera process groups have no surviving children. The preview-enabled scenarios also prove clean preview shutdown; the degraded scenario proves recording completes without a preview bridge.
 
-Do not set `LEO_RUN_PAID_OPENAI_TEST=1`, execute either paid path, or send an external provider request without separate explicit approval. Normal suites, the mock desktop E2E, and the five exact local media checks do not perform paid work.
+Do not set `LEO_RUN_PAID_OPENAI_TEST=1`, execute either paid path, or send an external provider request without separate explicit approval. Normal suites, the mock desktop E2E, and the six exact local media checks do not perform paid work.
 
 ## Logging And Sensitive Data
 
@@ -320,8 +331,8 @@ Structured events cover settings state, preview startup, recorder attempts and c
 - The app process owns recording. A hard crash, force quit, laptop sleep, or power loss can leave FFmpeg children or partial MKVs; orphan cleanup, a recorder daemon, active-session recovery, and recorder reattachment are not implemented.
 - Normal shutdown is supervised, but recording does not survive desktop-process loss.
 - A selected data root may be on an external SSD that is already mounted. Device discovery, identity checks, mounting, capacity monitoring, eject handling, and physical-SSD acceptance are not implemented.
-- Parsed and filterable in-app log viewing is not implemented; see [issue #50](https://github.com/noahfraiture/leo/issues/50). Automatic log retention is not implemented; see [issue #51](https://github.com/noahfraiture/leo/issues/51). Automatic deletion, export, storage forecasting, and playback are also absent.
+- Parsed and filterable in-app log viewing is not implemented; see [issue #50](https://github.com/noahfraiture/leo/issues/50). Automatic log retention is not implemented; see [issue #51](https://github.com/noahfraiture/leo/issues/51). Automatic deletion, export and storage forecasting are absent. Candidate evidence playback is available through bounded derived clips.
 - Physical camera acceptance and timeout calibration remain separate hardware work. Current acceptance uses local virtual cameras and fixtures only.
 - Camera discovery, keychain integration, hot apply, automatic restart, and moving or aggregating old sessions are not implemented.
-- Each analysis request is fully buffered in memory, and overlap can substantially increase sequential paid image work. Analysis cannot currently be cancelled; operators should choose conservative batching and overlap values and enforce provider spend controls.
+- A bounded request is buffered in memory. Each criterion currently covers all eligible temporal windows, so long checklists can create many model calls. The memory allowance estimates model residency and cannot force external-server eviction. Analysis has durable resume but no explicit Cancel control.
 - Packaged media executables, multiple concurrent sessions or analyses, and recording cancellation are not implemented.

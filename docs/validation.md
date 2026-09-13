@@ -26,13 +26,13 @@ LEO_RUN_PAID_OPENAI_TEST=1 LEO_E2E_REAL_OPENAI=1 just test-paid
 
 **Requires:** the local and provider checks pass; the actual H.264 RTSP camera or cameras and intended external storage are available; and the provider request has explicit cost approval.
 
-1. Launch `just app`. In Settings, configure the actual camera or cameras, select the external data root, configure monitoring and analysis profiles, enter the provider key and optional base URL, choose the log level, and confirm the recorder timeout.
+1. Launch `just app`. In Settings, configure the actual camera or cameras, select the external data root, configure monitoring profiles, named model connections, readers and reviewer, and their memory/request limits, choose the log level, and confirm the recorder timeout.
 2. Save, restart Leo, and confirm Settings shows the intended data path.
 3. Confirm every configured physical preview moves.
 4. Start a session and confirm every configured camera records.
 5. For the two-camera disconnect/reconnect acceptance setup, disconnect one camera during a 2-5 minute recording. Confirm the other keeps recording, then reconnect the camera and confirm it returns to recording. This setup tests independent reconnect behavior; it is not a product camera-count restriction.
 6. Stop normally and confirm the session completes under the data path shown in Settings, with MKV media in each expected camera directory.
-7. Analyze the session with the real provider and confirm results appear.
+7. Under Analyze, create one exercise checklist, upload and manually label reference images, link each image to its checklist steps, and Save configuration. Then start a run on the completed recording. Inspect candidate playback and individual findings before accepting the consolidated judgments. Add a correction, revise the exercise, rerun and verify both histories remain available.
 8. Quit and relaunch with `just app`. Confirm the completed session and persisted analysis remain available.
 
 **Pass:** every observation succeeds. Open one focused issue with a short reproduction for each failure.
