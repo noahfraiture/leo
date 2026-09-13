@@ -10,10 +10,10 @@ mod evidence;
 mod findings_tests;
 mod labels;
 mod progress;
-mod run_settings;
 #[cfg(all(test, unix))]
 #[path = "tests/render.rs"]
 mod render_tests;
+mod run_settings;
 mod setup;
 mod sidebar;
 
