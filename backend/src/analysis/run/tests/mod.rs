@@ -1,3 +1,4 @@
+mod evidence_selection;
 mod support;
 
 use super::super::reconcile::{Judgment, ReaderFinding, ReviewFinding};
