@@ -8,6 +8,8 @@ mod selection;
 mod store;
 mod workflow;
 
+#[cfg(test)]
+mod tests;
 
 pub use engine::{CreateRun, ExecuteRun, create_run, execute_run};
 pub use error::{RunError, RunResult};
