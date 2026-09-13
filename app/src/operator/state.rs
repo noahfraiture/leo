@@ -7,8 +7,7 @@ use std::{
 };
 
 use backend::{
-    analysis::{AnalysisCheckpoint, AnalyzeSession, OpenAiConfig},
-    profiles::{AnalysisProfile, MonitoringProfile},
+    profiles::MonitoringProfile,
     recording::{RecorderEvent, RecorderHandle, RecorderStatus, RecordingCamera},
     session::{OperatorAction, SessionCamera, SessionController, StoredSession, list_sessions},
 };
@@ -44,10 +43,9 @@ pub enum SessionRunState {
     },
 }
 
-/// One completed session plus its optional validated analysis checkpoint.
+/// One completed source session available for independently versioned analysis runs.
 pub struct SessionListItem {
     pub stored: StoredSession,
-    pub checkpoint: std::result::Result<Option<AnalysisCheckpoint>, String>,
 }
 
 /// Synchronous snapshot produced before the recorder Start await.
@@ -76,7 +74,7 @@ pub struct FaultSessionRequest {
     pub message: String,
 }
 
-/// Route-independent operator state for recording, completed sessions, and analysis.
+/// Route-independent recording state and completed-session selection.
 pub struct OperatorState {
     pub cameras: Vec<CameraState>,
     pub selected_camera_id: Option<u32>,
@@ -85,18 +83,14 @@ pub struct OperatorState {
     /// Retained recordings that cannot yet enter analysis.
     pub incomplete_sessions: Vec<PathBuf>,
     pub selected_session_id: Option<Uuid>,
+    /// Analysis activity token held to prevent simultaneous recording startup.
     pub running_analysis_id: Option<Uuid>,
-    pub analysis_error: Option<(Uuid, String)>,
-    pub model_config_error: Option<String>,
     pub message: Option<String>,
     /// Persistent warning independent of capture health and transient action messages.
     pub metadata_error: Option<String>,
     pub session_root: PathBuf,
     pub monitoring_profiles: Vec<MonitoringProfile>,
-    pub analysis_profiles: Vec<AnalysisProfile>,
-    pub selected_analysis_profile_id: u32,
     pub monitoring_config_error: Option<String>,
-    pub openai: Option<OpenAiConfig>,
     recorder: RecorderHandle,
 }
 
@@ -111,11 +105,6 @@ impl OperatorState {
             .validate_monitoring()
             .err()
             .map(|error| error.to_string());
-        let model_config_error = settings
-            .validate_analysis()
-            .err()
-            .map(|error| error.to_string());
-        let openai = settings.openai_config();
         let cameras = settings.cameras;
         let selected_camera_id = cameras.first().map(|camera| camera.id);
         let cameras = cameras
@@ -135,16 +124,11 @@ impl OperatorState {
             incomplete_sessions: Vec::new(),
             selected_session_id: None,
             running_analysis_id: None,
-            analysis_error: None,
-            model_config_error,
             message: None,
             metadata_error: None,
             session_root,
             monitoring_profiles: settings.monitoring_profiles,
-            analysis_profiles: settings.analysis_profiles,
-            selected_analysis_profile_id: settings.default_analysis_profile_id,
             monitoring_config_error,
-            openai,
             recorder,
         };
         if let Err(error) = operator.refresh_sessions() {
@@ -168,112 +152,6 @@ impl OperatorState {
         if !matches!(self.session, SessionRunState::Faulted { .. }) {
             self.message = message;
         }
-    }
-
-    /// Claims one completed-session analysis after validating all synchronous preconditions.
-    pub fn begin_analysis(&mut self, checklist: String) -> Result<AnalyzeSession, Error> {
-        let session_id = self
-            .selected_session_id
-            .ok_or(Error::AnalysisSessionNotSelected)?;
-        let row_index = self
-            .sessions
-            .iter()
-            .position(|row| row.stored.session.id == session_id)
-            .ok_or(Error::AnalysisSessionNotSelected)?;
-        let directory = self.sessions[row_index].stored.directory.clone();
-        if !fs::symlink_metadata(directory.join("recording-complete"))
-            .is_ok_and(|metadata| metadata.file_type().is_file() && metadata.len() == 0)
-        {
-            return Err(Error::AnalysisSessionIncomplete);
-        }
-        if !matches!(self.session, SessionRunState::Idle) {
-            return Err(Error::AnalysisRequiresIdleSession);
-        }
-        if self.running_analysis_id.is_some() {
-            return Err(Error::AnalysisRunning);
-        }
-        let persisted = self.sessions[row_index]
-            .checkpoint
-            .as_ref()
-            .map_err(|_| Error::InvalidAnalysisCheckpoint)?
-            .as_ref();
-        let profile = match persisted {
-            Some(checkpoint) => checkpoint.analysis_profile.clone(),
-            None => {
-                if self.model_config_error.is_some() {
-                    return Err(Error::ModelConfigurationUnavailable);
-                }
-                self.analysis_profiles
-                    .iter()
-                    .find(|profile| profile.id == self.selected_analysis_profile_id)
-                    .cloned()
-                    .ok_or(Error::ModelConfigurationUnavailable)?
-            }
-        };
-        let persisted_checklist = persisted.map(|checkpoint| checkpoint.checklist.clone());
-        let openai = self
-            .openai
-            .clone()
-            .ok_or(Error::ModelConfigurationUnavailable)?;
-        let checklist = persisted_checklist.unwrap_or_else(|| checklist.trim().to_owned());
-        if checklist.trim().is_empty() {
-            return Err(Error::EmptyChecklist);
-        }
-
-        self.running_analysis_id = Some(session_id);
-        self.analysis_error = None;
-        Ok(AnalyzeSession {
-            directory,
-            checklist,
-            profile,
-            checkpoint_path: None,
-            openai,
-        })
-    }
-
-    /// Explicitly discards only an idle session's analysis checkpoint for a new profile selection.
-    pub fn reset_analysis(&mut self, session_id: Uuid) -> Result<(), Error> {
-        if !matches!(self.session, SessionRunState::Idle) || self.running_analysis_id.is_some() {
-            return Err(Error::AnalysisRunning);
-        }
-        let row = self
-            .sessions
-            .iter_mut()
-            .find(|row| row.stored.session.id == session_id)
-            .ok_or(Error::AnalysisSessionNotSelected)?;
-        let path = row.stored.directory.join("analysis.json");
-        if !fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_file()) {
-            return Err(Error::InvalidAnalysisCheckpoint);
-        }
-        fs::remove_file(path).map_err(Error::ResetAnalysis)?;
-        row.checkpoint = Ok(None);
-        self.analysis_error = None;
-        Ok(())
-    }
-
-    /// Replaces one row with the backend's complete durable checkpoint snapshot.
-    pub fn apply_checkpoint(&mut self, checkpoint: AnalysisCheckpoint) {
-        let session_id = checkpoint.session_id;
-        let complete = checkpoint.responses.len() == checkpoint.total_batches;
-        if let Some(row) = self
-            .sessions
-            .iter_mut()
-            .find(|row| row.stored.session.id == session_id)
-        {
-            row.checkpoint = Ok(Some(checkpoint));
-        }
-        if complete && self.running_analysis_id == Some(session_id) {
-            self.running_analysis_id = None;
-        }
-    }
-
-    /// Publishes a sanitized failure only for the currently running analysis.
-    pub fn analysis_failed(&mut self, session_id: Uuid, message: String) {
-        if self.running_analysis_id != Some(session_id) {
-            return;
-        }
-        self.running_analysis_id = None;
-        self.analysis_error = Some((session_id, message));
     }
 
     /// Creates exclusive staging storage and moves Idle to Starting.
@@ -603,16 +481,7 @@ impl OperatorState {
         self.sessions = catalogue
             .sessions
             .into_iter()
-            .map(|stored| {
-                let checkpoint_path = stored.directory.join("analysis.json");
-                let checkpoint = match fs::symlink_metadata(&checkpoint_path) {
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                    _ => AnalysisCheckpoint::read(&checkpoint_path, stored.session.id)
-                        .map(Some)
-                        .map_err(|error| error.to_string()),
-                };
-                SessionListItem { stored, checkpoint }
-            })
+            .map(|stored| SessionListItem { stored })
             .collect();
         self.selected_session_id = selected
             .filter(|selected| {

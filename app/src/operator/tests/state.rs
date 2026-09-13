@@ -1,15 +1,10 @@
 use std::{
     fs,
-    num::NonZeroUsize,
     path::{Path, PathBuf},
     time::Duration,
 };
 
 use backend::{
-    analysis::{
-        AnalysisCheckpoint, AnalysisResponse, AnalysisWarning, ChecklistProgress, Observation,
-        OpenAiConfig,
-    },
     recording::{RecorderEvent, RecorderRuntime, RecorderSettings, RecorderStatus, test_support},
     session::{OperatorAction, SessionController, mark_recording_complete},
 };
@@ -30,19 +25,10 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
-        Self::with(camera_settings(), Some(crate::test_openai_config()))
+        Self::with(camera_settings())
     }
 
-    fn with(cameras: Vec<CameraSettings>, openai: Option<OpenAiConfig>) -> Self {
-        Self::with_batching(cameras, openai, NonZeroUsize::new(5).unwrap(), 0)
-    }
-
-    fn with_batching(
-        cameras: Vec<CameraSettings>,
-        openai: Option<OpenAiConfig>,
-        frame_sets_per_prompt: NonZeroUsize,
-        overlap_frame_sets: usize,
-    ) -> Self {
+    fn with(cameras: Vec<CameraSettings>) -> Self {
         let temporary = tempfile::tempdir().expect("temporary root should be created");
         let (runtime, recorder, _events) = test_support::spawn(
             RecorderSettings {
@@ -55,12 +41,7 @@ impl Harness {
         )
         .expect("test recorder runtime should start");
         let workflow = OperatorState::new(
-            crate::test_settings(
-                cameras,
-                openai,
-                frame_sets_per_prompt.get(),
-                overlap_frame_sets,
-            ),
+            crate::test_settings(cameras, None, 5, 0),
             temporary.path().join("sessions"),
             recorder,
         )
@@ -171,92 +152,6 @@ fn write_session(
     directory
 }
 
-fn response(timestamp: &str, description: &str, summary: &str, status: &str) -> AnalysisResponse {
-    AnalysisResponse {
-        observations: vec![Observation {
-            timestamp: timestamp.into(),
-            description: description.into(),
-        }],
-        sequence_summary: summary.into(),
-        checklist_progress: vec![ChecklistProgress {
-            item: "Complete the exercise".into(),
-            status: status.into(),
-            note: format!("Evidence at {timestamp}"),
-        }],
-    }
-}
-
-fn checkpoint(
-    session_id: Uuid,
-    checklist: &str,
-    total_batches: usize,
-    responses: Vec<AnalysisResponse>,
-) -> AnalysisCheckpoint {
-    AnalysisCheckpoint {
-        schema_version: 3,
-        session_id,
-        checklist: checklist.into(),
-        plan_fingerprint: "0123456789abcdef".into(),
-        total_batches,
-        analysis_profile: crate::test_analysis_profile(5, 0),
-        resolved_batches: (0..total_batches).map(|i| i..i + 1).collect(),
-        warnings: vec![AnalysisWarning::RecordingGap {
-            camera_id: 2,
-            start_offset_ms: 1_000,
-            end_offset_ms: 2_000,
-        }],
-        responses,
-    }
-}
-
-fn prepare_analysis_session(
-    harness: &mut Harness,
-    session_id: Uuid,
-    saved: Option<&AnalysisCheckpoint>,
-) -> PathBuf {
-    let directory = write_session(
-        &harness.workflow.session_root,
-        &format!("session-{session_id}"),
-        session_id,
-        START_UTC_MS - 10_000,
-        true,
-    );
-    if let Some(saved) = saved {
-        fs::write(
-            directory.join("analysis.json"),
-            serde_json::to_vec_pretty(saved).expect("current checkpoint should serialize"),
-        )
-        .expect("current checkpoint should be written");
-    }
-    harness
-        .workflow
-        .refresh_sessions()
-        .expect("completed session should be discovered");
-    harness.workflow.selected_session_id = Some(session_id);
-    harness.workflow.model_config_error = None;
-    directory
-}
-
-fn begin_analysis_error(workflow: &mut OperatorState, checklist: &str) -> Error {
-    let Err(error) = workflow.begin_analysis(checklist.into()) else {
-        panic!("analysis transition should be rejected");
-    };
-    error
-}
-
-fn saved_checkpoint(operator: &OperatorState, session_id: Uuid) -> &AnalysisCheckpoint {
-    operator
-        .sessions
-        .iter()
-        .find(|row| row.stored.session.id == session_id)
-        .expect("completed session row should remain")
-        .checkpoint
-        .as_ref()
-        .expect("checkpoint should remain valid")
-        .as_ref()
-        .expect("checkpoint snapshot should be present")
-}
-
 #[test]
 fn camera_selection_clears_transient_message_but_preserves_fault_message() {
     let mut harness = Harness::new();
@@ -343,7 +238,7 @@ fn begin_start_creates_storage_and_records_every_camera() {
 
 #[test]
 fn empty_camera_start_is_rejected_before_creating_storage() {
-    let mut harness = Harness::with(Vec::new(), None);
+    let mut harness = Harness::with(Vec::new());
     let root = harness.workflow.session_root.clone();
 
     assert!(matches!(
@@ -720,215 +615,5 @@ fn refresh_sessions_preserves_an_older_selection() {
         [newest, middle, oldest]
     );
 
-    harness.shutdown();
-}
-
-#[test]
-fn empty_checklist_missing_model_active_session_and_second_job_are_rejected() {
-    let session_id = Uuid::from_u128(31);
-
-    let mut unavailable = Harness::new();
-    let directory = prepare_analysis_session(&mut unavailable, session_id, None);
-    unavailable.workflow.selected_session_id = None;
-    assert!(matches!(
-        begin_analysis_error(&mut unavailable.workflow, ""),
-        Error::AnalysisSessionNotSelected
-    ));
-    assert_eq!(unavailable.workflow.running_analysis_id, None);
-
-    unavailable.workflow.selected_session_id = Some(session_id);
-    fs::remove_file(directory.join("recording-complete"))
-        .expect("completion marker should be removable");
-    assert!(matches!(
-        begin_analysis_error(&mut unavailable.workflow, "Complete the exercise"),
-        Error::AnalysisSessionIncomplete
-    ));
-    assert_eq!(unavailable.workflow.running_analysis_id, None);
-    mark_recording_complete(&directory).expect("completion marker should be restored");
-
-    unavailable.workflow.sessions[0].checkpoint = Err("invalid checkpoint".into());
-    unavailable.workflow.model_config_error = Some("model unavailable".into());
-    assert!(matches!(
-        begin_analysis_error(&mut unavailable.workflow, ""),
-        Error::InvalidAnalysisCheckpoint
-    ));
-    assert_eq!(unavailable.workflow.running_analysis_id, None);
-
-    unavailable.workflow.sessions[0].checkpoint = Ok(None);
-    assert!(matches!(
-        begin_analysis_error(&mut unavailable.workflow, ""),
-        Error::ModelConfigurationUnavailable
-    ));
-    assert_eq!(unavailable.workflow.running_analysis_id, None);
-
-    unavailable.workflow.model_config_error = None;
-    assert!(matches!(
-        begin_analysis_error(&mut unavailable.workflow, "  \n"),
-        Error::EmptyChecklist
-    ));
-    assert_eq!(unavailable.workflow.running_analysis_id, None);
-    unavailable.shutdown();
-
-    let mut active = Harness::new();
-    prepare_analysis_session(&mut active, session_id, None);
-    active.workflow.selected_session_id = None;
-    start_active(&mut active.workflow);
-    assert!(matches!(
-        begin_analysis_error(&mut active.workflow, "Complete the exercise"),
-        Error::AnalysisSessionNotSelected
-    ));
-    active.workflow.selected_session_id = Some(session_id);
-    assert!(matches!(
-        begin_analysis_error(&mut active.workflow, "Complete the exercise"),
-        Error::AnalysisRequiresIdleSession
-    ));
-    assert_eq!(active.workflow.running_analysis_id, None);
-    active.shutdown();
-
-    let mut running = Harness::new();
-    prepare_analysis_session(&mut running, session_id, None);
-    running
-        .workflow
-        .begin_analysis("Complete the exercise".into())
-        .expect("first analysis should begin");
-    running.workflow.sessions[0].checkpoint = Err("invalid checkpoint".into());
-    running.workflow.model_config_error = Some("model unavailable".into());
-    assert!(matches!(
-        begin_analysis_error(&mut running.workflow, ""),
-        Error::AnalysisRunning
-    ));
-    assert_eq!(running.workflow.running_analysis_id, Some(session_id));
-    running.shutdown();
-}
-
-#[test]
-fn final_snapshot_and_failure_clear_the_matching_running_id() {
-    let mut harness = Harness::new();
-    let first_id = Uuid::from_u128(35);
-    let second_id = Uuid::from_u128(36);
-    prepare_analysis_session(&mut harness, first_id, None);
-    prepare_analysis_session(&mut harness, second_id, None);
-    harness.workflow.selected_session_id = Some(first_id);
-    harness
-        .workflow
-        .begin_analysis("Complete the exercise".into())
-        .expect("first analysis should begin");
-
-    harness.workflow.apply_checkpoint(checkpoint(
-        second_id,
-        "Complete the exercise",
-        1,
-        vec![response("00:00:01", "Other", "Other", "respected")],
-    ));
-    assert_eq!(harness.workflow.running_analysis_id, Some(first_id));
-    harness.workflow.apply_checkpoint(checkpoint(
-        first_id,
-        "Complete the exercise",
-        2,
-        vec![response("00:00:01", "Partial", "Partial", "started")],
-    ));
-    assert_eq!(harness.workflow.running_analysis_id, Some(first_id));
-    harness.workflow.apply_checkpoint(checkpoint(
-        first_id,
-        "Complete the exercise",
-        2,
-        vec![
-            response("00:00:01", "Partial", "Partial", "started"),
-            response("00:00:02", "Final", "Final", "respected"),
-        ],
-    ));
-    assert_eq!(harness.workflow.running_analysis_id, None);
-
-    harness.workflow.selected_session_id = Some(second_id);
-    harness
-        .workflow
-        .begin_analysis("Ignored for persisted result".into())
-        .expect("second analysis should begin");
-    harness
-        .workflow
-        .analysis_failed(first_id, "stale failure".into());
-    assert_eq!(harness.workflow.running_analysis_id, Some(second_id));
-    assert_eq!(harness.workflow.analysis_error, None);
-    harness
-        .workflow
-        .analysis_failed(second_id, "provider unavailable".into());
-    assert_eq!(harness.workflow.running_analysis_id, None);
-    assert_eq!(
-        harness.workflow.analysis_error,
-        Some((second_id, "provider unavailable".into()))
-    );
-    harness.shutdown();
-}
-
-#[test]
-fn retry_preserves_the_saved_checkpoint() {
-    let mut harness = Harness::new();
-    let session_id = Uuid::from_u128(37);
-    let persisted = checkpoint(
-        session_id,
-        "Persisted retry checklist",
-        2,
-        vec![response(
-            "00:00:01",
-            "Saved observation",
-            "Saved summary",
-            "started",
-        )],
-    );
-    let directory = prepare_analysis_session(&mut harness, session_id, Some(&persisted));
-
-    let first = harness
-        .workflow
-        .begin_analysis("Replacement".into())
-        .expect("resume should begin");
-    harness
-        .workflow
-        .analysis_failed(session_id, "temporary provider failure".into());
-    assert_eq!(saved_checkpoint(&harness.workflow, session_id), &persisted);
-    assert_eq!(harness.workflow.running_analysis_id, None);
-
-    harness.workflow.analysis_profiles.clear();
-    harness.workflow.selected_analysis_profile_id = 99;
-    harness.workflow.model_config_error = Some("Current Settings are invalid".into());
-    let retry = harness
-        .workflow
-        .begin_analysis("Another replacement".into())
-        .expect("retry should begin");
-    assert_eq!(first.profile, persisted.analysis_profile);
-    assert_eq!(retry.profile, persisted.analysis_profile);
-    assert_eq!(first.directory, directory);
-    assert_eq!(retry.directory, directory);
-    assert_eq!(first.checklist, "Persisted retry checklist");
-    assert_eq!(retry.checklist, "Persisted retry checklist");
-    assert_eq!(saved_checkpoint(&harness.workflow, session_id), &persisted);
-    assert_eq!(harness.workflow.analysis_error, None);
-    assert_eq!(harness.workflow.running_analysis_id, Some(session_id));
-    harness.shutdown();
-}
-
-#[test]
-fn new_analysis_requires_idle_and_discards_only_the_previous_checkpoint() {
-    let mut harness = Harness::new();
-    let id = Uuid::from_u128(77);
-    let saved = checkpoint(id, "Original checklist", 2, vec![]);
-    let directory = prepare_analysis_session(&mut harness, id, Some(&saved));
-    let events = fs::read(directory.join("events.jsonl")).unwrap();
-    harness.workflow.begin_analysis("ignored".into()).unwrap();
-    assert!(harness.workflow.reset_analysis(id).is_err());
-    assert!(directory.join("analysis.json").exists());
-    harness
-        .workflow
-        .analysis_failed(id, "test interruption".into());
-    harness.workflow.reset_analysis(id).unwrap();
-    assert!(!directory.join("analysis.json").exists());
-    assert_eq!(fs::read(directory.join("events.jsonl")).unwrap(), events);
-    assert!(directory.join("recording-complete").exists());
-    harness.workflow.analysis_profiles[0].model = "new-model".into();
-    let next = harness
-        .workflow
-        .begin_analysis("New checklist".into())
-        .unwrap();
-    assert_eq!(next.profile.model, "new-model");
-    assert_eq!(next.checklist, "New checklist");
     harness.shutdown();
 }

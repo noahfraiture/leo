@@ -1,22 +1,19 @@
-//! Opt-in, human-graded evaluations against the real OpenAI service.
+//! Opt-in historical backend evaluations, independent of the current application analysis workflow.
 #![cfg(feature = "paid-openai-evaluations")]
 
 use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use backend::{
     analysis::{AnalysisCheckpoint, AnalyzeSession, OpenAiConfig, analyze_session},
-    recording::{RecorderRuntime, RecorderSettings},
     session::mark_recording_complete,
 };
 use serde_json::json;
 use uuid::Uuid;
-
-use crate::{operator::OperatorState, settings::CameraSettings};
 
 #[tokio::test]
 #[ignore = "costs money; requires explicit approval and LEO_RUN_PAID_OPENAI_TEST=1"]
@@ -43,28 +40,17 @@ async fn natural_fixture_exercises_application_checkpoint_flow() {
             .as_path(),
     );
 
-    let (runtime, handle, _events) = RecorderRuntime::spawn(RecorderSettings {
-        io_timeout: Duration::from_secs(10),
-        retry_delay: Duration::from_secs(1),
-        stop_timeout: Duration::from_secs(5),
-    })
-    .expect("paid test requires ffmpeg and ffprobe");
-    let mut settings = crate::test_settings(camera_settings(), Some(openai), 5, 0);
-    settings.analysis_profiles[0] = paid_analysis_profile(5);
-    let mut workflow =
-        OperatorState::new(settings, sessions_root, handle).expect("workflow should initialize");
-    workflow
-        .refresh_sessions()
-        .expect("session should be discovered");
-    workflow.selected_session_id = Some(session_id);
-    let request = workflow
-        .begin_analysis("Describe the visible exercise in order.".into())
-        .expect("analysis should start");
+    let request = AnalyzeSession {
+        directory: session_directory.clone(),
+        checklist: "Describe the visible exercise in order.".into(),
+        profile: paid_analysis_profile(5),
+        checkpoint_path: None,
+        openai,
+    };
     let mut callback_counts = Vec::new();
 
     let checkpoint = analyze_session(request, |snapshot| {
         callback_counts.push(snapshot.responses.len());
-        workflow.apply_checkpoint(snapshot);
     })
     .await
     .expect("paid analysis should complete");
@@ -75,16 +61,12 @@ async fn natural_fixture_exercises_application_checkpoint_flow() {
         "PAID_EVAL_CASE=natural-fixture\n{}",
         serde_json::to_string_pretty(&checkpoint).expect("checkpoint should serialize")
     );
-    assert_eq!(workflow.running_analysis_id, None);
     assert_eq!(
         AnalysisCheckpoint::read(&session_directory.join("analysis.json"), session_id)
             .expect("saved checkpoint should reload"),
         checkpoint
     );
     assert_no_temporary_media(&session_directory);
-    runtime
-        .shutdown()
-        .expect("recorder runtime should shut down");
 }
 
 #[tokio::test]
@@ -339,19 +321,6 @@ fn create_evaluation_session(
     }
     mark_recording_complete(&directory).expect("session should be marked complete");
     directory
-}
-
-fn camera_settings() -> Vec<CameraSettings> {
-    [1_u32, 2]
-        .into_iter()
-        .map(|id| CameraSettings {
-            id,
-            name: format!("Salon {id}"),
-            rtsp_url: format!("rtsp://127.0.0.1:855{}/axis-media/media.amp", id + 3),
-            initially_included_in_analysis: id == 1,
-            initial_monitoring_profile_id: 1,
-        })
-        .collect()
 }
 
 fn create_local_session(

@@ -196,7 +196,6 @@ async fn start_actions_stop_reload_and_discovery_preserve_durable_order() {
     assert_eq!(reloaded.sessions.len(), 1);
     assert_eq!(reloaded.sessions[0].stored.session.id, session.id);
     assert_eq!(reloaded.selected_session_id, Some(session.id));
-    assert!(matches!(reloaded.sessions[0].checkpoint, Ok(None)));
 
     harness.shutdown();
 }
