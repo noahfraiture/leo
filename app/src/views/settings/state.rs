@@ -1,11 +1,9 @@
 use std::{collections::HashMap, path::PathBuf};
 
-use backend::profiles::{AnalysisProfile, ImageDetailPolicy, ImageSizePolicy, MonitoringProfile};
+use backend::profiles::MonitoringProfile;
 use dioxus::prelude::Signal;
 
-use crate::settings::{
-    CameraSettings, LogLevel, OpenAiSettings, Settings, SettingsStore, ValidationError,
-};
+use crate::settings::{CameraSettings, LogLevel, Settings, SettingsStore, ValidationError};
 
 /// Root settings state and durable store shared by Settings components.
 #[derive(Clone)]
@@ -23,11 +21,8 @@ pub struct SettingsDraft {
     pub data_root: Option<PathBuf>,
     pub recorder_timeout_secs: String,
     pub monitoring_profiles: Vec<MonitoringProfileDraft>,
-    pub analysis_profiles: Vec<AnalysisProfileDraft>,
     pub next_monitoring_profile_id: u32,
-    pub next_analysis_profile_id: u32,
-    pub default_analysis_profile_id: u32,
-    pub openai: OpenAiDraft,
+    pub workflow: crate::settings::WorkflowSettings,
     pub log_level: LogLevel,
 }
 
@@ -41,13 +36,6 @@ pub struct CameraDraft {
     pub initial_monitoring_profile_id: u32,
 }
 
-/// Editable analysis-provider values.
-#[derive(Clone, PartialEq, Eq)]
-pub struct OpenAiDraft {
-    pub api_key: String,
-    pub base_url: String,
-}
-
 /// A form field that can receive a sanitized validation message.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SettingsField {
@@ -56,6 +44,11 @@ pub enum SettingsField {
     CameraMonitoringProfile(u32),
     DataRoot,
     RecorderTimeout,
+    /// Stable model identity, or None for a shared execution/evidence policy field.
+    WorkflowNumber {
+        model_id: Option<String>,
+        name: &'static str,
+    },
 }
 
 /// Reports whether validation found an editable error for one camera.
@@ -75,6 +68,8 @@ pub struct SettingsPageState {
     pub draft: SettingsDraft,
     pub selected_camera_id: Option<u32>,
     pub field_errors: HashMap<SettingsField, String>,
+    /// Preserve incomplete numeric edits across Settings navigation without changing saved values.
+    pub number_inputs: HashMap<SettingsField, String>,
     pub save_error: Option<String>,
     pub restart_required: bool,
 }
@@ -87,6 +82,7 @@ impl SettingsPageState {
             draft: SettingsDraft::from(settings),
             selected_camera_id,
             field_errors: HashMap::new(),
+            number_inputs: HashMap::new(),
             save_error: None,
             restart_required: false,
         }
@@ -145,7 +141,25 @@ impl SettingsPageState {
 
     /// Converts the current draft and returns every editable field error found.
     pub fn submission(&self) -> Result<Settings, HashMap<SettingsField, String>> {
-        let mut errors = HashMap::new();
+        // Numeric controls retain invalid raw input separately from their last valid typed value.
+        // Reusing only the typed value here would silently save a value the operator did not enter.
+        let mut errors: HashMap<_, _> = self
+            .field_errors
+            .iter()
+            .filter(|(field, _)| match field {
+                SettingsField::WorkflowNumber { model_id: None, .. } => true,
+                SettingsField::WorkflowNumber {
+                    model_id: Some(id), ..
+                } => self
+                    .draft
+                    .workflow
+                    .models
+                    .iter()
+                    .any(|model| &model.id == id),
+                _ => false,
+            })
+            .map(|(field, error)| (field.clone(), error.clone()))
+            .collect();
         let cameras = self
             .draft
             .cameras
@@ -183,21 +197,9 @@ impl SettingsPageState {
                 .iter()
                 .map(MonitoringProfileDraft::profile)
                 .collect(),
-            analysis_profiles: self
-                .draft
-                .analysis_profiles
-                .iter()
-                .map(AnalysisProfileDraft::profile)
-                .collect(),
             next_monitoring_profile_id: self.draft.next_monitoring_profile_id,
-            next_analysis_profile_id: self.draft.next_analysis_profile_id,
-            default_analysis_profile_id: self.draft.default_analysis_profile_id,
-            openai: OpenAiSettings {
-                api_key: self.draft.openai.api_key.clone(),
-                base_url: (!self.draft.openai.base_url.trim().is_empty())
-                    .then(|| self.draft.openai.base_url.clone()),
-            },
             log_level: self.draft.log_level,
+            workflow: self.draft.workflow.clone(),
         };
 
         if let Err(validation_errors) = settings.validate_recording() {
@@ -218,9 +220,7 @@ impl SettingsPageState {
                         SettingsField::RecorderTimeout,
                         "Enter a positive timeout within runtime limits.",
                     ),
-                    ValidationError::Profile(_)
-                    | ValidationError::InvalidNextProfileId
-                    | ValidationError::InvalidProvider => continue,
+                    ValidationError::Profile(_) | ValidationError::InvalidNextProfileId => continue,
                     ValidationError::UnsupportedSchemaVersion { .. }
                     | ValidationError::InvalidNextCameraId
                     | ValidationError::ZeroCameraId { .. }
@@ -243,8 +243,20 @@ impl SettingsPageState {
     /// Marks the draft as saved; runtime services still require a restart.
     pub fn mark_saved(&mut self) {
         self.field_errors.clear();
+        self.number_inputs.clear();
         self.save_error = None;
         self.restart_required = true;
+    }
+
+    /// Remove a model and its unfinished numeric edits without touching another model's errors.
+    pub fn remove_workflow_model(&mut self, id: &str) {
+        self.draft.workflow.models.retain(|model| model.id != id);
+        let keep = |field: &SettingsField| {
+            !matches!(field,
+            SettingsField::WorkflowNumber { model_id: Some(model_id), .. } if model_id == id)
+        };
+        self.field_errors.retain(|field, _| keep(field));
+        self.number_inputs.retain(|field, _| keep(field));
     }
 }
 
@@ -271,19 +283,9 @@ impl From<Settings> for SettingsDraft {
                 .into_iter()
                 .map(MonitoringProfileDraft::from)
                 .collect(),
-            analysis_profiles: settings
-                .analysis_profiles
-                .into_iter()
-                .map(AnalysisProfileDraft::from)
-                .collect(),
             next_monitoring_profile_id: settings.next_monitoring_profile_id,
-            next_analysis_profile_id: settings.next_analysis_profile_id,
-            default_analysis_profile_id: settings.default_analysis_profile_id,
-            openai: OpenAiDraft {
-                api_key: settings.openai.api_key,
-                base_url: settings.openai.base_url.unwrap_or_default(),
-            },
             log_level: settings.log_level,
+            workflow: settings.workflow,
         }
     }
 }
@@ -316,62 +318,6 @@ impl MonitoringProfileDraft {
             id: self.id,
             name: self.name.clone(),
             sample_every_ms: self.sample_every_ms.parse().unwrap_or(0),
-        }
-    }
-}
-
-/// Editable model limits; invalid values disable analysis without blocking capture setup.
-#[derive(Clone, PartialEq, Eq)]
-pub struct AnalysisProfileDraft {
-    pub id: u32,
-    pub name: String,
-    pub model: String,
-    pub max_images: String,
-    pub max_span_ms: String,
-    pub overlap: String,
-    pub maximum_edge: String,
-    pub detail: ImageDetailPolicy,
-    pub max_output_tokens: String,
-}
-impl From<AnalysisProfile> for AnalysisProfileDraft {
-    fn from(profile: AnalysisProfile) -> Self {
-        Self {
-            id: profile.id,
-            name: profile.name,
-            model: profile.model,
-            max_images: profile.max_images_per_prompt.to_string(),
-            max_span_ms: profile.max_prompt_span_ms.to_string(),
-            overlap: profile.overlap_frame_sets.to_string(),
-            maximum_edge: match profile.image_size {
-                ImageSizePolicy::Original => String::new(),
-                ImageSizePolicy::MaximumLongEdge(edge) => edge.to_string(),
-            },
-            detail: profile.image_detail,
-            max_output_tokens: profile
-                .max_output_tokens
-                .map(|value| value.to_string())
-                .unwrap_or_default(),
-        }
-    }
-}
-impl AnalysisProfileDraft {
-    /// Resolves the current editor values for validation and persistence.
-    pub fn profile(&self) -> AnalysisProfile {
-        AnalysisProfile {
-            id: self.id,
-            name: self.name.clone(),
-            model: self.model.clone(),
-            max_images_per_prompt: self.max_images.parse().unwrap_or(0),
-            max_prompt_span_ms: self.max_span_ms.parse().unwrap_or(0),
-            overlap_frame_sets: self.overlap.parse().unwrap_or(usize::MAX),
-            image_size: if self.maximum_edge.trim().is_empty() {
-                ImageSizePolicy::Original
-            } else {
-                ImageSizePolicy::MaximumLongEdge(self.maximum_edge.parse().unwrap_or(0))
-            },
-            image_detail: self.detail,
-            max_output_tokens: (!self.max_output_tokens.trim().is_empty())
-                .then(|| self.max_output_tokens.parse().unwrap_or(0)),
         }
     }
 }

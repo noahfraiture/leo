@@ -58,8 +58,6 @@ pub enum ValidationError {
     Profile(#[from] backend::profiles::Error),
     #[error("next profile ID must be nonzero and greater than every allocated profile ID")]
     InvalidNextProfileId,
-    #[error("enter an API key and a valid HTTP or HTTPS provider URL in Settings")]
-    InvalidProvider,
     #[error("custom data root must be absolute: {path}")]
     DataRootNotAbsolute { path: PathBuf },
 }

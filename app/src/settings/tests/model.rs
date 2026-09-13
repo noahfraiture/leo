@@ -32,15 +32,23 @@ fn assert_invalid_camera_url(rtsp_url: &str) {
 #[test]
 fn defaults_are_an_unconfigured_valid_draft() {
     let settings = Settings::default();
-    assert_eq!(SETTINGS_SCHEMA_VERSION, 3);
-    assert_eq!(settings.schema_version, 3);
+    assert_eq!(SETTINGS_SCHEMA_VERSION, 4);
+    assert_eq!(settings.schema_version, 4);
     assert_eq!(settings.next_camera_id, 1);
     assert!(settings.cameras.is_empty());
     assert_eq!(settings.log_level, LogLevel::Info);
     let value = serde_json::to_value(&settings).unwrap();
-    assert!(value.get("analysisFrameSetsPerPrompt").is_none());
+    for obsolete in [
+        "analysisFrameSetsPerPrompt",
+        "analysisProfiles",
+        "nextAnalysisProfileId",
+        "defaultAnalysisProfileId",
+        "openai",
+    ] {
+        assert!(value.get(obsolete).is_none());
+    }
     assert_eq!(value["monitoringProfiles"][0]["sampleEveryMs"], 1000);
-    assert!(settings.validate_analysis().is_err());
+    assert!(settings.workflow.model_sets.is_empty());
     settings.validate_recording().unwrap();
 }
 
@@ -111,10 +119,6 @@ fn validation_returns_all_field_errors() {
         data_root: Some(PathBuf::from("relative/data")),
         recorder_timeout_secs: 0,
 
-        openai: OpenAiSettings {
-            api_key: String::new(),
-            base_url: Some("ftp://provider.example/v1".into()),
-        },
         log_level: LogLevel::Info,
         ..Settings::default()
     };
@@ -159,7 +163,6 @@ fn validation_returns_all_field_errors() {
         path: PathBuf::from("relative/data"),
     }));
     assert!(settings.validate_monitoring().is_err());
-    assert!(settings.validate_analysis().is_err());
 }
 
 #[test]
@@ -185,22 +188,8 @@ fn camera_ids_must_be_below_the_next_allocation() {
 fn invalid_monitoring_or_analysis_does_not_invalidate_recording() {
     let mut settings = settings_with_camera_url("rtsp://camera.example/live");
     settings.cameras[0].initial_monitoring_profile_id = 99;
-    settings.analysis_profiles[0].overlap_frame_sets = usize::MAX;
+    settings.workflow.execution.max_concurrent_jobs = 0;
     settings.validate_recording().unwrap();
     assert!(settings.validate_monitoring().is_err());
-    assert!(settings.validate_analysis().is_err());
-}
-
-#[test]
-fn provider_credentials_validate_independently_from_the_model() {
-    let mut settings = Settings::default();
-    assert!(settings.openai_config().is_none());
-    settings.openai.api_key = "key".into();
-    settings.openai.base_url = Some("https://provider.example/v1".into());
-    assert_eq!(settings.openai_config().unwrap().api_key, "key");
-    assert!(settings.validate_analysis().is_err());
-    settings.analysis_profiles[0].model = "model".into();
-    settings.validate_analysis().unwrap();
-    settings.openai.base_url = Some("ftp://provider.example".into());
-    assert!(settings.openai_config().is_none());
+    assert!(settings.workflow.resolve("fixture").is_err());
 }

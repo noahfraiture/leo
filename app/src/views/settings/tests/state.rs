@@ -56,38 +56,25 @@ fn draft_conversion_reports_camera_and_numeric_fields() {
 }
 
 #[test]
-fn profile_drafts_round_trip_editable_limits_and_millisecond_cadence() {
+fn monitoring_drafts_round_trip_millisecond_cadence() {
     let mut state = SettingsPageState::new(Settings::default());
     state.draft.monitoring_profiles[0].sample_every_ms = "500".into();
-    state.draft.analysis_profiles[0].model = "test-model".into();
-    state.draft.analysis_profiles[0].max_images = "9".into();
-    state.draft.analysis_profiles[0].overlap = "3".into();
-    state.draft.analysis_profiles[0].maximum_edge = "720".into();
     let submitted = state.submission().unwrap();
     assert_eq!(submitted.monitoring_profiles[0].sample_every_ms, 500);
-    assert_eq!(submitted.analysis_profiles[0].max_images_per_prompt, 9);
-    assert_eq!(submitted.analysis_profiles[0].overlap_frame_sets, 3);
-    assert_eq!(
-        submitted.analysis_profiles[0].image_size,
-        ImageSizePolicy::MaximumLongEdge(720)
-    );
 }
 
 #[test]
 fn invalid_profile_drafts_remain_explicit_while_recording_can_be_saved() {
     let mut state = SettingsPageState::new(Settings::default());
     state.draft.monitoring_profiles[0].sample_every_ms.clear();
-    state.draft.analysis_profiles[0].overlap = "-1".into();
     let submitted = state
         .submission()
         .expect("valid recording settings can still be saved");
     submitted.validate_recording().unwrap();
     assert!(submitted.validate_monitoring().is_err());
-    assert!(submitted.validate_analysis().is_err());
     assert!(
         state.draft.monitoring_profiles[0]
             .sample_every_ms
             .is_empty()
     );
-    assert_eq!(state.draft.analysis_profiles[0].overlap, "-1");
 }

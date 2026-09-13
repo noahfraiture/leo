@@ -7,7 +7,11 @@
 mod error;
 mod model;
 mod store;
+mod workflow;
 
 pub use error::{Error, ValidationError, ValidationErrors};
-pub use model::{CameraSettings, LogLevel, OpenAiSettings, Settings};
+pub use model::{CameraSettings, LogLevel, Settings};
 pub use store::{ResolvedSettings, SettingsStore};
+#[cfg(test)]
+pub use workflow::EvidenceSettings;
+pub use workflow::WorkflowSettings;

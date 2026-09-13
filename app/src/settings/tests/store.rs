@@ -6,7 +6,7 @@ use std::{
 };
 
 use super::{Error, SettingsStore};
-use crate::settings::{CameraSettings, LogLevel, OpenAiSettings, Settings};
+use crate::settings::{CameraSettings, LogLevel, Settings};
 
 fn store(root: &Path) -> SettingsStore {
     SettingsStore::new(root.join("config/settings.json"), root.join("default-data"))
@@ -26,11 +26,14 @@ fn populated_settings(data_root: PathBuf) -> Settings {
         recorder_timeout_secs: 23,
         monitoring_profiles: crate::test_monitoring_profiles(),
         next_monitoring_profile_id: 4,
-        analysis_profiles: vec![crate::test_analysis_profile(7, 2)],
-        openai: OpenAiSettings {
-            api_key: "test-secret-key".into(),
-            base_url: Some("https://provider.example/v1".into()),
-        },
+        workflow: crate::test_workflow(
+            Some(backend::analysis::OpenAiConfig {
+                api_key: "test-secret-key".into(),
+                base_url: Some("https://provider.example/v1".into()),
+            }),
+            7,
+            2,
+        ),
         log_level: LogLevel::Trace,
         ..Settings::default()
     }
@@ -63,11 +66,8 @@ fn settings_round_trip_and_resolve_runtime_values() {
         resolved.recorder_settings.io_timeout,
         Duration::from_secs(23)
     );
-    assert_eq!(
-        resolved.settings.analysis_profiles[0].max_images_per_prompt,
-        7
-    );
-    assert_eq!(resolved.settings.analysis_profiles[0].overlap_frame_sets, 2);
+    assert_eq!(resolved.settings.workflow.models[0].image_limit, 7);
+    assert_eq!(resolved.settings.workflow.evidence.overlap_frame_sets, 2);
     let bytes = fs::read(&store.settings_path).unwrap();
     assert!(bytes.ends_with(b"}\n"));
 }
@@ -121,8 +121,7 @@ fn malformed_optional_sections_keep_recording_usable_and_leave_the_source_file_u
     let valid = populated_settings(root.path().join("data"));
     for key in [
         "monitoringProfiles",
-        "analysisProfiles",
-        "openai",
+        "workflow",
         "initiallyIncludedInAnalysis",
     ] {
         let mut value = serde_json::to_value(&valid).unwrap();

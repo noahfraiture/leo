@@ -89,17 +89,13 @@ impl SettingsStore {
             .validate_monitoring()
             .err()
             .map(|error| error.to_string());
-        let analysis_error = settings
-            .validate_analysis()
-            .err()
-            .map(|error| error.to_string());
         Ok(ResolvedSettings {
             settings,
             sessions_root,
             logs_root,
             recorder_settings,
             monitoring_error,
-            analysis_error,
+            analysis_error: None,
         })
     }
 
@@ -149,18 +145,11 @@ impl SettingsStore {
                     }),
                 ),
                 (
-                    "analysisProfiles",
-                    serde_json::json!([]),
-                    object.get("analysisProfiles").is_some_and(|v| {
-                        serde_json::from_value::<Vec<backend::profiles::AnalysisProfile>>(v.clone())
-                            .is_ok()
-                    }),
-                ),
-                (
-                    "openai",
-                    serde_json::json!({"apiKey":"", "baseUrl":null}),
-                    object.get("openai").is_some_and(|v| {
-                        serde_json::from_value::<super::OpenAiSettings>(v.clone()).is_ok()
+                    "workflow",
+                    serde_json::to_value(super::WorkflowSettings::default())
+                        .expect("default workflow serializes"),
+                    object.get("workflow").is_some_and(|v| {
+                        serde_json::from_value::<super::WorkflowSettings>(v.clone()).is_ok()
                     }),
                 ),
             ] {
@@ -194,17 +183,11 @@ impl SettingsStore {
                     }
                 }
             }
-            for key in [
-                "nextMonitoringProfileId",
-                "nextAnalysisProfileId",
-                "defaultAnalysisProfileId",
-            ] {
-                if !object
-                    .get(key)
-                    .is_some_and(|v| v.as_u64().is_some_and(|id| u32::try_from(id).is_ok()))
-                {
-                    object.insert(key.into(), serde_json::json!(0));
-                }
+            if !object
+                .get("nextMonitoringProfileId")
+                .is_some_and(|v| v.as_u64().is_some_and(|id| u32::try_from(id).is_ok()))
+            {
+                object.insert("nextMonitoringProfileId".into(), serde_json::json!(0));
             }
         }
         let settings = serde_json::from_value(value).map_err(|_| Error::ParseSettings {

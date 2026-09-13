@@ -4,19 +4,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use backend::{
-    analysis::OpenAiConfig,
-    profiles::{
-        AnalysisProfile, ImageDetailPolicy, ImageSizePolicy, MonitoringProfile,
-        validate_analysis_profiles, validate_monitoring_profiles,
-    },
-};
+use backend::profiles::{MonitoringProfile, validate_monitoring_profiles};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
 use super::{ValidationError, ValidationErrors};
 
-pub const SETTINGS_SCHEMA_VERSION: u32 = 3;
+pub const SETTINGS_SCHEMA_VERSION: u32 = 4;
 
 /// Persisted application configuration edited before runtime services start.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,10 +24,7 @@ pub struct Settings {
     pub recorder_timeout_secs: u64,
     pub monitoring_profiles: Vec<MonitoringProfile>,
     pub next_monitoring_profile_id: u32,
-    pub analysis_profiles: Vec<AnalysisProfile>,
-    pub next_analysis_profile_id: u32,
-    pub default_analysis_profile_id: u32,
-    pub openai: OpenAiSettings,
+    pub workflow: super::WorkflowSettings,
     pub log_level: LogLevel,
 }
 
@@ -49,14 +40,6 @@ pub struct CameraSettings {
     /// Optional metadata reference; invalid references do not affect capture.
     #[serde(default, deserialize_with = "profile_reference")]
     pub initial_monitoring_profile_id: u32,
-}
-
-/// Persisted credentials and endpoint selection for explicit analysis.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct OpenAiSettings {
-    pub api_key: String,
-    pub base_url: Option<String>,
 }
 
 /// Persisted application logging verbosity.
@@ -97,24 +80,8 @@ impl Default for Settings {
                 sample_every_ms: 1000,
             }],
             next_monitoring_profile_id: 2,
-            analysis_profiles: vec![AnalysisProfile {
-                id: 1,
-                name: "Baseline".into(),
-                model: String::new(),
-                max_images_per_prompt: 16,
-                max_prompt_span_ms: 7000,
-                overlap_frame_sets: 2,
-                image_size: ImageSizePolicy::Original,
-                image_detail: ImageDetailPolicy::ProviderDefault,
-                max_output_tokens: None,
-            }],
-            next_analysis_profile_id: 2,
-            default_analysis_profile_id: 1,
-            openai: OpenAiSettings {
-                api_key: String::new(),
-                base_url: None,
-            },
             log_level: LogLevel::Info,
+            workflow: super::WorkflowSettings::default(),
         }
     }
 }
@@ -211,49 +178,6 @@ impl Settings {
             }
         }
         Ok(())
-    }
-
-    /// Validates analysis definitions and credentials without affecting capture availability.
-    pub fn validate_analysis(&self) -> Result<(), ValidationError> {
-        validate_analysis_profiles(&self.analysis_profiles).map_err(ValidationError::Profile)?;
-        if self.next_analysis_profile_id == 0
-            || self
-                .analysis_profiles
-                .iter()
-                .any(|p| p.id >= self.next_analysis_profile_id)
-        {
-            return Err(ValidationError::InvalidNextProfileId);
-        }
-        if !self
-            .analysis_profiles
-            .iter()
-            .any(|p| p.id == self.default_analysis_profile_id)
-        {
-            return Err(ValidationError::Profile(
-                backend::profiles::Error::UnknownAnalysis {
-                    id: self.default_analysis_profile_id,
-                },
-            ));
-        }
-        self.openai_config()
-            .ok_or(ValidationError::InvalidProvider)?;
-        Ok(())
-    }
-
-    /// Returns usable provider credentials; model selection belongs to the analysis profile.
-    pub fn openai_config(&self) -> Option<OpenAiConfig> {
-        if self.openai.api_key.trim().is_empty()
-            || self.openai.base_url.as_ref().is_some_and(|value| {
-                !Url::parse(value)
-                    .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.has_host())
-            })
-        {
-            return None;
-        }
-        Some(OpenAiConfig {
-            api_key: self.openai.api_key.clone(),
-            base_url: self.openai.base_url.clone(),
-        })
     }
 }
 
