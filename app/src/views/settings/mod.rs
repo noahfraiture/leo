@@ -1,8 +1,8 @@
 mod application;
 mod camera;
+mod models;
 mod page;
 mod profiles;
-mod provider;
 mod recording;
 #[cfg(all(test, unix))]
 #[path = "tests/render.rs"]

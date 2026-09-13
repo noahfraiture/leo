@@ -31,6 +31,9 @@ pub const START_UTC_MS: i64 = 1_786_552_800_000;
 #[derive(Clone)]
 struct RenderRootProps {
     operator: Arc<Mutex<Option<OperatorState>>>,
+    analysis: Arc<Mutex<Option<crate::analysis::AnalysisPageState>>>,
+    exercises: Arc<Mutex<Option<crate::exercises::ExercisePageState>>>,
+    workflow: crate::settings::WorkflowSettings,
     preview: PreviewState,
     availability: RuntimeAvailability,
     settings_store: SettingsStore,
@@ -40,6 +43,9 @@ struct RenderRootProps {
 fn render_root(props: RenderRootProps) -> Element {
     let RenderRootProps {
         operator: initial,
+        analysis: initial_analysis,
+        exercises: initial_exercises,
+        workflow,
         preview,
         availability,
         settings_store,
@@ -53,6 +59,34 @@ fn render_root(props: RenderRootProps) -> Element {
             .expect("render root should take operator state once")
     });
     let settings = use_signal(|| SettingsPageState::new(ApplicationSettings::default()));
+    let analysis = use_hook(move || {
+        Signal::new_in_scope(
+            initial_analysis.lock().unwrap().take().unwrap(),
+            ScopeId::ROOT,
+        )
+    });
+    let exercises = use_hook(move || {
+        Signal::new_in_scope(
+            initial_exercises.lock().unwrap().take().unwrap(),
+            ScopeId::ROOT,
+        )
+    });
+    let resolved = settings_store
+        .resolve(ApplicationSettings {
+            workflow,
+            ..ApplicationSettings::default()
+        })
+        .expect("render settings resolve");
+    use_context_provider(move || resolved);
+    use_context_provider(|| crate::analysis::AnalysisContext { state: analysis });
+    let exercise_store =
+        backend::exercise::ExerciseStore::new(settings_store.default_data_root.join("exercises"));
+    use_context_provider(move || crate::exercises::ExerciseContext {
+        state: exercises,
+        store: exercise_store,
+    });
+    use_context_provider(crate::media::MediaRegistry::default);
+    crate::inference::use_inference_gate();
     use_context_provider(|| operator);
     use_context_provider(move || preview);
     use_context_provider(move || SettingsContext {
@@ -62,8 +96,7 @@ fn render_root(props: RenderRootProps) -> Element {
     use_context_provider(move || availability);
 
     rsx! {
-        HistoryProvider {
-            history: move |_| Rc::new(MemoryHistory::with_initial_path(path.clone())) as Rc<dyn History>,
+        HistoryProvider { history: move |_| Rc::new(MemoryHistory::with_initial_path(path.clone())) as Rc<dyn History>,
             Router::<Route> {}
         }
     }
@@ -74,6 +107,9 @@ pub struct RenderHarness {
     temporary: tempfile::TempDir,
     runtime: Option<RecorderRuntime>,
     operator: Option<OperatorState>,
+    pub analysis: crate::analysis::AnalysisPageState,
+    pub exercises: crate::exercises::ExercisePageState,
+    pub workflow: crate::settings::WorkflowSettings,
 }
 
 impl RenderHarness {
@@ -104,6 +140,9 @@ impl RenderHarness {
             temporary,
             runtime: Some(runtime),
             operator: Some(operator),
+            analysis: Default::default(),
+            exercises: Default::default(),
+            workflow: Default::default(),
         }
     }
 
@@ -148,6 +187,9 @@ impl RenderHarness {
         );
         let props = RenderRootProps {
             operator: Arc::new(Mutex::new(self.operator.take())),
+            analysis: Arc::new(Mutex::new(Some(std::mem::take(&mut self.analysis)))),
+            exercises: Arc::new(Mutex::new(Some(std::mem::take(&mut self.exercises)))),
+            workflow: self.workflow.clone(),
             preview,
             availability: RuntimeAvailability::Ready { camera_count },
             settings_store,

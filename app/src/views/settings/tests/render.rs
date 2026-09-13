@@ -6,7 +6,7 @@ use dioxus::{dioxus_core::NoOpMutations, prelude::*};
 
 use super::{Settings, SettingsContext, SettingsPageState};
 use crate::{
-    settings::{CameraSettings, OpenAiSettings, Settings as ApplicationSettings, SettingsStore},
+    settings::{CameraSettings, Settings as ApplicationSettings, SettingsStore, WorkflowSettings},
     test_support::opening_tag_with_marker,
 };
 
@@ -26,7 +26,9 @@ fn render_root(props: RenderProps) -> Element {
             .expect("render settings root should take state once")
     });
     use_context_provider(move || SettingsContext { state, store });
-    rsx! { Settings {} }
+    rsx! {
+        Settings {}
+    }
 }
 
 fn render_settings(state: SettingsPageState, store: Option<SettingsStore>) -> String {
@@ -61,9 +63,15 @@ fn form_composes_all_sections_and_keeps_editable_secrets_local_to_inputs() {
             initially_included_in_analysis: true,
             initial_monitoring_profile_id: 1,
         }],
-        openai: OpenAiSettings {
-            api_key: "render-secret-key".into(),
-            base_url: None,
+        workflow: WorkflowSettings {
+            providers: vec![backend::model::ProviderConnection {
+                id: "render".into(),
+                name: "Test connection".into(),
+                api_key: "render-secret-key".into(),
+                base_url: "http://127.0.0.1:1234/v1".into(),
+                transport: backend::model::Transport::ChatCompletions,
+            }],
+            ..WorkflowSettings::default()
         },
         ..ApplicationSettings::default()
     };
@@ -76,9 +84,9 @@ fn form_composes_all_sections_and_keeps_editable_secrets_local_to_inputs() {
         "Cameras",
         "Storage",
         "Recording",
-        "Provider credentials",
+        "Analysis models",
         "Monitoring profiles",
-        "Analysis profiles",
+        "Resources and evidence",
         "Application",
     ] {
         assert!(html.contains(heading), "missing {heading:?} in {html}");
@@ -93,7 +101,7 @@ fn form_composes_all_sections_and_keeps_editable_secrets_local_to_inputs() {
         "{html}"
     );
     assert!(
-        opening_tag_with_marker(&html, "input", r#"id="settings-openai-key""#)
+        opening_tag_with_marker(&html, "input", r#"id="provider-render-key""#)
             .contains("render-secret-key"),
         "{html}"
     );

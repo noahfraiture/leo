@@ -3,8 +3,8 @@ use dioxus::prelude::*;
 use super::{
     application::ApplicationSettingsSection,
     camera::CameraSettingsSection,
-    profiles::{AnalysisProfilesSection, MonitoringProfilesSection},
-    provider::ProviderSettingsSection,
+    models::ModelSettingsSection,
+    profiles::MonitoringProfilesSection,
     recording::RecordingSettingsSection,
     state::{SettingsContext, SettingsPageState, camera_has_error},
     storage::StorageSettingsSection,
@@ -60,8 +60,7 @@ pub fn Settings() -> Element {
                         StorageSettingsSection {}
                         RecordingSettingsSection {}
                         MonitoringProfilesSection {}
-                        AnalysisProfilesSection {}
-                        ProviderSettingsSection {}
+                        ModelSettingsSection {}
                     }
                 }
                 ApplicationSettingsSection {}
@@ -79,6 +78,8 @@ pub fn Settings() -> Element {
 fn SettingsNotices() -> Element {
     let state = use_context::<SettingsContext>().state;
     let page = state.read();
+    let model_settings_error = try_consume_context::<crate::settings::ResolvedSettings>()
+        .and_then(|settings| settings.analysis_error);
 
     let startup_error =
         try_consume_context::<crate::desktop::RuntimeAvailability>().and_then(|availability| {
@@ -88,6 +89,9 @@ fn SettingsNotices() -> Element {
             }
         });
     rsx! {
+        if let Some(error) = model_settings_error {
+            div { class: "alert alert-warning mb-4", role: "alert", "{error}" }
+        }
         if let Some(error) = startup_error {
             div { class: "alert alert-warning mb-4", role: "alert", "{error}" }
         }
