@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-base64 = "0.22"
+base64 = { workspace = true }
 ffmpeg-sidecar = { version = "=2.5.2", default-features = false }
 rig-core = "0.41.0"
 serde = { workspace = true }
@@ -12,7 +12,7 @@ serde_json = { workspace = true }
 sha2 = "0.10"
 tempfile = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
