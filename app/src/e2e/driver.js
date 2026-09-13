@@ -113,7 +113,7 @@ const inspectAndCorrect = async () => {
     judgment.value = "cannotVerify";
     judgment.dispatchEvent(new Event("change", { bubbles: true }));
     await input(document.getElementById("analysis-correction-reason"), "Operator inspected the actual footage; the interpretation remains uncertain.");
-    (await waitFor(() => button("Attach currently viewed timestamp"), "correction evidence")).click();
+    (await waitFor(() => button("Attach selected timestamp"), "correction evidence")).click();
     await waitFor(() => document.querySelector('[aria-label^="Remove correction citation"]'), "attached correction citation");
     (await waitFor(() => enabled("analysis-save-correction"), "valid human correction")).click();
     await waitFor(() => document.body.innerText.includes("Saved correction history"), "durable correction");

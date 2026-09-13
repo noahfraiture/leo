@@ -136,7 +136,7 @@ pub fn CorrectionEditor(
                                 );
                         }
                     },
-                    "Attach currently viewed timestamp"
+                    "Attach selected timestamp"
                 }
                 div { class: "flex flex-wrap gap-2",
                     for id in draft.evidence_ids {
