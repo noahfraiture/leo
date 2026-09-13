@@ -95,7 +95,7 @@ pub async fn create_run(request: CreateRun) -> RunResult<RunSnapshot> {
                 .duration_since(UNIX_EPOCH)
                 .map_err(|_| RunError::Invalid("System clock precedes Unix time".into()))?
                 .as_millis() as u64,
-            prompt_version: "reference-independent-visual-review-v1".into(),
+            prompt_version: super::selection_aliases::ALIASED_PROMPT.into(),
             exercise: request.revision,
             model_set: request.model_set,
             execution: request.execution,
@@ -361,6 +361,12 @@ async fn run_pending(
                             snapshot.selection_results.push(super::SelectionResult {
                                 job_id: id,
                                 completion,
+                            })
+                        }
+                        JobOutput::SelectionV2(aliased) => {
+                            snapshot.selection_results.push(super::SelectionResult {
+                                job_id: id,
+                                completion: aliased.canonical(job)?,
                             })
                         }
                     }

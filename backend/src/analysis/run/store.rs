@@ -13,6 +13,7 @@ use super::super::{
     reconcile::{EvidenceSelection, FinalFinding, ReaderFinding, ReviewFinding},
 };
 use super::model::{FinalResult, ReaderResult, ReviewResult, SelectionResult};
+use super::selection_aliases::{ALIASED_PROMPT, AliasedSelection, LEGACY_PROMPT};
 use super::{
     HumanCorrection, JobKind, JobRecord, JobState, RunCheckpoint, RunError, RunInputs, RunResult,
     RunSnapshot,
@@ -36,6 +37,7 @@ pub enum JobOutput {
     Reader(Completion<ReaderFinding>),
     Review(Completion<ReviewFinding>),
     Selection(Completion<EvidenceSelection>),
+    SelectionV2(AliasedSelection),
     Final(Completion<FinalFinding>),
 }
 
@@ -146,6 +148,10 @@ impl RunStore {
                     JobOutput::Selection(completion) => selection_results.push(SelectionResult {
                         job_id: job.id.clone(),
                         completion,
+                    }),
+                    JobOutput::SelectionV2(aliased) => selection_results.push(SelectionResult {
+                        job_id: job.id.clone(),
+                        completion: aliased.canonical(job)?,
                     }),
                 }
                 job.state = JobState::Complete;
@@ -295,35 +301,22 @@ impl RunStore {
         job: &JobRecord,
         output: &JobOutput,
     ) -> RunResult<()> {
-        let JobOutput::Selection(selection) = output else {
-            return Ok(());
+        let selection = match output {
+            JobOutput::Selection(selection) => selection.clone(),
+            JobOutput::SelectionV2(aliased) => aliased.canonical(job)?,
+            _ => return Ok(()),
         };
-        let checkpoint: RunCheckpoint = read_json(&self.directory(id)?.join("checkpoint.json"))?;
-        for disposition in &selection.value.reviews {
-            let mut reviewed_ids = std::collections::HashSet::new();
-            for review_id in &disposition.review_ids {
-                let review = checkpoint
-                    .jobs
-                    .iter()
-                    .find(|review| {
-                        review.id == *review_id
-                            && review.kind == JobKind::Review
-                            && review.criterion_id == job.criterion_id
-                    })
-                    .ok_or_else(|| RunError::Invalid("Unknown source visual review".into()))?;
-                reviewed_ids.extend(&review.frame_ids);
-            }
-            if disposition
-                .decisive_ids
-                .iter()
-                .any(|id| !reviewed_ids.contains(id))
-            {
-                return Err(RunError::Invalid(
-                    "Decisive evidence must belong to its named visual review windows".into(),
-                ));
-            }
+        let inputs: RunInputs = read_json(&self.directory(id)?.join("inputs.json"))?;
+        if !matches!(
+            (inputs.prompt_version.as_str(), output),
+            (LEGACY_PROMPT, JobOutput::Selection(_)) | (ALIASED_PROMPT, JobOutput::SelectionV2(_))
+        ) {
+            return Err(RunError::Invalid(
+                "Selection response does not match the frozen prompt version".into(),
+            ));
         }
-        Ok(())
+        let checkpoint: RunCheckpoint = read_json(&self.directory(id)?.join("checkpoint.json"))?;
+        validate_selection_sources(&checkpoint, job, &selection.value)
     }
 
     fn response_path(&self, id: Uuid, job_id: &str) -> RunResult<PathBuf> {
@@ -337,7 +330,7 @@ impl RunStore {
     }
 }
 
-fn validate_response(job: &JobRecord, response: &SavedResponse) -> RunResult<()> {
+pub fn validate_response(job: &JobRecord, response: &SavedResponse) -> RunResult<()> {
     if response.job_id != job.id || response.frame_ids != job.frame_ids {
         return Err(RunError::Invalid(
             "Saved response input identity mismatch".into(),
@@ -367,6 +360,7 @@ fn validate_response(job: &JobRecord, response: &SavedResponse) -> RunResult<()>
             | (JobKind::Review, JobOutput::Review(_))
             | (JobKind::Final, JobOutput::Final(_))
             | (JobKind::SelectEvidence, JobOutput::Selection(_))
+            | (JobKind::SelectEvidence, JobOutput::SelectionV2(_))
     );
     if !matching_role {
         return Err(RunError::Invalid("Saved response role mismatch".into()));
@@ -386,8 +380,42 @@ fn validate_response(job: &JobRecord, response: &SavedResponse) -> RunResult<()>
             &job.frame_ids,
             &job.context_job_ids,
         ),
+        JobOutput::SelectionV2(aliased) => return aliased.canonical(job).map(|_| ()),
     };
     result.map_err(RunError::Invalid)
+}
+
+/// Checks source-window membership after either wire contract has produced canonical IDs.
+pub fn validate_selection_sources(
+    checkpoint: &RunCheckpoint,
+    job: &JobRecord,
+    selection: &EvidenceSelection,
+) -> RunResult<()> {
+    for disposition in &selection.reviews {
+        let mut reviewed_ids = std::collections::HashSet::new();
+        for review_id in &disposition.review_ids {
+            let review = checkpoint
+                .jobs
+                .iter()
+                .find(|review| {
+                    review.id == *review_id
+                        && review.kind == JobKind::Review
+                        && review.criterion_id == job.criterion_id
+                })
+                .ok_or_else(|| RunError::Invalid("Unknown source visual review".into()))?;
+            reviewed_ids.extend(&review.frame_ids);
+        }
+        if disposition
+            .decisive_ids
+            .iter()
+            .any(|id| !reviewed_ids.contains(id))
+        {
+            return Err(RunError::Invalid(
+                "Decisive evidence must belong to its named visual review windows".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> RunResult<T> {

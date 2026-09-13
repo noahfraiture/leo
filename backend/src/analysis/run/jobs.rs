@@ -6,6 +6,7 @@ use super::super::{
     SentImage,
     reconcile::{EvidenceSelection, FinalFinding, ReaderFinding, ReviewFinding},
 };
+use super::selection_aliases::{ALIASED_PROMPT, AliasedSelection, LEGACY_PROMPT, SelectionAliases};
 use super::store::{self, JobOutput, SavedResponse};
 use super::{JobKind, JobRecord, RunError, RunResult, RunSnapshot, RunStore};
 use crate::model::{JobRole, ModelClient, ModelSnapshot, ProviderConnection, StructuredJob};
@@ -17,6 +18,7 @@ pub struct PreparedJob {
     pub request: StructuredJob,
     pub sent_images: Vec<SentImage>,
     pub reference_hashes: Vec<(uuid::Uuid, String)>,
+    pub selection_aliases: Option<SelectionAliases>,
 }
 
 /// Creates stable request identity from the immutable run, selected model, criterion, and evidence.
@@ -80,6 +82,21 @@ pub fn prepare(
     snapshot: &RunSnapshot,
     job: &JobRecord,
 ) -> RunResult<PreparedJob> {
+    if !matches!(
+        snapshot.inputs.prompt_version.as_str(),
+        LEGACY_PROMPT | ALIASED_PROMPT
+    ) {
+        return Err(RunError::Invalid("Unknown analysis prompt version".into()));
+    }
+    if job.kind == JobKind::SelectEvidence && snapshot.inputs.prompt_version == ALIASED_PROMPT {
+        let (request, aliases) = super::selector_v2::prepare(snapshot, job, OBSERVATION_RULES)?;
+        return Ok(PreparedJob {
+            request,
+            sent_images: Vec::new(),
+            reference_hashes: Vec::new(),
+            selection_aliases: Some(aliases),
+        });
+    }
     let criterion = snapshot
         .inputs
         .exercise
@@ -208,6 +225,7 @@ pub fn prepare(
         request,
         sent_images,
         reference_hashes,
+        selection_aliases: None,
     })
 }
 
@@ -232,11 +250,19 @@ pub async fn complete(
         JobKind::Review => {
             JobOutput::Review(client.complete::<ReviewFinding>(&prepared.request).await?)
         }
-        JobKind::SelectEvidence => JobOutput::Selection(
-            client
-                .complete::<EvidenceSelection>(&prepared.request)
-                .await?,
-        ),
+        JobKind::SelectEvidence => match prepared.selection_aliases {
+            Some(aliases) => JobOutput::SelectionV2(AliasedSelection {
+                aliases,
+                completion: client
+                    .complete::<super::selection_wire::SelectionWire>(&prepared.request)
+                    .await?,
+            }),
+            None => JobOutput::Selection(
+                client
+                    .complete::<EvidenceSelection>(&prepared.request)
+                    .await?,
+            ),
+        },
         JobKind::Final => {
             JobOutput::Final(client.complete::<FinalFinding>(&prepared.request).await?)
         }

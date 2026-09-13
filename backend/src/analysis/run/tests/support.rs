@@ -109,7 +109,7 @@ impl Fixture {
             schema_version: 1,
             id: run_id,
             created_utc_ms: 1,
-            prompt_version: "test-v1".into(),
+            prompt_version: super::super::selection_aliases::LEGACY_PROMPT.into(),
             exercise: revision,
             model_set,
             execution: ExecutionPolicy {

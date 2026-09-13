@@ -1,4 +1,5 @@
 mod evidence_selection;
+mod selection_aliases;
 mod support;
 
 use super::super::reconcile::{Judgment, ReaderFinding, ReviewFinding};

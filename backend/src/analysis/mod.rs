@@ -34,3 +34,5 @@ pub use session::{AnalyzeSession, analyze_session};
 pub use agent::{Agent, Error as ProviderError, LocalChatAgent, OpenAiAgent};
 #[cfg(feature = "test-support")]
 pub use analyzer::{Analyzer, BatchSummary, PlanSummary};
+#[cfg(feature = "test-support")]
+pub use run::{SelectorDiagnostic, diagnose_selector};

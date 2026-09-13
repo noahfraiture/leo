@@ -28,3 +28,7 @@ test-support = []
 [[example]]
 name = "evaluate"
 required-features = ["test-support"]
+
+[[example]]
+name = "selector_diagnostic"
+required-features = ["test-support"]
