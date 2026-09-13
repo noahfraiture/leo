@@ -1,7 +1,11 @@
 //! Immutable analysis runs, durable independent jobs, and operator correction history.
 mod error;
+mod jobs;
+mod media;
 mod model;
+mod selection;
 mod store;
+mod workflow;
 
 
 pub use error::{RunError, RunResult};
