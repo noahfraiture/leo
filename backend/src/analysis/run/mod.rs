@@ -1,29 +1,24 @@
-//! Immutable analysis runs, durable independent jobs, and operator correction history.
+//! Whole-checklist scanning, one consolidation and at most one independent closer look per criterion.
 mod engine;
 mod error;
 mod jobs;
+mod legacy;
 mod media;
 mod model;
-mod selection;
-mod selection_aliases;
-mod selection_wire;
-mod selector_v2;
+mod recheck;
+mod results;
+mod review;
 mod store;
-mod workflow;
-
-#[cfg(feature = "test-support")]
-mod diagnostic;
-#[cfg(feature = "test-support")]
-pub use diagnostic::{SelectorDiagnostic, diagnose_selector};
-
 #[cfg(test)]
 mod tests;
 
-pub use engine::{CreateRun, ExecuteRun, create_run, execute_run};
+pub use engine::{CreateRun, ExecuteRun, create_run, execute_run, request_recheck};
 pub use error::{RunError, RunResult};
-pub use model::{CriterionWindows, FinalResult, ReaderResult, ReviewResult, SelectionResult};
+pub use legacy::ArchivedRun;
 pub use model::{
-    EvidencePolicy, HumanCorrection, JobKind, JobRecord, JobState, RunCheckpoint, RunInputs,
-    RunSnapshot, RunStage,
+    Consolidation, CriterionAssessment, EvidencePolicy, Finding, HumanCorrection, JobKind,
+    JobOutput, JobRecord, JobState, Judgment, OperatorReview, ReviewMark, RunCheckpoint, RunInputs,
+    RunSnapshot, RunStage, SavedResponse, ScanFinding, ScanObservation, StudentAssessment,
+    StudentOutcome,
 };
-pub use store::RunStore;
+pub use store::{RunHistory, RunStore};

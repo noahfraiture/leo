@@ -8,7 +8,7 @@ use crate::{
 use dioxus::prelude::*;
 use uuid::Uuid;
 
-/// New runs freeze the selected saved exercise and active model set, preserving previous results.
+/// New runs freeze the selected saved exercise and selected model, preserving previous results.
 #[component]
 pub fn RunSetup(session_id: Uuid) -> Element {
     let context = use_context::<AnalysisContext>();
@@ -24,29 +24,30 @@ pub fn RunSetup(session_id: Uuid) -> Element {
         .read()
         .as_ref()
         .map(|activity| activity.label.clone());
-    let selected_set = state.read().model_set_id.clone().or_else(|| {
+    let selected_model = state.read().model_profile_id.clone().or_else(|| {
         settings
             .settings
             .workflow
-            .model_sets
+            .models
             .first()
-            .map(|set| set.id.clone())
+            .map(|model| model.id.clone())
     });
-    let resolved = selected_set
+    let resolved = selected_model
         .as_ref()
-        .ok_or_else(|| "Add a model set in Settings and restart Leo.".to_owned())
-        .and_then(|id| settings.settings.workflow.resolve(id));
-    let reader_names = resolved
-        .as_ref()
-        .map(|models| {
-            models
-                .readers
+        .and_then(|id| {
+            settings
+                .settings
+                .workflow
+                .models
                 .iter()
-                .map(|model| model.profile.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+                .find(|model| model.id == *id)
         })
-        .unwrap_or_default();
+        .ok_or_else(|| "Add an analysis model in Settings and restart Leo.".to_string())
+        .and_then(|profile| {
+            profile
+                .resolve(&settings.settings.workflow.providers)
+                .map_err(|error| error.to_string())
+        });
     let revision = exercise_state.read().selected_revision();
     let (exercise_choices, selected_exercise) = {
         let page = exercise_state.read();
@@ -61,12 +62,12 @@ pub fn RunSetup(session_id: Uuid) -> Element {
     let model_choices = settings
         .settings
         .workflow
-        .model_sets
+        .models
         .iter()
-        .map(|set| (set.id.clone(), set.name.clone()))
+        .map(|model| (model.id.clone(), model.name.clone()))
         .collect::<Vec<_>>();
     let disabled = recording || active.is_some() || revision.is_none() || resolved.is_err();
-    let selected_for_start = selected_set.clone();
+    let selected_for_start = selected_model.clone();
     rsx! {
         section {
             class: "rounded-box border border-base-300 p-4",
@@ -86,30 +87,45 @@ pub fn RunSetup(session_id: Uuid) -> Element {
                             option { value: "", "Create an exercise first" }
                         }
                         for (id, name) in exercise_choices {
-                            option { value: "{id}", "{name}" }
+                            option { key: "{id}", value: "{id}", selected: selected_exercise == Some(id), "{name}" }
                         }
                     }
                 }
                 label { class: "form-control",
-                    span { class: "label-text mb-1", "Analysis model set" }
+                    span { class: "label-text mb-1", "Analysis model" }
                     select {
-                        id: "analysis-model-set",
+                        id: "analysis-model",
                         class: "select select-bordered w-full",
-                        value: selected_set.unwrap_or_default(),
-                        onchange: move |event| state.write().model_set_id = Some(event.value()),
+                        value: selected_model.clone().unwrap_or_default(),
+                        onchange: move |event| state.write().model_profile_id = Some(event.value()),
                         if model_choices.is_empty() {
-                            option { value: "", "Configure models in Settings" }
+                            option { value: "", "Configure a model in Settings" }
                         }
                         for (id, name) in model_choices {
-                            option { value: "{id}", "{name}" }
+                            option { key: "{id}", value: "{id}", selected: selected_model.as_ref() == Some(&id), "{name}" }
                         }
                     }
                 }
             }
-            if let Ok(ref models) = resolved {
+            if let Ok(ref model) = resolved {
                 p { class: "mt-3 text-sm",
-                    "Independent readers: {reader_names}. Evidence reviewer: {models.reviewer.profile.name}."
+                    "One model scans the whole checklist: {model.profile.name}. One independent closer look per criterion is available when needed."
                 }
+            }
+            div { class: "mt-3 flex flex-col gap-2 text-sm",
+                label { class: "flex items-center gap-2",
+                    input { class: "checkbox checkbox-sm", r#type: "checkbox", checked: state.read().reference_images,
+                        onchange: move |event| state.write().reference_images = event.checked(),
+                    }
+                    "Send linked reference images to the model (optional)"
+                }
+                label { class: "flex items-center gap-2",
+                    input { class: "checkbox checkbox-sm", r#type: "checkbox", checked: state.read().automatic_recheck,
+                        onchange: move |event| state.write().automatic_recheck = event.checked(),
+                    }
+                    "Automatically use the closer look for uncertain results (optional)"
+                }
+                p { class: "opacity-70", "Reference labels and context are always included. These two additions are optional while their quality benefit is being validated." }
             }
             if let Err(ref error) = resolved {
                 p { class: "mt-3 text-sm text-warning", "{error}" }

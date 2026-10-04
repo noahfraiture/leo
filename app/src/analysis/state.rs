@@ -65,6 +65,7 @@ pub struct RunEntry {
     pub references_loading: bool,
     pub reference_error: Option<String>,
     pub corrections: BTreeMap<Uuid, CorrectionDraft>,
+    pub assessment_draft: AssessmentDraft,
 }
 impl RunEntry {
     pub fn new(snapshot: RunSnapshot) -> Self {
@@ -83,6 +84,26 @@ impl RunEntry {
             references_loading: false,
             reference_error: None,
             corrections: BTreeMap::new(),
+            assessment_draft: AssessmentDraft::default(),
+        }
+    }
+}
+
+/// Unsaved overall assessment belongs to one run and never carries into the next student.
+#[derive(Clone)]
+pub struct AssessmentDraft {
+    pub outcome: backend::analysis::StudentOutcome,
+    pub note: String,
+    pub saving: bool,
+    pub error: Option<String>,
+}
+impl Default for AssessmentDraft {
+    fn default() -> Self {
+        Self {
+            outcome: backend::analysis::StudentOutcome::NeedsEvidence,
+            note: String::new(),
+            saving: false,
+            error: None,
         }
     }
 }
@@ -92,6 +113,7 @@ impl RunEntry {
 pub struct SessionAnalyses {
     pub directory: PathBuf,
     pub runs: BTreeMap<Uuid, RunEntry>,
+    pub archived: Vec<backend::analysis::ArchivedRun>,
     pub selected_run_id: Option<Uuid>,
     pub loaded: bool,
     pub loading: bool,
@@ -112,7 +134,9 @@ pub struct AnalysisPageState {
     pub tab: AnalysisTab,
     pub sessions: BTreeMap<Uuid, SessionAnalyses>,
     pub active: Option<ActiveRun>,
-    pub model_set_id: Option<String>,
+    pub model_profile_id: Option<String>,
+    pub reference_images: bool,
+    pub automatic_recheck: bool,
 }
 impl AnalysisPageState {
     /// Use a history read only when this run has not changed since the read was requested.
@@ -193,6 +217,16 @@ impl AnalysisPageState {
                     .any(|item| item.id == correction.id)
                 {
                     updated.corrections.push(correction.clone());
+                }
+            }
+            for mark in &entry.snapshot.operator_review.marks {
+                if !updated.operator_review.marks.contains(mark) {
+                    updated.operator_review.marks.push(mark.clone());
+                }
+            }
+            for assessment in &entry.snapshot.operator_review.assessments {
+                if !updated.operator_review.assessments.contains(assessment) {
+                    updated.operator_review.assessments.push(assessment.clone());
                 }
             }
             entry.snapshot = updated;

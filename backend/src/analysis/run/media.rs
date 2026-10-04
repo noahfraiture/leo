@@ -44,7 +44,12 @@ fn references(
         .exercise
         .references
         .iter()
-        .filter(|reference| reference.criterion_ids.contains(&job.criterion_id))
+        .filter(|reference| {
+            snapshot.inputs.evidence_policy.reference_images
+                && job
+                    .criterion_id
+                    .is_none_or(|id| reference.criterion_ids.contains(&id))
+        })
     {
         let asset = &reference.image;
         let original = fs::read(directory.join("references").join(format!(

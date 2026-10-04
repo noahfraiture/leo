@@ -19,8 +19,8 @@ use uuid::Uuid;
 fn run_settings_summary_shows_frozen_limits_instead_of_current_model_settings() {
     let session_id = Uuid::new_v4();
     let mut run = test_snapshot(session_id, Uuid::new_v4(), RunStage::Paused);
-    run.inputs.model_set.readers[0].profile.model = "saved-reader-model".into();
-    run.inputs.model_set.readers[0].provider.base_url = "https://private.saved.example/v1".into();
+    run.inputs.model.profile.model = "saved-reader-model".into();
+    run.inputs.model.provider.base_url = "https://private.saved.example/v1".into();
     let mut harness = prepared(session_id, Some(run));
     harness.workflow = crate::test_workflow(Some(crate::test_openai_config()), 99, 2);
     harness.workflow.models[0].model = "new-active-model".into();
@@ -223,7 +223,7 @@ fn paused_processing_retains_findings_and_offers_resume() {
     run.checkpoint.jobs.push(failed);
     let html = prepared(session_id, Some(run)).render_at(ready_preview(), "/analyze");
     assert!(html.contains("Model request failed"));
-    assert!(html.contains("The item is partly obscured."));
+    assert!(html.contains("A hand covers the case opening."));
     assert!(html.contains("Completed model requests: 1 of 2"));
     assert!(html.contains("Not assessed yet"));
     assert_button_disabled(&html, "Resume saved run", false);
@@ -246,7 +246,7 @@ fn ready_run_keeps_uncertainty_and_recording_gaps_visible() {
     assert!(html.contains("Model: Cannot verify"));
     assert!(html.contains("The closing action is obscured."));
     assert!(html.contains("Recording gap on camera 17"));
-    assert!(html.contains("Reference examples used for this run"));
+    assert!(html.contains("Reference examples"));
     assert!(html.contains("Reason for your correction"));
     assert!(!html.contains("analysis-resume"));
 }

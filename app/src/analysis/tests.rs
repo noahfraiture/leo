@@ -6,7 +6,7 @@ use uuid::Uuid;
 fn delayed_history_refresh_cannot_replace_newer_live_progress() {
     let session_id = Uuid::new_v4();
     let run_id = Uuid::new_v4();
-    let older = test_snapshot(session_id, run_id, RunStage::Reading);
+    let older = test_snapshot(session_id, run_id, RunStage::Scanning);
     let mut page = AnalysisPageState::default();
     page.apply_snapshot(older.clone());
     let generation = page.sessions[&session_id].runs[&run_id].snapshot_generation;
@@ -26,7 +26,7 @@ fn progress_for_another_run_preserves_selection_and_correction_draft() {
     let session_id = Uuid::new_v4();
     let selected = Uuid::new_v4();
     let other = Uuid::new_v4();
-    let first = test_snapshot(session_id, selected, RunStage::Reading);
+    let first = test_snapshot(session_id, selected, RunStage::Scanning);
     let criterion = first.inputs.exercise.checklist.criteria[0].id;
     let mut page = AnalysisPageState::default();
     page.apply_snapshot(first);
@@ -46,7 +46,7 @@ fn progress_for_another_run_preserves_selection_and_correction_draft() {
 fn execution_snapshot_cannot_remove_a_concurrently_saved_human_correction() {
     let session_id = Uuid::new_v4();
     let run_id = Uuid::new_v4();
-    let earlier = test_snapshot(session_id, run_id, RunStage::Reading);
+    let earlier = test_snapshot(session_id, run_id, RunStage::Scanning);
     let mut corrected = earlier.clone();
     let correction = HumanCorrection {
         id: Uuid::new_v4(),

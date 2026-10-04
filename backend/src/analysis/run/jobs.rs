@@ -1,115 +1,76 @@
-use std::{collections::HashSet, time::Duration};
-
+//! Stateless requests. The closer look receives no earlier verdict or model explanation.
+use super::{RunError, RunResult, RunStore, model::*, store};
+use crate::model::{JobRole, ModelClient, ProviderConnection, StructuredJob};
 use serde_json::json;
+use std::time::Duration;
+use uuid::Uuid;
 
-use super::super::{
-    SentImage,
-    reconcile::{EvidenceSelection, FinalFinding, ReaderFinding, ReviewFinding},
-};
-use super::selection_aliases::{ALIASED_PROMPT, AliasedSelection, LEGACY_PROMPT, SelectionAliases};
-use super::store::{self, JobOutput, SavedResponse};
-use super::{JobKind, JobRecord, RunError, RunResult, RunSnapshot, RunStore};
-use crate::model::{JobRole, ModelClient, ModelSnapshot, ProviderConnection, StructuredJob};
+pub const PROMPT_VERSION: &str = "leo-whole-checklist-v1";
+const RULES: &str = "Apply only the confirmed operator checklist, scene context, order policy and operator answers. Questions without answers are not requirements. If an unspecified policy affects the decision, flag configurationIssue and cannotVerify rather than inventing a standard. Reference images explain objects and states; they never prove student behavior. Cite only candidate image IDs. Images sample the recording: an action not seen is not proof it was omitted. Do not infer hidden states or merge unrelated attempts. Preserve visible contradictions, prohibited actions and retries; do not count matching reports as votes. Pausing or reading instructions alone is not a failure.";
 
-const OBSERVATION_RULES: &str = "Evaluate only the supplied operator criterion against candidate images. Reference images teach object identity or state; they never prove candidate behavior. Cite only supplied CANDIDATE image IDs. Apply only the operator checklist rules for retries, ordering, and prohibited actions. Reading instructions or pausing alone is not failure. If an unspecified retry policy changes the judgment, preserve cannotVerify instead of inventing policy. Preserve prohibited actions even if an unrelated later action succeeds. Do not infer hidden internal states. Absence from sampled images is not proof that a step was omitted. Do not join unrelated attempts or assume object identity across ambiguous views. Order needs visible timestamped support. Unknown evidence means cannotVerify, not notMet. Each visible fact needs its own candidate citations. A model's agreement is not evidence.";
-
-/// Prepared bounded bytes and their identities, held only for one scheduled request.
-pub struct PreparedJob {
-    pub request: StructuredJob,
-    pub sent_images: Vec<SentImage>,
-    pub reference_hashes: Vec<(uuid::Uuid, String)>,
-    pub selection_aliases: Option<SelectionAliases>,
-}
-
-/// Creates stable request identity from the immutable run, selected model, criterion, and evidence.
-pub fn job_record(
-    snapshot: &super::RunInputs,
-    criterion_id: uuid::Uuid,
-    model: &ModelSnapshot,
+pub fn record(
+    inputs: &RunInputs,
     kind: JobKind,
-    round: u8,
+    criterion_id: Option<Uuid>,
     frame_ids: Vec<String>,
 ) -> RunResult<JobRecord> {
     let id = store::hash(&serde_json::to_vec(&(
-        snapshot.id,
-        &snapshot.prompt_version,
-        criterion_id,
-        model,
+        inputs.id,
         kind,
-        round,
+        criterion_id,
         &frame_ids,
     ))?);
     Ok(JobRecord {
         id,
-        criterion_id,
-        profile_id: model.profile.id.clone(),
         kind,
-        round,
+        criterion_id,
         frame_ids,
-        context_job_ids: Vec::new(),
-        state: super::JobState::Pending,
+        state: JobState::Pending,
+        failures: Vec::new(),
     })
 }
 
-pub fn run_models(snapshot: &RunSnapshot) -> RunResult<Vec<ModelSnapshot>> {
-    let mut models = Vec::new();
-    for model in snapshot
-        .inputs
-        .model_set
-        .readers
-        .iter()
-        .chain([&snapshot.inputs.model_set.reviewer])
-    {
-        if let Some(existing) = models
-            .iter()
-            .find(|existing: &&ModelSnapshot| existing.profile.id == model.profile.id)
-        {
-            if existing != model {
-                return Err(RunError::Invalid(
-                    "Conflicting snapshots share a model profile ID".into(),
-                ));
-            }
-        } else {
-            models.push(model.clone());
-        }
-    }
-    Ok(models)
+pub struct PreparedJob {
+    pub request: StructuredJob,
+    pub sent_images: Vec<crate::analysis::SentImage>,
+    pub reference_hashes: Vec<(Uuid, String)>,
 }
 
-/// Materializes a bounded request off the UI thread. Reused images are verified against their cache hash.
 pub fn prepare(
     store: &RunStore,
     snapshot: &RunSnapshot,
     job: &JobRecord,
 ) -> RunResult<PreparedJob> {
-    if !matches!(
-        snapshot.inputs.prompt_version.as_str(),
-        LEGACY_PROMPT | ALIASED_PROMPT
-    ) {
-        return Err(RunError::Invalid("Unknown analysis prompt version".into()));
+    if snapshot.inputs.prompt_version != PROMPT_VERSION {
+        return Err(RunError::Invalid(
+            "This run uses an unsupported analysis prompt".into(),
+        ));
     }
-    if job.kind == JobKind::SelectEvidence && snapshot.inputs.prompt_version == ALIASED_PROMPT {
-        let (request, aliases) = super::selector_v2::prepare(snapshot, job, OBSERVATION_RULES)?;
-        return Ok(PreparedJob {
-            request,
-            sent_images: Vec::new(),
-            reference_hashes: Vec::new(),
-            selection_aliases: Some(aliases),
-        });
-    }
-    let criterion = snapshot
-        .inputs
-        .exercise
-        .checklist
-        .criteria
-        .iter()
-        .find(|criterion| criterion.id == job.criterion_id)
-        .ok_or_else(|| RunError::Invalid("Unknown job criterion".into()))?;
-    let super::media::PreparedImages {
-        images,
-        sent_images,
-        reference_hashes,
-    } = if job.kind == JobKind::SelectEvidence {
+    let (instructions, detail) = match job.kind {
+        JobKind::Scan => (
+            "Observe this chronological window against the entire checklist. Return sparse factual observations linked to criterionId and cited frames, including contrary evidence and attempts. Describe what visibly happens, not a grade. Leave unobserved criteria out. A static end state does not prove the preceding action or order.",
+            json!({"checklist":snapshot.inputs.exercise.checklist}),
+        ),
+        JobKind::Consolidate => (
+            "Summarize ALL saved observations into exactly one finding per checklist criterion. This is text consolidation, not a new visual inspection. Do not create visual facts. Cite only that criterion's observation citations. Check ordering across timestamps using the operator order policy. A single matching window does not erase contrary evidence or establish full-recording prohibitions. Set conflictingEvidence=true and cannotVerify when material observations conflict. A missing observation or insufficient temporal coverage means cannotVerify. Preserve useful candidate citations even for uncertain findings, so a bounded independent closer look can examine them.",
+            json!({"checklist":snapshot.inputs.exercise.checklist,"observations":observations(snapshot)}),
+        ),
+        JobKind::Recheck => {
+            let criterion = snapshot
+                .inputs
+                .exercise
+                .checklist
+                .criteria
+                .iter()
+                .find(|item| Some(item.id) == job.criterion_id)
+                .ok_or_else(|| RunError::Invalid("Unknown closer-look criterion".into()))?;
+            (
+                "Independently assess this criterion using only the supplied original candidate images and operator configuration. You have one bounded episode, not the whole recording. Do not claim globally required order, absence or repetition without sufficient visible evidence. If a missing part of the recording is necessary, return cannotVerify. Ignore what an earlier evaluator might have concluded.",
+                json!({"criterion":criterion,"checklist":snapshot.inputs.exercise.checklist}),
+            )
+        }
+    };
+    let media = if job.kind == JobKind::Consolidate {
         super::media::PreparedImages {
             images: Vec::new(),
             sent_images: Vec::new(),
@@ -118,160 +79,78 @@ pub fn prepare(
     } else {
         super::media::prepare_images(store, snapshot, job)?
     };
-    let relevant_reader_jobs: HashSet<_> = snapshot
-        .checkpoint
-        .jobs
+    let frames: Vec<_> = job
+        .frame_ids
         .iter()
-        .filter(|reader| {
-            reader.criterion_id == job.criterion_id
-                && reader.kind == JobKind::Reader
-                && reader.frame_ids.iter().any(|id| job.frame_ids.contains(id))
-        })
-        .map(|reader| &reader.id)
+        .filter_map(|id| snapshot.checkpoint.evidence.frame(id))
         .collect();
-    let reader_findings: Vec<_> = snapshot
-        .reader_results
-        .iter()
-        .filter(|result| relevant_reader_jobs.contains(&result.job_id))
-        .collect();
-    let review_job_ids: HashSet<_> = snapshot
-        .checkpoint
-        .jobs
-        .iter()
-        .filter(|review| review.criterion_id == job.criterion_id && review.kind == JobKind::Review)
-        .map(|review| &review.id)
-        .collect();
-    let reviews: Vec<_> = snapshot
-        .review_results
-        .iter()
-        .filter(|review| review_job_ids.contains(&review.job_id))
-        .collect();
-    let review_windows: Vec<_> = snapshot
-        .checkpoint
-        .jobs
-        .iter()
-        .filter(|review| review_job_ids.contains(&review.id))
-        .map(|review| json!({"reviewId":review.id,"candidateImageIds":review.frame_ids}))
-        .collect();
-    let reference_count = snapshot
-        .inputs
-        .exercise
-        .references
-        .iter()
-        .filter(|reference| reference.criterion_ids.contains(&job.criterion_id))
-        .count();
-    let image_capacity = snapshot
-        .inputs
-        .model_set
-        .reviewer
-        .profile
-        .image_limit
-        .saturating_sub(reference_count);
-    let selection_job_ids: HashSet<_> = snapshot
-        .checkpoint
-        .jobs
-        .iter()
-        .filter(|candidate| {
-            candidate.criterion_id == job.criterion_id && candidate.kind == JobKind::SelectEvidence
-        })
-        .map(|candidate| &candidate.id)
-        .collect();
-    let selection = snapshot
-        .selection_results
-        .iter()
-        .find(|result| selection_job_ids.contains(&result.job_id));
-    let (role, instructions, detail) = match job.kind {
-        JobKind::Reader => (
-            JobRole::VisualReader,
-            format!(
-                "{OBSERVATION_RULES} Read independently, without other reader results. Judge only what this bounded window establishes."
-            ),
-            json!({"reader":job.profile_id}),
-        ),
-        JobKind::Review => (
-            JobRole::VisualReviewer,
-            format!(
-                "{OBSERVATION_RULES} Visually inspect every supplied frame. Check the individual reader claims against the images even if readers agree. Preserve contradictory observations. If unresolved, request useful camera/time intervals of at most 60 seconds within allowed periods. There is at most one additional evidence round."
-            ),
-            json!({"readerFindings":reader_findings,"additionalEvidenceRound":job.round,"eligiblePeriods":snapshot.checkpoint.evidence.eligible_periods}),
-        ),
-        JobKind::SelectEvidence => (
-            JobRole::VisualReviewer,
-            format!(
-                "{OBSERVATION_RULES} This is TEXT-ONLY EVIDENCE SELECTION, not a visual judgment. Account for every supplied visual review ID exactly once as supporting, contradictory, irrelevant, or unresolved. Group IDs with the same explanation to keep output compact. Read every report and the reader claims, including negative claims the reviewer overruled and contradictions inside cannotVerify reports. Choose a small decisive visual comparison within imageCapacity, including support, all material contradictions, and necessary temporal/identity context. Exclude irrelevant background citations with an explicit reason, not by timestamp position or majority. Every contradictory disposition and every required supporting disposition must cite decisive candidate IDs belonging to its named reviews. If a contradiction has no usable images, mark it unresolved and explain why. Set unresolved plus requiredForDecision only if a necessary comparison cannot be resolved from a bounded selection of the available frames; this blocks judgment. Never hide a potentially decisive contrary observation to fit the image cap."
-            ),
-            json!({"visualReviews":reviews,"reviewWindows":review_windows,"readerFindings":reader_findings,"imageCapacity":image_capacity}),
-        ),
-        JobKind::Final => (
-            JobRole::VisualReviewer,
-            format!(
-                "{OBSERVATION_RULES} Reconcile all preserved visual reviews below; never use majority voting. Inspect the actual selected supporting, contradictory, and context images. The text-only selector is fallible; check its choices against all reports. Additional contrary evidence may have been included automatically. Do not convert an unselected report into visual proof. If any decisive comparison of identity, attempts, or order remains unseen or ambiguous, set requiresUnseenComparison=true and cannotVerify. Irrelevant background reports do not erase a directly witnessed criterion."
-            ),
-            json!({"visualReviews":reviews,"reviewWindows":review_windows,"readerFindings":reader_findings,"evidenceSelection":selection}),
-        ),
-    };
-    let request = StructuredJob {
-        role,
-        instructions,
-        text: serde_json::to_string(&json!({
-            "jobKind":job.kind,"criterion":criterion,"operatorChecklist":snapshot.inputs.exercise.checklist,
-            "candidateImageIds":job.frame_ids,"recordingDurationMs":snapshot.checkpoint.evidence.duration_ms,
-            "coverageWarning":"Images are samples. Missing observations cannot establish omission.","detail":detail
-        }))?,
-        images,
-        max_output_tokens: None,
-    };
+    let preparation = &snapshot.inputs.exercise.preparation;
+    let text = serde_json::to_string(&json!({
+        "jobKind": job.kind, "detail": detail,
+        "sceneContext":preparation.scene_context,"orderPolicy":preparation.order,
+        "operatorClarifications":preparation.questions.iter().filter(|question| snapshot.inputs.exercise.checklist.criteria.iter().any(|criterion| criterion.id == question.criterion_id)).collect::<Vec<_>>(),
+        "referenceLabels":snapshot.inputs.exercise.references,
+        "candidateFrames":frames,"recordingDurationMs":snapshot.checkpoint.evidence.duration_ms,
+        "recordingGaps":snapshot.checkpoint.evidence.warnings,
+    }))?;
     Ok(PreparedJob {
-        request,
-        sent_images,
-        reference_hashes,
-        selection_aliases: None,
+        request: StructuredJob {
+            role: if job.kind == JobKind::Scan {
+                JobRole::VisualReader
+            } else {
+                JobRole::VisualReviewer
+            },
+            instructions: format!("{RULES}\n{instructions}"),
+            text,
+            images: media.images,
+            max_output_tokens: None,
+        },
+        sent_images: media.sent_images,
+        reference_hashes: media.reference_hashes,
     })
 }
 
-/// Sends one prepared request and validates its output before it is eligible for durable publication.
+pub fn observations(snapshot: &RunSnapshot) -> Vec<&ScanObservation> {
+    snapshot
+        .responses
+        .iter()
+        .filter_map(|response| match &response.output {
+            JobOutput::Scan(completion) => Some(&completion.value.observations),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
 pub async fn complete(
+    snapshot: &RunSnapshot,
     job: &JobRecord,
-    model: &ModelSnapshot,
     provider: &ProviderConnection,
-    timeout: Duration,
     prepared: PreparedJob,
 ) -> RunResult<SavedResponse> {
+    let model = &snapshot.inputs.model;
     if provider.snapshot()? != model.provider {
         return Err(RunError::Invalid(
-            "Provider connection changed; restore it or start a new run".into(),
+            "The saved model connection changed; start a new run to use it".into(),
         ));
     }
-    let client = ModelClient::new(provider, &model.profile, timeout)?;
+    let client = ModelClient::new(
+        provider,
+        &model.profile,
+        Duration::from_secs(snapshot.inputs.execution.request_timeout_seconds),
+    )?;
     let output = match job.kind {
-        JobKind::Reader => {
-            JobOutput::Reader(client.complete::<ReaderFinding>(&prepared.request).await?)
-        }
-        JobKind::Review => {
-            JobOutput::Review(client.complete::<ReviewFinding>(&prepared.request).await?)
-        }
-        JobKind::SelectEvidence => match prepared.selection_aliases {
-            Some(aliases) => JobOutput::SelectionV2(AliasedSelection {
-                aliases,
-                completion: client
-                    .complete::<super::selection_wire::SelectionWire>(&prepared.request)
-                    .await?,
-            }),
-            None => JobOutput::Selection(
-                client
-                    .complete::<EvidenceSelection>(&prepared.request)
-                    .await?,
-            ),
-        },
-        JobKind::Final => {
-            JobOutput::Final(client.complete::<FinalFinding>(&prepared.request).await?)
-        }
+        JobKind::Scan => JobOutput::Scan(client.complete(&prepared.request).await?),
+        JobKind::Consolidate => JobOutput::Consolidate(client.complete(&prepared.request).await?),
+        JobKind::Recheck => JobOutput::Recheck(client.complete(&prepared.request).await?),
     };
-    Ok(SavedResponse {
+    let response = SavedResponse {
         job_id: job.id.clone(),
         frame_ids: job.frame_ids.clone(),
         sent_images: prepared.sent_images,
         reference_hashes: prepared.reference_hashes,
         output,
-    })
+    };
+    super::results::validate_response(snapshot, job, &response)?;
+    Ok(response)
 }

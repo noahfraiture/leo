@@ -21,7 +21,7 @@ pub fn start(
     settings: ResolvedSettings,
     gate: InferenceGate,
     session_id: Uuid,
-    model_set_id: String,
+    model_profile_id: String,
 ) {
     let prepared = (|| {
         let directory = selected_directory(operator, session_id)?;
@@ -30,19 +30,29 @@ pub fn start(
             .read()
             .selected_revision()
             .ok_or("Save the exercise configuration before starting analysis.")?;
-        let model_set = settings.settings.workflow.resolve(&model_set_id)?;
+        let workflow = &settings.settings.workflow;
+        let model = workflow
+            .models
+            .iter()
+            .find(|model| model.id == model_profile_id)
+            .ok_or("Select an analysis model.")?
+            .resolve(&workflow.providers)
+            .map_err(|error| error.to_string())?;
+        let options = context.state.read();
         let evidence = &settings.settings.workflow.evidence;
         Ok::<_, String>(CreateRun {
             session_directory: directory,
             exercise_store: exercises.store,
             revision,
-            model_set,
+            model,
             execution: settings.settings.workflow.execution.clone(),
             evidence_policy: EvidencePolicy {
                 max_window_span_ms: evidence.max_prompt_span_ms,
                 overlap_frame_sets: evidence.overlap_frame_sets,
-                image_size: evidence.image_size.clone(),
+                image_size: evidence.image_size,
                 image_detail: evidence.image_detail,
+                reference_images: options.reference_images,
+                automatic_recheck: options.automatic_recheck,
             },
         })
     })();
@@ -272,3 +282,59 @@ fn release_activity(
 #[cfg(test)]
 #[path = "tests/execution.rs"]
 mod tests;
+
+/// Reserve and execute the same one-per-criterion closer look used by automatic analysis.
+pub fn recheck(
+    mut context: AnalysisContext,
+    operator: Signal<OperatorState>,
+    settings: ResolvedSettings,
+    gate: InferenceGate,
+    session_id: Uuid,
+    run_id: Uuid,
+    criterion_id: Uuid,
+    frame_id: Option<String>,
+) {
+    let directory = match selected_directory(operator, session_id) {
+        Ok(directory) => directory,
+        Err(error) => {
+            show_error(context, session_id, error);
+            return;
+        }
+    };
+    let lease = match gate.acquire("independent closer look") {
+        Ok(lease) => lease,
+        Err(error) => {
+            show_error(context, session_id, error);
+            return;
+        }
+    };
+    let activity = RunActivity::begin(context, operator, session_id, Some(run_id));
+    dioxus::dioxus_core::spawn_forever(async move {
+        let _lease = lease;
+        let result = async {
+            let snapshot = backend::analysis::request_recheck(
+                directory.clone(),
+                run_id,
+                criterion_id,
+                frame_id,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            context.state.write().apply_snapshot(snapshot);
+            execute(
+                context,
+                ExecuteRun {
+                    session_directory: directory,
+                    run_id,
+                    providers: settings.settings.workflow.providers,
+                },
+            )
+            .await
+        }
+        .await;
+        if let Err(error) = result {
+            show_error(context, session_id, error);
+        }
+        drop(activity);
+    });
+}

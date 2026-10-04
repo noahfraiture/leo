@@ -1,6 +1,6 @@
 use backend::{
     analysis::EvidencePolicy,
-    model::{ExecutionPolicy, ResolvedModelSet},
+    model::{ExecutionPolicy, ModelSnapshot},
     profiles::{ImageDetailPolicy, ImageSizePolicy},
 };
 use dioxus::prelude::*;
@@ -8,19 +8,14 @@ use dioxus::prelude::*;
 /// Inspectable limits from saved run inputs, independent of the current Settings draft.
 #[component]
 pub fn FrozenRunSettings(
-    models: ResolvedModelSet,
+    model: ModelSnapshot,
     execution: ExecutionPolicy,
     evidence: EvidencePolicy,
 ) -> Element {
-    let rows = models
-        .readers
-        .iter()
-        .enumerate()
-        .map(|(index, model)| (format!("Reader {}", index + 1), &model.profile))
-        .chain(std::iter::once((
-            "Reviewer and final decision".into(),
-            &models.reviewer.profile,
-        )));
+    let rows = [(
+        "Scan, consolidation and independent closer look",
+        &model.profile,
+    )];
     let image_size = match evidence.image_size {
         ImageSizePolicy::Original => "Original resolution".into(),
         ImageSizePolicy::MaximumLongEdge(pixels) => {
@@ -41,7 +36,7 @@ pub fn FrozenRunSettings(
                 "Resume keeps these models and limits. To use changed settings, start a new run after restarting Leo."
             }
             p { class: "mt-2",
-                "Image limits include the linked reference images as well as candidate frames."
+                "Image limits include reference images when that option is enabled."
             }
             div { class: "mt-3 overflow-x-auto",
                 table { class: "table table-sm",

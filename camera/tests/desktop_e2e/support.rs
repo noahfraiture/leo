@@ -73,7 +73,7 @@ pub fn write_desktop_settings(
             })
         })
         .collect::<Vec<_>>();
-    let mut settings = json!({
+    let settings = json!({
         "schemaVersion": 4,
         "nextCameraId": 3,
         "cameras": cameras,
@@ -106,18 +106,6 @@ pub fn write_desktop_settings(
         },
         "logLevel": "info"
     });
-    if base_url.is_some() {
-        // The loopback scenarios exercise two genuinely distinct model identities.
-        let mut second = settings["workflow"]["models"][0].clone();
-        second["id"] = json!("second-reader");
-        second["name"] = json!("Second fixture reader");
-        second["model"] = json!(format!("{model}-second"));
-        settings["workflow"]["models"]
-            .as_array_mut()
-            .unwrap()
-            .push(second);
-        settings["workflow"]["modelSets"][0]["readerIds"] = json!(["fixture", "second-reader"]);
-    }
     let path = directory.join("settings.json");
     let mut file = OpenOptions::new()
         .write(true)

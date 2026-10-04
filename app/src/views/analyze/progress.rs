@@ -5,7 +5,7 @@ use crate::{
     operator::{OperatorState, SessionRunState},
     settings::ResolvedSettings,
 };
-use backend::analysis::{AnalysisWarning, JobKind, JobState, RunSnapshot, RunStage};
+use backend::analysis::{AnalysisWarning, JobState, RunSnapshot, RunStage};
 use dioxus::prelude::*;
 use uuid::Uuid;
 
@@ -25,30 +25,6 @@ pub fn RunProgress(session_id: Uuid, run_id: Uuid, snapshot: RunSnapshot) -> Ele
         .iter()
         .filter(|job| job.state == JobState::Complete)
         .count();
-    let reader_rows = snapshot
-        .inputs
-        .model_set
-        .readers
-        .iter()
-        .map(|reader| {
-            let jobs = snapshot
-                .checkpoint
-                .jobs
-                .iter()
-                .filter(|job| job.kind == JobKind::Reader && job.profile_id == reader.profile.id)
-                .collect::<Vec<_>>();
-            (
-                reader.profile.name.clone(),
-                jobs.iter()
-                    .filter(|job| job.state == JobState::Complete)
-                    .count(),
-                jobs.len(),
-                jobs.iter()
-                    .filter(|job| matches!(job.state, JobState::Failed { .. }))
-                    .count(),
-            )
-        })
-        .collect::<Vec<_>>();
     let failed = snapshot
         .checkpoint
         .jobs
@@ -86,33 +62,7 @@ pub fn RunProgress(session_id: Uuid, run_id: Uuid, snapshot: RunSnapshot) -> Ele
                 aria_label: "Completed model requests: {complete} of {total}",
             }
             p { class: "text-sm",
-                "Completed model requests: {complete} of {total}. Additional evidence can add requests."
-            }
-            table { class: "table table-sm",
-                thead {
-                    tr {
-                        th { "Independent reader" }
-                        th { "Progress" }
-                        th { "Processing" }
-                    }
-                }
-                tbody {
-                    for (name, complete, total, failures) in reader_rows {
-                        tr {
-                            td { "{name}" }
-                            td { "{complete} / {total}" }
-                            td {
-                                if failures > 0 {
-                                    "{failures} request(s) need retry"
-                                } else if complete == total && total > 0 {
-                                    "Complete"
-                                } else {
-                                    "Pending or running"
-                                }
-                            }
-                        }
-                    }
-                }
+                "Completed model requests: {complete} of {total}. The scan is followed by one consolidation and optional bounded closer looks."
             }
             if snapshot.checkpoint.stage == RunStage::Paused {
                 p { class: "alert alert-warning",

@@ -100,6 +100,7 @@ fn SelectedRecording(
             p { class: "alert alert-error", role: "alert", "{error}" }
         }
         RunHistory { session_id, directory }
+        ArchivedHistory { session_id }
         if let Some(run_id) = selected_run {
             SelectedRun { key: "{run_id}", session_id, run_id }
         } else if !loading {
@@ -153,7 +154,7 @@ fn RunHistory(session_id: Uuid, directory: PathBuf) -> Element {
                         option { value: "", "No runs yet" }
                     }
                     for (time, id, name, stage) in runs {
-                        option { value: "{id}",
+                        option { key: "{id}", value: "{id}", selected: selected == Some(id),
                             "{recorded_at(time as i64)} · {name} · {stage_label(stage)}"
                         }
                     }
@@ -188,17 +189,48 @@ fn SelectedRun(session_id: Uuid, run_id: Uuid) -> Element {
             div {
                 h2 { class: "text-lg font-semibold", "{snapshot.inputs.exercise.name}" }
                 p { class: "mt-1 text-sm opacity-70",
-                    "This run uses its saved checklist, reference images, and model set: {snapshot.inputs.model_set.name}."
+                    "This run uses its saved checklist, reference images, and model: {snapshot.inputs.model.profile.name}."
                 }
             }
             RunProgress { session_id, run_id, snapshot: snapshot.clone() }
+            super::configuration::FrozenExercise { exercise: snapshot.inputs.exercise.clone() }
             FrozenRunSettings {
-                models: snapshot.inputs.model_set.clone(),
+                model: snapshot.inputs.model.clone(),
                 execution: snapshot.inputs.execution.clone(),
                 evidence: snapshot.inputs.evidence_policy.clone(),
             }
-            AssessmentList { session_id, run_id, snapshot }
+            AssessmentList { session_id, run_id, snapshot: snapshot.clone() }
             EvidenceViewer { session_id, run_id }
+            super::student::StudentReview { session_id, run_id }
+        }
+    }
+}
+
+#[component]
+fn ArchivedHistory(session_id: Uuid) -> Element {
+    let context = use_context::<AnalysisContext>();
+    let archived = context
+        .state
+        .read()
+        .sessions
+        .get(&session_id)
+        .map(|session| session.archived.clone())
+        .unwrap_or_default();
+    rsx! {
+        if !archived.is_empty() {
+            details { class: "rounded-box border border-base-300 p-3 text-sm",
+                summary { "Previous strategy and unavailable runs ({archived.len()})" }
+                for run in archived {
+                    section { class: "mt-3 border-t border-base-300 pt-3",
+                        h3 { class: "font-semibold", "{run.name}" }
+                        p { "{run.message}" }
+                        p { class: "mt-1 break-all text-xs", "{run.directory.display()}" }
+                        for (criterion, judgment, reason) in run.criteria {
+                            p { class: "mt-2", "{criterion}: {judgment}. {reason}" }
+                        }
+                    }
+                }
+            }
         }
     }
 }

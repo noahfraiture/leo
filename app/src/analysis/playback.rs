@@ -105,10 +105,11 @@ pub fn load_references(mut context: AnalysisContext, session_id: Uuid, run_id: U
     dioxus::dioxus_core::spawn_forever(async move {
         let result = tokio::task::spawn_blocking(move || {
             let store = RunStore::new(directory);
+            let snapshot = store.load(run_id).map_err(|error| error.to_string())?;
             let mut previews = std::collections::BTreeMap::new();
             for reference in references {
                 let original = store
-                    .read_reference(run_id, &reference.image)
+                    .read_reference(&snapshot, reference.image.id)
                     .map_err(|error| error.to_string())?;
                 let preview =
                     preview_reference_bytes(&original, 320).map_err(|error| error.to_string())?;

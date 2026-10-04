@@ -1,7 +1,6 @@
-//! Deterministic provider contracts for exercising the real operator UI, never model quality.
+//! Deterministic provider contracts for the real operator UI, never model quality evidence.
 use serde_json::{Value, json};
 
-/// Extracts the one role-specific input document from a Responses request.
 pub fn input_document(request: &Value) -> Value {
     request["input"]
         .as_array()
@@ -14,71 +13,28 @@ pub fn input_document(request: &Value) -> Value {
         .expect("workflow request includes a JSON input document")
 }
 
-/// Produces source-linked proposals and valid candidate citations using the actual request IDs.
 pub fn answer(request: &Value) -> Value {
     let document = input_document(request);
-    if let Some(sources) = document.as_array() {
-        let criteria: Vec<_> = sources
-            .iter()
-            .map(|source| {
-                json!({
-                    "source_id": source["id"], "text": source["text"],
-                })
-            })
-            .collect();
-        return json!({"criteria":criteria,"comments":[{
-            "source_id":sources[0]["id"], "question":"Should pauses be allowed?"
-        }]});
+    if let Some(sources) = document["source"].as_array() {
+        return json!({"criteria":sources.iter().map(|source| json!({"source_id":source["id"],"text":source["text"]})).collect::<Vec<_>>(),"comments":[{"source_id":sources[0]["id"],"question":"Should pauses be allowed?"}]});
     }
-    let kind = document["jobKind"].as_str().expect("typed workflow job");
-    if kind == "selectEvidence" {
-        let reviews = document["detail"]["visualReviews"]
-            .as_array()
-            .expect("preserved visual reviews");
-        let review_ids: Vec<_> = reviews
-            .iter()
-            .map(|review| review["jobId"].clone())
-            .collect();
-        let evidence = reviews[0]["completion"]["value"]["evidenceIds"].clone();
-        if document["contract"] == "aliases-v2-typed-ids" {
-            return json!({
-                "reason":"One directly reviewed event establishes the fixture criterion.",
-                "reviews":[{"visualReviewIds":review_ids,"kind":"supporting","reason":"Same visible event in the fixture windows.",
-                    "decisiveCandidateFrameIds":evidence,"requiredForDecision":true}],
-                "supportingCandidateFrameIds":evidence,"contradictingCandidateFrameIds":[],"contextCandidateFrameIds":[]
-            });
+    let finding = |criterion: &Value, evidence: Vec<Value>| json!({"criterionId":criterion["id"],"judgment":"met","reason":"Fixture action is visible.","evidenceIds":evidence,"configurationIssue":null,"conflictingEvidence":false});
+    match document["jobKind"].as_str().expect("typed workflow job") {
+        "scan" => {
+            let evidence = document["candidateFrames"][0]["id"].clone();
+            assert!(evidence.is_string());
+            json!({"observations": document["detail"]["checklist"]["criteria"].as_array().unwrap().iter().map(|criterion| json!({"criterionId":criterion["id"],"description":"Visible fixture movement.","evidenceIds":[evidence]})).collect::<Vec<_>>()})
         }
-        return json!({
-            "reason":"One directly reviewed event establishes the fixture criterion.",
-            "reviews":[{"reviewIds":review_ids,"kind":"supporting","reason":"Same visible event in the fixture windows.",
-                "decisiveIds":evidence,"requiredForDecision":true}],
-            "supportingIds":evidence,"contradictingIds":[],"contextIds":[]
-        });
-    }
-    let evidence: Vec<_> = document["candidateImageIds"]
-        .as_array()
-        .expect("candidate IDs")
-        .iter()
-        .take(1)
-        .cloned()
-        .collect();
-    assert!(
-        !evidence.is_empty(),
-        "visual fixture requests must include footage"
-    );
-    let mut finding =
-        json!({"judgment":"met","reason":"E2E visual evidence reviewed.","evidenceIds":evidence});
-    if kind == "final" {
-        finding["unresolvedFacts"] = json!([]);
-        finding["requiresUnseenComparison"] = json!(false);
-    } else {
-        finding["facts"] = json!([{"description":"Visible fixture movement.","evidenceIds":evidence,"attempt":null,"identity":null}]);
-        if kind == "review" {
-            finding["needsMoreEvidence"] = json!(false);
-            finding["requestedIntervals"] = json!([]);
-        } else {
-            assert_eq!(kind, "reader");
+        "consolidate" => {
+            json!({"findings": document["detail"]["checklist"]["criteria"].as_array().unwrap().iter().map(|criterion| {
+            let evidence = document["detail"]["observations"].as_array().unwrap().iter().find(|observation| observation["criterionId"] == criterion["id"]).unwrap()["evidenceIds"].as_array().unwrap().clone();
+            finding(criterion, evidence)
+        }).collect::<Vec<_>>()})
         }
+        "recheck" => finding(
+            &document["detail"]["criterion"],
+            vec![document["candidateFrames"][0]["id"].clone()],
+        ),
+        other => panic!("unexpected workflow stage {other}"),
     }
-    finding
 }

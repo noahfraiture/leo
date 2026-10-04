@@ -76,10 +76,17 @@ const configureExercise = async () => {
     await input(await waitFor(() => document.getElementById("exercise-name"), "exercise name"), "Operator workflow test");
     await input(document.getElementById("exercise-pasted-checklist"), "Keep movement controlled");
     (await waitFor(() => enabled("exercise-add-pasted"), "pasted checklist ready")).click();
+    await input(document.getElementById("exercise-context"), "Indoor workbench with the operator visible from two cameras.");
+    const order = document.getElementById("exercise-order");
+    order.value = "explicit"; order.dispatchEvent(new Event("change", { bubbles: true }));
+    (await waitFor(() => button("3. Clarify"), "clarification step")).click();
     (await waitFor(() => button("Format and review"), "formatting action")).click();
     (await waitFor(() => document.getElementById("exercise-apply-proposal"), "formatting proposal")).click();
     await waitFor(() => !document.getElementById("exercise-apply-proposal"), "proposal applied to draft");
     await input(await waitFor(() => document.querySelector('textarea[aria-label="Step 1"]'), "operator step editor"), "Keep movement controlled. Pauses are allowed.");
+    await input(document.querySelector('section[aria-label="Operator clarification answers"] textarea'), "Pauses are allowed.");
+    (await waitFor(() => button("4. Confirm"), "confirmation step")).click();
+    (await waitFor(() => button("I reviewed the final wording"), "explicit reconciliation")).click();
     (await waitFor(() => enabled("exercise-publish"), "valid exercise")).click();
     await waitFor(() => document.body.innerText.includes("Configuration saved and ready for analysis."), "published exercise");
 };
@@ -116,7 +123,12 @@ const inspectAndCorrect = async () => {
     const decoded = await waitForVideoPixels(video);
     globalThis.leoPlaybackDiagnostics = decoded;
     if (!decoded.pixels?.nonBlack) throw new Error("Candidate player pixel check failed after waiting for decoded pixels: " + JSON.stringify(decoded));
+    (await waitFor(() => enabled("analysis-recheck"), "closer look availability")).click();
+    await waitForCompletedAnalysis();
+    await waitFor(() => document.body.innerText.includes("Independent closer look: Met"), "preserved independent result");
+    if (!document.getElementById("analysis-recheck").disabled) throw new Error("Closer look allowance reset");
     const judgment = document.getElementById("analysis-correction-judgment");
+    if (judgment.value !== "cannotVerify") throw new Error("Correction selector does not show the saved draft default");
     judgment.value = "cannotVerify";
     judgment.dispatchEvent(new Event("change", { bubbles: true }));
     await input(document.getElementById("analysis-correction-reason"), "Operator inspected the actual footage; the interpretation remains uncertain.");
@@ -124,6 +136,11 @@ const inspectAndCorrect = async () => {
     await waitFor(() => document.querySelector('[aria-label^="Remove correction citation"]'), "attached correction citation");
     (await waitFor(() => enabled("analysis-save-correction"), "valid human correction")).click();
     await waitFor(() => document.body.innerText.includes("Saved correction history"), "durable correction");
+    (await waitFor(() => enabled("analysis-mark-reviewed"), "criterion review")).click();
+    await waitFor(() => document.body.innerText.includes("1 of 1 criteria reviewed"), "durable review mark");
+    await input(document.getElementById("student-note"), "Need another view before an overall decision.");
+    (await waitFor(() => enabled("student-save"), "operator assessment ready")).click();
+    await waitFor(() => document.body.innerText.includes("Saved operator assessment"), "saved human assessment");
 };
 
 const completeAnalysis = async () => {
@@ -138,7 +155,9 @@ const completeAnalysis = async () => {
     const history = document.getElementById("analysis-run-history");
     const firstRun = history.value;
     (await waitFor(() => document.getElementById("analysis-configure-tab"), "configuration tab")).click();
+    (await waitFor(() => button("3. Clarify"), "edit final checklist")).click();
     await input(await waitFor(() => document.querySelector('textarea[aria-label="Step 1"]'), "existing criterion"), "Movement is visible. Pauses are allowed.");
+    (await waitFor(() => button("4. Confirm"), "confirm revised configuration")).click();
     (await waitFor(() => enabled("exercise-publish"), "save edited configuration")).click();
     await waitFor(() => document.body.innerText.includes("Configuration saved and ready for analysis."), "revised configuration");
     await beginAnalysis();

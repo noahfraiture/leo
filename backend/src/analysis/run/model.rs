@@ -1,17 +1,13 @@
+use super::super::{EvidenceManifest, EvidenceWindow, SentImage};
+use crate::{
+    exercise::ExerciseRevision,
+    model::{Completion, ExecutionPolicy, ModelSnapshot},
+    profiles::{ImageDetailPolicy, ImageSizePolicy},
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::super::reconcile::{
-    CriterionAssessment, EvidenceSelection, FinalFinding, Judgment, ReaderFinding, ReviewFinding,
-};
-use super::super::{EvidenceManifest, EvidenceWindow};
-use crate::{
-    exercise::ExerciseRevision,
-    model::{Completion, ExecutionPolicy, ResolvedModelSet},
-    profiles::{ImageDetailPolicy, ImageSizePolicy},
-};
-
-/// Shared evidence preparation settings, independent of the chosen model providers.
+/// Sampling and opt-in additions, frozen for the lifetime of a run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EvidencePolicy {
@@ -19,8 +15,9 @@ pub struct EvidencePolicy {
     pub overlap_frame_sets: usize,
     pub image_size: ImageSizePolicy,
     pub image_detail: ImageDetailPolicy,
+    pub reference_images: bool,
+    pub automatic_recheck: bool,
 }
-
 impl Default for EvidencePolicy {
     fn default() -> Self {
         Self {
@@ -28,11 +25,13 @@ impl Default for EvidencePolicy {
             overlap_frame_sets: 1,
             image_size: ImageSizePolicy::MaximumLongEdge(1280),
             image_detail: ImageDetailPolicy::ProviderDefault,
+            reference_images: false,
+            automatic_recheck: false,
         }
     }
 }
 
-/// Complete immutable configuration and initial recording evidence for reproducibility.
+/// Immutable operator configuration, recording identities and one selected model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunInputs {
@@ -41,45 +40,33 @@ pub struct RunInputs {
     pub created_utc_ms: u64,
     pub prompt_version: String,
     pub exercise: ExerciseRevision,
-    pub model_set: ResolvedModelSet,
+    pub model: ModelSnapshot,
     pub execution: ExecutionPolicy,
     pub evidence_policy: EvidencePolicy,
     pub initial_evidence: EvidenceManifest,
-    /// Windows are criterion-specific because their required reference counts can differ.
-    pub windows: Vec<CriterionWindows>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CriterionWindows {
-    pub criterion_id: Uuid,
     pub windows: Vec<EvidenceWindow>,
 }
 
-/// Durable execution phase, independent of candidate judgments.
+/// Processing status, separate from a student's results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RunStage {
     Preparing,
-    Reading,
-    Reviewing,
-    Gathering,
-    FinalReview,
+    Scanning,
+    Consolidating,
+    Rechecking,
     Ready,
     Paused,
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum JobKind {
-    Reader,
-    Review,
-    SelectEvidence,
-    Final,
+    Scan,
+    Consolidate,
+    Recheck,
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub enum JobState {
     Pending,
     Running,
@@ -87,67 +74,108 @@ pub enum JobState {
     Failed { message: String },
 }
 
-/// Stable request identity and state. Only candidate image IDs can be cited by its output.
+/// A saved request identity. Rechecks have one unique job per criterion, including retries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct JobRecord {
     pub id: String,
-    pub criterion_id: Uuid,
-    pub profile_id: String,
     pub kind: JobKind,
-    pub round: u8,
-    /// Actual candidate images for visual jobs. For text-only selection, these are the available
-    /// image IDs described in reviews; no image bytes are sent to that selector.
+    pub criterion_id: Option<Uuid>,
     pub frame_ids: Vec<String>,
-    /// Durable model outputs supplied as context; selection must account for every listed review.
-    pub context_job_ids: Vec<String>,
     pub state: JobState,
+    /// Processing failures remain visible after explicit resume succeeds.
+    pub failures: Vec<String>,
 }
-
-/// Saved progress; accepted response files remain authoritative if a checkpoint write was interrupted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunCheckpoint {
     pub stage: RunStage,
     pub jobs: Vec<JobRecord>,
     pub evidence: EvidenceManifest,
-    pub gathered_criteria: Vec<Uuid>,
-    pub coverage_notes: Vec<(Uuid, String)>,
     pub assessments: Vec<CriterionAssessment>,
     pub error: Option<String>,
 }
 
-/// Persisted typed responses preserve independent model findings and usage separately from outcomes.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ReaderResult {
-    pub job_id: String,
-    pub completion: Completion<ReaderFinding>,
+/// A candidate judgment. Unknown policy and processing errors are never candidate failures.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, rig_core::schemars::JsonSchema,
+)]
+#[schemars(crate = "rig_core::schemars")]
+#[serde(rename_all = "camelCase")]
+pub enum Judgment {
+    Met,
+    NotMet,
+    CannotVerify,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// One reported visible fact, associated with an operator criterion and original candidate images.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, rig_core::schemars::JsonSchema)]
+#[schemars(crate = "rig_core::schemars")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ReviewResult {
-    pub job_id: String,
-    pub completion: Completion<ReviewFinding>,
+pub struct ScanObservation {
+    pub criterion_id: String,
+    pub description: String,
+    pub evidence_ids: Vec<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, rig_core::schemars::JsonSchema)]
+#[schemars(crate = "rig_core::schemars")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScanFinding {
+    pub observations: Vec<ScanObservation>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Initial consolidation or independent closer look. A configuration issue keeps the result unknown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, rig_core::schemars::JsonSchema)]
+#[schemars(crate = "rig_core::schemars")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct FinalResult {
-    pub job_id: String,
-    pub completion: Completion<FinalFinding>,
+pub struct Finding {
+    pub criterion_id: String,
+    pub judgment: Judgment,
+    pub reason: String,
+    pub evidence_ids: Vec<String>,
+    pub configuration_issue: Option<String>,
+    pub conflicting_evidence: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, rig_core::schemars::JsonSchema)]
+#[schemars(crate = "rig_core::schemars")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Consolidation {
+    pub findings: Vec<Finding>,
 }
 
-/// A preserved text-only selection proposal with explicit dispositions of every visual review.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Review projection retaining both model decisions; disagreements cannot silently overwrite a result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SelectionResult {
-    pub job_id: String,
-    pub completion: Completion<EvidenceSelection>,
+pub struct CriterionAssessment {
+    pub criterion_id: Uuid,
+    pub judgment: Judgment,
+    pub reason: String,
+    pub evidence_ids: Vec<String>,
+    pub configuration_issue: Option<String>,
+    pub initial: Finding,
+    pub recheck: Option<Finding>,
+    pub recheck_note: Option<String>,
 }
 
-/// Operator correction appended independently of model outputs and exercise configuration.
+/// Persisted response and the exact image identities used for it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SavedResponse {
+    pub job_id: String,
+    pub frame_ids: Vec<String>,
+    pub sent_images: Vec<SentImage>,
+    pub reference_hashes: Vec<(Uuid, String)>,
+    pub output: JobOutput,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum JobOutput {
+    Scan(Completion<ScanFinding>),
+    Consolidate(Completion<Consolidation>),
+    Recheck(Completion<Finding>),
+}
+
+/// Operator correction history never replaces the saved model response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HumanCorrection {
@@ -161,15 +189,43 @@ pub struct HumanCorrection {
     pub supersedes: Option<Uuid>,
 }
 
-/// UI projection with frozen inputs, current progress, original outputs, and separate corrections.
+/// Durable operator review marks and overall assessments for this recording and run only.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OperatorReview {
+    pub marks: Vec<ReviewMark>,
+    pub assessments: Vec<StudentAssessment>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReviewMark {
+    pub criterion_id: Uuid,
+    pub basis: String,
+    pub created_utc_ms: u64,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StudentOutcome {
+    Pass,
+    NeedsPractice,
+    NeedsEvidence,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StudentAssessment {
+    pub outcome: StudentOutcome,
+    pub note: String,
+    pub basis: String,
+    pub created_utc_ms: u64,
+}
+
+/// Complete saved state consumed by the UI, with initial findings, closer looks and human history.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunSnapshot {
     pub inputs: RunInputs,
     pub checkpoint: RunCheckpoint,
-    pub reader_results: Vec<ReaderResult>,
-    pub review_results: Vec<ReviewResult>,
-    pub final_results: Vec<FinalResult>,
-    pub selection_results: Vec<SelectionResult>,
+    pub responses: Vec<SavedResponse>,
     pub corrections: Vec<HumanCorrection>,
+    pub operator_review: OperatorReview,
 }

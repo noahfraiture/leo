@@ -172,8 +172,9 @@ fn desktop_operator_flow_records_two_cameras_and_analyzes() {
     assert!(segments.iter().any(|segment| segment.camera_id == 2));
 
     let runs = RunStore::new(stored.directory.clone())
-        .list()
-        .expect("read saved runs");
+        .history()
+        .expect("read saved runs")
+        .runs;
     assert_eq!(
         runs.len(),
         2,
@@ -226,31 +227,45 @@ fn desktop_operator_flow_records_two_cameras_and_analyzes() {
         assert!(
             documents
                 .iter()
-                .any(|document| document["contract"] == "aliases-v2-typed-ids"),
-            "new runs must exercise the typed selector contract"
+                .any(|document| document["jobKind"] == "scan")
         );
-        let formatting: Vec<_> = documents
+        assert!(
+            documents
+                .iter()
+                .any(|document| document["jobKind"] == "consolidate")
+        );
+        assert!(
+            documents
+                .iter()
+                .any(|document| document["jobKind"] == "recheck")
+        );
+        assert_eq!(
+            documents
+                .iter()
+                .filter(|document| document.get("source").is_some())
+                .count(),
+            1
+        );
+        for document in documents
             .iter()
-            .filter(|document| document.is_array())
-            .collect();
-        assert_eq!(formatting.len(), 1);
-        for document in documents.iter().filter(|document| !document.is_array()) {
-            let checklist = &document["operatorChecklist"];
-            let text = if document["contract"] == "aliases-v2-typed-ids" {
-                checklist[0].as_str()
-            } else {
-                checklist["criteria"][0]["text"].as_str()
-            }
-            .expect("request preserves the operator checklist");
+            .filter(|document| document.get("jobKind").is_some())
+        {
+            let checklist = &document["detail"]["checklist"];
+            let text = checklist["criteria"][0]["text"]
+                .as_str()
+                .expect("the operator checklist is present");
             assert!(
                 text == "Keep movement controlled. Pauses are allowed."
                     || text == "Movement is visible. Pauses are allowed."
             );
-            assert!(
-                !document.to_string().contains("Should pauses be allowed?"),
-                "proposal comments entered assessment input"
+            assert_eq!(
+                document["operatorClarifications"][0]["answer"],
+                "Pauses are allowed."
             );
         }
+        assert_eq!(first.operator_review.assessments.len(), 1);
+        assert!(first.current_student_assessment().is_some());
+        assert!(second.operator_review.assessments.is_empty());
     }
 
     let application_log = read_application_log(&data_root.join("logs"));
@@ -277,7 +292,7 @@ fn desktop_analysis_resumes_after_transient_provider_failure() {
 
     let (camera_1_rtsp, mut camera_1) = start_camera("camera 1", &fixture("salon-1.mp4"), &logs);
     let (camera_2_rtsp, mut camera_2) = start_camera("camera 2", &fixture("salon-2.mp4"), &logs);
-    let mock_openai = MockOpenAi::fail_once_on_request(2);
+    let mock_openai = MockOpenAi::fail_once_on_request(3);
     let mock_base_url = format!("http://{}/v1", mock_openai.address);
     let settings_path = write_desktop_settings(
         settings_directory.path(),
@@ -332,8 +347,9 @@ fn desktop_analysis_resumes_after_transient_provider_failure() {
     assert_eq!(sessions.len(), 1, "expected one completed E2E session");
     let stored = &sessions[0];
     let runs = RunStore::new(stored.directory.clone())
-        .list()
-        .expect("load resumed run");
+        .history()
+        .expect("load resumed run")
+        .runs;
     assert_eq!(runs.len(), 1);
     let run = &runs[0];
     assert_eq!(run.checkpoint.stage, RunStage::Ready);
@@ -351,11 +367,11 @@ fn desktop_analysis_resumes_after_transient_provider_failure() {
     assert_eq!(requests.len(), run.checkpoint.jobs.len() + 2);
     let repeated = requests
         .iter()
-        .filter(|request| **request == requests[1])
+        .filter(|request| **request == requests[2])
         .count();
     assert_eq!(repeated, 2, "the failed request is retried exactly once");
-    for (index, request) in requests.iter().enumerate().filter(|(index, _)| *index != 1) {
-        if request != &requests[1] {
+    for (index, request) in requests.iter().enumerate().filter(|(index, _)| *index != 2) {
+        if request != &requests[2] {
             assert_eq!(
                 requests.iter().filter(|other| *other == request).count(),
                 1,

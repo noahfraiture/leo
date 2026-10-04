@@ -75,9 +75,9 @@ pub fn CorrectionEditor(
                                     },
                                 )
                         },
-                        option { value: "met", "Met" }
-                        option { value: "notMet", "Not met" }
-                        option { value: "cannotVerify", "Cannot verify" }
+                        option { value: "met", selected: draft.judgment == Judgment::Met, "Met" }
+                        option { value: "notMet", selected: draft.judgment == Judgment::NotMet, "Not met" }
+                        option { value: "cannotVerify", selected: draft.judgment == Judgment::CannotVerify, "Cannot verify" }
                     }
                 }
                 label { class: "form-control",

@@ -59,46 +59,43 @@ pub fn snapshot(session_id: Uuid, run_id: Uuid, stage: RunStage) -> RunSnapshot 
         preparation: Default::default(),
     };
     let jobs = vec![JobRecord {
-        id: "reader-job".into(),
-        criterion_id,
-        profile_id: model.profile.id.clone(),
-        kind: JobKind::Reader,
-        round: 0,
+        id: "scan-job".into(),
+        criterion_id: None,
+        kind: JobKind::Scan,
         frame_ids: vec!["candidate-1".into()],
-        context_job_ids: Vec::new(),
         state: JobState::Complete,
+        failures: Vec::new(),
     }];
+    let finding = Finding {
+        criterion_id: criterion_id.to_string(),
+        judgment: Judgment::CannotVerify,
+        reason: "The closing action is obscured.".into(),
+        evidence_ids: vec!["candidate-1".into()],
+        configuration_issue: None,
+        conflicting_evidence: false,
+    };
     let assessments = if stage == RunStage::Ready {
         vec![CriterionAssessment {
             criterion_id,
-            judgment: Judgment::CannotVerify,
-            reason: "The closing action is obscured.".into(),
-            evidence_ids: vec!["candidate-1".into()],
-            unresolved_facts: vec!["Whether the item was fully inside".into()],
-            reader_job_ids: vec!["reader-job".into()],
-            review_job_ids: Vec::new(),
-            selection_job_id: "selection-job".into(),
-            final_job_id: Some("final-job".into()),
-            additional_evidence_round_used: true,
-            coverage_note: "No view reveals the hidden state.".into(),
+            judgment: finding.judgment,
+            reason: finding.reason.clone(),
+            evidence_ids: finding.evidence_ids.clone(),
+            configuration_issue: None,
+            initial: finding,
+            recheck: None,
+            recheck_note: None,
         }]
     } else {
         Vec::new()
     };
     RunSnapshot {
         inputs: RunInputs {
-            schema_version: 1,
+            schema_version: 2,
             id: run_id,
             created_utc_ms: 1_786_552_805_000,
-            prompt_version: "fixture-v1".into(),
+            prompt_version: "fixture-v2".into(),
             exercise,
-            model_set: ResolvedModelSet {
-                id: "fixture-set".into(),
-                name: "Fixture models".into(),
-                readers: vec![model.clone()],
-                reviewer: model.clone(),
-                formatter: model,
-            },
+            model,
             execution: ExecutionPolicy::default(),
             evidence_policy: EvidencePolicy::default(),
             initial_evidence: evidence.clone(),
@@ -108,32 +105,27 @@ pub fn snapshot(session_id: Uuid, run_id: Uuid, stage: RunStage) -> RunSnapshot 
             stage,
             jobs,
             evidence,
-            gathered_criteria: Vec::new(),
-            coverage_notes: Vec::new(),
             assessments,
             error: None,
         },
-        reader_results: vec![ReaderResult {
-            job_id: "reader-job".into(),
-            completion: Completion {
-                value: ReaderFinding {
-                    judgment: Judgment::CannotVerify,
-                    reason: "The item is partly obscured.".into(),
-                    evidence_ids: vec!["candidate-1".into()],
-                    facts: vec![VisualFact {
+        responses: vec![SavedResponse {
+            job_id: "scan-job".into(),
+            frame_ids: vec!["candidate-1".into()],
+            sent_images: Vec::new(),
+            reference_hashes: Vec::new(),
+            output: JobOutput::Scan(Completion {
+                value: ScanFinding {
+                    observations: vec![ScanObservation {
+                        criterion_id: criterion_id.to_string(),
                         description: "A hand covers the case opening.".into(),
                         evidence_ids: vec!["candidate-1".into()],
-                        attempt: None,
-                        identity: None,
                     }],
                 },
                 usage: None,
                 elapsed_ms: 1,
-            },
+            }),
         }],
-        review_results: Vec::new(),
-        selection_results: Vec::new(),
-        final_results: Vec::new(),
         corrections: Vec::new(),
+        operator_review: OperatorReview::default(),
     }
 }

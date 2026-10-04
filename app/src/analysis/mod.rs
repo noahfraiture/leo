@@ -3,12 +3,14 @@
 mod corrections;
 mod execution;
 mod playback;
+mod review;
 mod state;
 mod storage;
 
 pub use corrections::save_correction;
-pub use execution::{resume, start};
+pub use execution::{recheck, resume, start};
 pub use playback::{load_references, open_evidence};
+pub use review::{mark_reviewed, save_assessment};
 pub use state::{
     AnalysisContext, AnalysisPageState, AnalysisTab, SessionAnalyses, use_analysis_context,
 };

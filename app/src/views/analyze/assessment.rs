@@ -1,7 +1,7 @@
 use super::labels::{judgment_class, judgment_label};
 use crate::analysis::AnalysisContext;
 use backend::{
-    analysis::{CriterionAssessment, HumanCorrection, JobKind, Judgment, RunSnapshot},
+    analysis::{CriterionAssessment, HumanCorrection, Judgment, RunSnapshot},
     exercise::Criterion,
 };
 use dioxus::prelude::*;
@@ -11,6 +11,7 @@ use uuid::Uuid;
 #[component]
 pub fn AssessmentList(session_id: Uuid, run_id: Uuid, snapshot: RunSnapshot) -> Element {
     let context = use_context::<AnalysisContext>();
+    let mut filter = use_signal(|| ResultFilter::All);
     let selected = context
         .state
         .read()
@@ -46,10 +47,15 @@ pub fn AssessmentList(session_id: Uuid, run_id: Uuid, snapshot: RunSnapshot) -> 
                 span { class: "badge badge-outline", "Not assessed: {not_assessed}" }
             }
             p { class: "mt-1 text-sm opacity-70",
-                "Select a step to inspect source footage, independent findings, and the reviewer reasoning."
+                "Select a step to inspect source footage, the initial result, and any closer look."
+            }
+            div { class: "tabs tabs-boxed mt-3", aria_label: "Filter checklist results",
+                for (value, label) in [(ResultFilter::All, "All"), (ResultFilter::NeedsAttention, "Needs attention"), (ResultFilter::Resolved, "Resolved uncertainty")] {
+                    button { class: if filter() == value { "tab tab-active" } else { "tab" }, onclick: move |_| filter.set(value), "{label}" }
+                }
             }
             div { class: "mt-3 flex flex-col gap-2",
-                for (index, criterion) in snapshot.inputs.exercise.checklist.criteria.iter().enumerate() {
+                for (index, criterion) in snapshot.inputs.exercise.checklist.criteria.iter().enumerate().filter(|(_, item)| filter().includes(&snapshot, item.id)) {
                     AssessmentRow {
                         key: "{criterion.id}",
                         session_id,
@@ -69,7 +75,8 @@ pub fn AssessmentList(session_id: Uuid, run_id: Uuid, snapshot: RunSnapshot) -> 
                             .rev()
                             .find(|item| item.criterion_id == criterion.id)
                             .cloned(),
-                        disagreement: reader_disagreement(&snapshot, criterion.id),
+                        reviewed: snapshot.is_reviewed(criterion.id),
+                        resolved: ResultFilter::Resolved.includes(&snapshot, criterion.id),
                     }
                 }
             }
@@ -86,7 +93,8 @@ fn AssessmentRow(
     selected: bool,
     assessment: Option<CriterionAssessment>,
     correction: Option<HumanCorrection>,
-    disagreement: bool,
+    reviewed: bool,
+    resolved: bool,
 ) -> Element {
     let AnalysisContext { mut state } = use_context::<AnalysisContext>();
     let id = criterion.id;
@@ -126,39 +134,40 @@ fn AssessmentRow(
             if let Some(assessment) = assessment {
                 p { class: "mt-2 text-sm", "{assessment.reason}" }
             }
-            if disagreement {
-                p { class: "mt-2 text-sm text-warning", "Reader disagreement on matching evidence" }
-            }
+            if resolved { span { class: "badge badge-info mt-2", "Uncertainty resolved; initial finding retained" } }
+            if reviewed { span { class: "badge badge-outline mt-2", "Reviewed by you" } }
         }
     }
 }
 
-/// Compare independent readers only when they received the same criterion and candidate frames.
-pub fn reader_disagreement(snapshot: &RunSnapshot, criterion_id: Uuid) -> bool {
-    let findings = snapshot
-        .reader_results
-        .iter()
-        .filter_map(|result| {
-            snapshot
-                .checkpoint
-                .jobs
-                .iter()
-                .find(|job| {
-                    job.id == result.job_id
-                        && job.kind == JobKind::Reader
-                        && job.criterion_id == criterion_id
-                })
-                .map(|job| (job, result.completion.value.judgment))
-        })
-        .collect::<Vec<_>>();
-    findings
-        .iter()
-        .enumerate()
-        .any(|(index, (left, left_judgment))| {
-            findings[index + 1..].iter().any(|(right, right_judgment)| {
-                left.profile_id != right.profile_id
-                    && left.frame_ids == right.frame_ids
-                    && left_judgment != right_judgment
-            })
-        })
+/// A result can resolve uncertainty while still needing attention because a requirement was not met.
+#[derive(Clone, Copy, PartialEq)]
+pub enum ResultFilter {
+    All,
+    NeedsAttention,
+    Resolved,
+}
+impl ResultFilter {
+    pub fn includes(self, snapshot: &RunSnapshot, criterion_id: Uuid) -> bool {
+        let assessment = snapshot
+            .checkpoint
+            .assessments
+            .iter()
+            .find(|item| item.criterion_id == criterion_id);
+        let effective = snapshot
+            .corrections
+            .iter()
+            .rev()
+            .find(|item| item.criterion_id == criterion_id)
+            .map(|item| item.judgment)
+            .or_else(|| assessment.map(|item| item.judgment));
+        match self {
+            Self::All => true,
+            Self::NeedsAttention => effective != Some(Judgment::Met),
+            Self::Resolved => {
+                assessment.is_some_and(|item| item.initial.judgment == Judgment::CannotVerify)
+                    && effective.is_some_and(|judgment| judgment != Judgment::CannotVerify)
+            }
+        }
+    }
 }

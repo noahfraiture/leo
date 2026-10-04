@@ -19,10 +19,9 @@ pub fn judgment_class(judgment: Judgment) -> &'static str {
 pub fn stage_label(stage: RunStage) -> &'static str {
     match stage {
         RunStage::Preparing => "Preparing evidence",
-        RunStage::Reading => "Independent readers",
-        RunStage::Reviewing => "Reviewing evidence",
-        RunStage::Gathering => "Gathering more evidence",
-        RunStage::FinalReview => "Final review",
+        RunStage::Scanning => "Scanning the complete checklist",
+        RunStage::Consolidating => "Assembling checklist results",
+        RunStage::Rechecking => "Taking a closer look",
         RunStage::Ready => "Ready for review",
         RunStage::Paused => "Processing paused",
     }
