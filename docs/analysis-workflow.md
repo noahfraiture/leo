@@ -1,114 +1,97 @@
 # Analysis workflow
 
-Leo prepares an exercise once, then evaluates completed recordings against the operator's saved checklist and reference images. Models supply observations and a proposed assessment; the operator can inspect footage and record a separate correction.
+Leo prepares an exercise once and evaluates completed recordings against one operator-confirmed checklist. Models supply cited observations and proposed results. The operator owns policy, corrections and the final student assessment.
 
-## Operator and automatic steps
+## Operator flow
 
-| Operator | Automatic work | Saved result |
+| Operator step | Automatic work | Saved result |
 | --- | --- | --- |
-| Create an exercise; paste and edit checklist steps | Assign stable criterion IDs; validate structure and reference links | Editable draft |
-| Request Format and review | Ask the chosen checklist assistant for a source-linked proposal and questions | Temporary proposal, never an analysis instruction |
-| Upload JPEG/PNG; enter object, state and purpose; link steps | Decode and validate the file, preserve original bytes, prepare a preview | Manually labeled reference assets; no model request |
-| Apply, edit or dismiss the proposal; Save configuration | Atomically save the exact draft and publish an immutable revision | One operator-owned checklist |
-| Choose recording and model set; Start new analysis | Freeze inputs, verify recording sources and capacity, execute independent model jobs | Separate run directory |
-| Select a result and a citation | Resolve camera and recording offset; prepare and serve a bounded clip | Playable candidate footage with seek and context controls |
-| Save my assessment | Append a reasoned correction and optional candidate citations | Human history separate from machine results |
-| Revise configuration and rerun | Publish another revision and another run | Previous inputs, outputs and corrections remain intact |
+| 1. Name the exercise, enter context, choose ordering policy, paste original steps | Assign stable criterion IDs | Editable draft |
+| 2. Upload JPEG/PNG references, label their object/state/purpose and link steps | Validate images; preserve original bytes and prepare previews, without AI | Reference assets |
+| 3. Optionally request wording assistance; review suggestions and answer questions | Video-blind, source-linked review from the selected model | Source, editable proposal and questions remain distinct |
+| Edit the final checklist freely; apply or dismiss the proposal | Preserve operator-added steps, deletions, order and reference links | One authoritative final checklist |
+| 4. Review and confirm | Check source/answer freshness; publish an immutable revision | Confirmed exercise |
+| Select a completed recording and one analysis model; start | Freeze inputs and execute the simple flow below | A new independent run |
+| Review results, original clips and any closer look; correct findings if needed | Validate citations and save append-only correction history | Original model findings plus operator corrections |
+| Mark each result reviewed; save the overall student assessment | Bind the assessment to those exact results | Pass / Needs practice / Needs more evidence, chosen by the operator |
 
-Draft edits and formatting comments never become grading requirements without the operator saving them into the checklist. The assistant cannot silently publish a revision. An outstanding proposal is marked stale if its source draft changes. Formatter comments use the tested source-linked question format; they are not a second checklist. Save explains missing required reference metadata before publication.
+Drafts can be saved at any step. Edited or dismissed proposals survive saving. A source edit does not silently change the final wording or reuse an answer to a different question: the operator must reconfirm or remove stale questions. Added final steps can explicitly be included in preparation without replacing earlier source text. Unanswered questions remain pending policy, never invented requirements.
 
-## Runtime flow
+## Automatic analysis
 
 ```text
-published exercise + recorded session + selected model set
-  |
-  v
-freeze and validate inputs
-  |
-  v
-independent readers, same criterion and candidate windows
-  |
-  v
-visual reviewer checks every window, even when readers agree
-  |
-  +--> unresolved evidence: one bounded additional sampling round
-  |      followed by independent reading and visual review
-  v
-text-only selection accounts for every visual review
-  |
-  +--> required facts unresolved or decisive pack too large
-  |      -> Cannot verify, with the actual limitation
-  v
-final reviewer sees decisive, contextual and contrary images
-  |
-  v
-Met / Not met / Cannot verify + evidence + preserved raw findings
+confirmed checklist + context + operator answers + labeled references
+                         + completed recording + one model
+                                      |
+                         freeze inputs and verify sources
+                                      |
+                overlapping images: scan the WHOLE checklist
+                      once per chronological window
+                                      |
+                one text consolidation of all cited observations
+                                      |
+                Met / Not met / Cannot verify + policy issues
+                                      |
+                optional independent closer look for a criterion
+                original images + full checklist + operator policy
+                WITHOUT the earlier verdict or model explanation
+                                      |
+                preserve both findings and their original evidence
+                                      |
+                       operator review and assessment
 ```
 
-Every criterion receives the recording's eligible initial coverage. A reader cannot inspect another reader's output. The visual reviewer sees individual findings and actual footage. The selector organizes existing reviews; it does not claim to see images or produce the final candidate judgment.
+Reference labels and context are always supplied. Actual reference pixels and automatic closer looks are separate options, both off by default while their quality benefit is assessed. A manual closer look is available even with automatic rechecks off. Both use the same one-request allowance per criterion; an explicit retry of a failed request is not another evidence search.
 
-Selection must account for every review exactly once as supporting, contradictory, irrelevant or unresolved, with reasons and source IDs. New runs give the selector short, separate review and candidate-frame aliases. The exact alias dictionaries and original typed reply are saved; translation back to source IDs still validates complete accounting and review-window membership. Existing frozen v1 runs retain their original request contract. Explicit negative observations from either readers or reviewers are automatically included in the required final comparison. An oversized comparison is not truncated to obtain a result. The final reviewer receives actual selected images and must retain uncertainty when order, identity or attempts cannot be established together. There is no majority vote.
+A closer look covers the original citations and an optional operator-selected timestamp, with two seconds of context on either side, within one episode of at most one minute. The model's image limit includes relevant reference images. The planner refuses to drop contrary or distant citations to force a result. If additional eligible images cannot fit, it explains the limitation for manual review. One criterion's sampling does not consume another criterion's access to the same episode.
 
-These are evidence and provenance checks, not a guarantee that a model correctly understands the footage. The operator must still inspect important judgments. Pauses or checklist reading alone do not establish failure; exercise policy comes from the operator's checklist. Missing samples do not prove an omitted step. Hidden state stays unverified.
+All returned criteria and citations are validated. Consolidation must account for every checklist item and can cite only that item's observed frames. Reference images cannot count as student evidence. Contradictory decisive findings remain Cannot verify; both are retained. Images cannot resolve an unspecified operator policy. Missing observations are not proof that a step was omitted.
 
-## Component map
+This pipeline has no multiple-reader aggregation, per-window second review, evidence selector, index retrieval agent, object tracker, demonstration calibration or native-video inference.
 
-| Component | Owns | Does not own |
-| --- | --- | --- |
-| `backend::exercise` | Draft/revision persistence, manual imports, source-linked formatting contract | Candidate judgments or automatic publication |
-| `backend::model` | Explicit transports, structured completions, model identity and memory scheduling | Exercise policy or provider fallback |
-| `analysis::evidence` | Source hashes, candidate IDs, recorded participation/cadence, extraction and playback | Reference labels or model conclusions |
-| `analysis::run::engine` | Stage execution, admission waves, accepted response publication and progress | Rendering |
-| `analysis::run::workflow` | Initial visual reviews and one additional evidence round | Infinite self-review loops |
-| `analysis::run::selection` | Review accounting, complete final comparison and assessment projection | Treating textual agreement as visual proof |
-| `analysis::run::store` | Frozen inputs, responses, checkpoint recovery and correction history | Mutable provider secrets |
-| `analysis::reconcile` | Typed findings and validation of citations/selection/corrections | Professional truth about an exercise |
-| `app::exercises` | Root-owned editable configuration and proposal state | Publishing without a user action |
-| `app::analysis` | Root-owned run, playback and correction tasks addressed by session/run ID | Recording supervision |
-| `app::operator` | Recording lifecycle and session selection | The replaced single-model analysis checkpoint |
-| `app::inference` | One application-wide allowance shared by formatting and analysis | Unloading external model servers |
-| `app::media` | Opaque registered playback assets with byte-range responses | Arbitrary model-provided paths |
-| `app::views::analyze` | Exercise setup and recording evaluation screens | Business persistence rules |
+## Responsibilities
 
-## Storage and restart
+| Component | Responsibility |
+| --- | --- |
+| `backend::exercise` | Original/final checklist, source-linked preparation, manual reference imports and immutable publications |
+| `backend::model` | Provider transport, structured output contracts and model capacity |
+| `analysis::evidence` | Recorded sampling periods, source hashes, candidate identities, extraction and playback |
+| `analysis::run::engine` | Sequential scan, consolidation, optional recheck, explicit resume and progress |
+| `analysis::run::jobs` | Stateless prompts, operator policy and independent recheck requests |
+| `analysis::run::recheck` | One bounded episode preserving required citations |
+| `analysis::run::results` | Response validation and conservative combination of preserved findings |
+| `analysis::run::store` / `legacy` | Atomic persistence, recovery and read-only older history |
+| `analysis::run::review` | Append-only corrections, review marks and human student assessments |
+| `app::exercises` / `app::analysis` | Root-owned state and tasks scoped by exercise, recording and run |
+| `app::inference` / `app::media` | Shared inference admission and registered, bounded playback assets |
+
+## Storage and recovery
 
 ```text
-data/exercises/<exercise-id>/
+exercises/<exercise-id>/
   draft.json
   revisions/<revision-id>.json
   assets/<asset-id>.jpg or .png
-
-data/sessions/<session-directory>/analyses/<run-id>/
-  inputs.json         frozen checklist, refs, models, policy, source manifest
-  checkpoint.json     stage, jobs, coverage, extra evidence and assessments
-  references/         copied original reference bytes for this run
-  responses/          original typed replies and sent-image identities
-  review.json         human corrections only
-  cache/              reproducible frame and playback derivatives
+sessions/<recording>/analyses/<run-id>/
+  inputs.json             immutable schema-2 configuration and source identities
+  checkpoint.json         current jobs, evidence and result projection
+  responses/              accepted typed replies and exact sent-image hashes
+  references/             copied original reference bytes
+  review.json             append-only per-criterion human corrections
+  operator-review.json    review marks and overall human assessments
+  cache/                  reproducible images and playback clips
 ```
 
-Settings schema 4 stores named provider connections, model profiles, sets, execution limits and evidence limits. It does not migrate earlier schemas. Settings changes take effect after restart. Capture remains available when an optional model configuration is missing or malformed; a selected valid set is checked independently of unrelated incomplete sets.
+No provider secrets are stored in run inputs. Resume uses current credentials only when the saved connection identity matches. Changed source recordings or changed cached images are rejected. An interrupted checkpoint is reconstructed from durable responses; completed requests are not repeated. Provider failures pause without silent retry. A request interrupted before its response was saved may be sent again only through explicit Resume.
 
-Each run snapshots endpoint and transport choices without credentials. Resume requires matching connection identity and obtains credentials from current private settings. A changed source recording is rejected. Moving the whole recording directory preserves relative source identities.
+Run-format 1 history remains discoverable as a read-only summary. Its original inputs, evidence, replies and correction files stay in place. It cannot resume through the schema-2 engine. A new analysis creates a separate run instead of migrating or overwriting it.
 
-Responses are durably saved before checkpoints. On restart, a saved response repairs an interrupted checkpoint projection. Successful jobs are reused; pending or failed jobs can be retried by Resume. The review screen exposes the frozen model identities, output/image limits, sampling settings and resource limits; changing current Settings never changes an existing run. A network request interrupted before its response was saved may be sent again. Processing failure is shown separately from candidate failure.
+The overall assessment is valid only for a ready run whose current findings and corrections match the reviewed version. New evidence or a correction invalidates affected review marks; a pending or failed recheck makes the previous overall assessment historical. Review state never transfers to another recording or rerun.
 
-Human corrections include criterion, judgment, reason, citations, time and any superseded correction ID. Corrections using outside information are marked. They do not alter original model output or future prompts.
+Settings schema 4 remains compatible. Preparation and evaluation select model profiles directly; old model-set settings no longer select readers for this flow. Settings changes still require restart. Recording remains available with missing optional analysis configuration.
 
-## Evidence and resource limits
+## Validation and limits
 
-- A candidate ID resolves to camera, session time, source segment and segment-relative offset. Saved request metadata includes hashes of the bytes actually sent.
-- References are reserved in every applicable image budget and labeled ineligible as candidate evidence. No model call is needed to import or caption them.
-- Initial windows preserve complete available camera frame sets and recorded sampling semantics. Gaps remain explicit.
-- One additional round per criterion can inspect at most eight eligible intervals and 128 additional images. Denser samples are distributed across requested spans; a partial search is not proof of omission.
-- A local model profile has a declared memory allowance in MiB. The total allowance is capped at 49152 MiB for the current laptop. Hosted models use zero. Concurrency and requests per model are separate limits.
-- Aliases of the same endpoint/model share scheduling capacity. Sequential requests do not unload resident weights; the external model server must manage eviction. Settings estimates do not certify actual memory fit.
-- Candidate playback creates at most one minute of MP4 context within one source segment, with a 64 MiB derivative ceiling. It preserves the original MKV and does not bridge recording gaps.
+Deterministic tests verify contracts, citations, source preservation, request counts, independent evidence, recovery and review invalidation. Desktop acceptance uses actual WKWebView, two fixture cameras, recording, FFmpeg extraction, playback and operator controls, with a scripted loopback model service. These establish software behavior, not accuracy or readiness for autonomous student grading.
 
-## Verification boundaries
-
-The format contract was selected by a recorded comparison of faithful rewriting and matched interpretation. The concise Luna format preserved the source requirements in that bounded test. This does not hardcode Luna: the operator chooses the checklist assistant. Smaller tested Gemma configurations changed meaning or omitted useful questions and were not selected for that experiment.
-
-Provider, store, evidence and coordinator tests cover deterministic contracts and failure recovery. Desktop scenarios use real WKWebView, recording, extraction and playback with a loopback model service. Native reference upload and model quality require the final operator walkthrough; synthetic file events or mock answers cannot establish those results. Keep its observed results in the implementation report, separately from automated assertions.
-
-Tracking, demonstration/calibration features and native-video inference are outside this implementation. Operators test a known-correct recording through the ordinary Analyze workflow and manually refine their checklist and references.
+Reference file decoding and provenance are covered by backend tests; the desktop acceptance does not automate the native file chooser. Long-recording accuracy, model runtime and the optional additions need separate controlled evaluations. Large consolidations can exceed a provider's context capacity: the run pauses rather than silently discarding observations. Source footage still may not reveal hidden states or small actions. Candidate judgments require operator review.

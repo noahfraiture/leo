@@ -2,7 +2,7 @@
 
 Leo is a local, session-scoped recording and analysis application for zero or more configured RTSP cameras. The desktop process owns preview, direct host recording, operator metadata, completed-session discovery, and explicit model analysis. A session is portable under one configured data root.
 
-The [analysis workflow](analysis-workflow.md) details exercise configuration, independent model jobs, evidence review and storage. The earlier [capture architecture map](architecture-map.html) documents recording ownership; its single-model analysis path has been replaced.
+The [analysis workflow](analysis-workflow.md) details exercise preparation, whole-checklist scanning, evidence review and storage. The earlier [capture architecture map](architecture-map.html) remains useful for recording ownership; use the workflow document for current analysis.
 
 ## Workspace
 
@@ -26,12 +26,11 @@ each configured camera RTSP (0..N)
 
 events.jsonl + finalized MKVs + recording-complete
                                 |
-                                `--> frozen exercise + reference pack + model set
-                                      --> timestamped candidate images
-                                      --> independent readers -> visual review
-                                      --> one optional evidence revisit
-                                      --> evidence selection -> final visual comparison
-                                      --> analyses/<run-id>/ + separate human corrections
+                                `--> confirmed exercise + optional references + one model
+                                      --> overlapping image windows, whole-checklist scan
+                                      --> one consolidation of cited observations
+                                      --> optional independent closer look per criterion
+                                      --> original evidence + corrections + human assessment
 ```
 
 Preview and recording make independent RTSP/TCP connections. Preview availability does not establish recording health, and a failed preview does not stop a recorder. Camera participation and cadence are analysis settings only: an excluded camera remains visible and records for the complete active session.
@@ -45,11 +44,10 @@ Preview and recording make independent RTSP/TCP connections. Preview availabilit
 | `session::controller` | Creates an active event log and durably appends validated operator actions. |
 | `session::event_log` | Defines and strictly replays the private versioned JSONL schema into a completed `Session`. |
 | `session::catalog` | Lists only ended, marker-gated sessions and durably creates the completion marker. |
-| `exercise` | Saves one operator-owned checklist, immutable revisions and manually imported reference originals; AI assistance produces temporary proposals only. |
+| `exercise` | Saves one operator-owned checklist, immutable revisions and manually imported reference originals; AI assistance produces source-linked proposals and questions, kept distinct from operator decisions. |
 | `model` | Explicit provider transports, structured request contracts and scheduling under a shared memory allowance. |
 | `analysis::evidence` | Reuses recorded sampling schedules, resolves source identities, extracts bounded images and seekable playback clips. |
-| `analysis::run` | Freezes inputs and schedules independent readers, visual reviews, bounded extra evidence, selection and final comparison; resumes durable jobs. |
-| `analysis::reconcile` | Typed findings, citations, evidence selection and separate human corrections. |
+| `analysis::run` | Freezes inputs, scans each window once for all criteria, consolidates observations, optionally rechecks one episode, and saves separate operator review history. |
 | `analysis::session` / `analyzer` | Historical single-model evaluator retained for reproducible prior experiments; not the desktop Analyze flow. |
 
 `recording::recorder` remains one module despite its size. Its command actor, camera supervisors, FFmpeg attempt pump, and cleanup paths share stop and fault ownership. Splitting them would require a wider process-lifecycle API without removing state-machine complexity. About three fifths of the file is colocated concurrency and cleanup coverage.
@@ -65,11 +63,11 @@ Leo owns production configuration in one strict, versioned `settings.json`. The 
 
 Settings schema 4 uses camel-case JSON and rejects unknown fields and unsupported versions. No migration is provided. Recording settings remain independent from model configuration. It stores cameras, storage, recorder timeout, logging, monitoring profiles and named model connections/profiles/sets. Camera and monitoring IDs are nonzero, immutable and not reused. Zero cameras is valid.
 
-Each camera has a nonblank name and an RTSP URL. Participation and monitoring cadence affect later sampling, not capture. `workflow.providers` stores names, explicit Responses or Chat Completions transport, normalized HTTP(S) addresses and private keys. Each model selects a provider, its served identifier, memory allowance in MiB, total image limit, optional output-token cap and optional reasoning effort. A model set chooses independent readers, one visual reviewer and one checklist assistant. Different sets may share model profiles.
+Each camera has a nonblank name and an RTSP URL. Participation and monitoring cadence affect later sampling, not capture. `workflow.providers` stores names, explicit Responses or Chat Completions transport, normalized HTTP(S) addresses and private keys. Each model selects a provider, its served identifier, memory allowance in MiB, total image limit, optional output-token cap and optional reasoning effort. Preparation and analysis each select a model profile directly. Older model-set settings remain readable, but the current flow does not use their reader/reviewer roles.
 
-Execution policy controls total local model memory, simultaneous requests, requests per model and timeout. Hosted profiles have memory cost zero but still count toward concurrency. Local model allowances are estimates supplied by the operator, not measured RAM. A local server must evict idle models when required; request scheduling does not unload them. Evidence window span, overlap and image derivatives are shared across readers. All request image limits include reference images.
+Execution policy controls total local model memory, simultaneous requests, requests per model and timeout. Hosted profiles have memory cost zero but still count toward concurrency. Local model allowances are estimates supplied by the operator, not measured RAM. A local server must evict idle models when required; request scheduling does not unload them. The current analysis executes requests sequentially with one model. Evidence window span, overlap and image derivatives are frozen per run. All request image limits include reference images.
 
-Invalid optional model configuration cannot disable recording. Each selected set resolves independently, so an unrelated incomplete set cannot block a usable one. Numeric editor text is retained and validated instead of silently replacing an invalid entry with its previous value. Recorder timeout must fit FFmpeg microseconds and a Rust deadline; reconnect delay remains one second and graceful Stop five seconds.
+Invalid optional model configuration cannot disable recording. Each selected model resolves independently, so an unrelated incomplete model set cannot block a usable profile. Numeric editor text is retained and validated instead of silently replacing an invalid entry with its previous value. Recorder timeout must fit FFmpeg microseconds and a Rust deadline; reconnect delay remains one second and graceful Stop five seconds.
 
 `dataRoot: null` selects the platform default. Save validates recording fields, creates required settings and session directories, and writes owner-only settings. Invalid optional profile definitions can be saved with warnings so they cannot prevent correcting recording configuration. Malformed optional JSON sections load independently with a visible feature error; the original file is not rewritten on load. Diagnostic log-directory creation is best effort.
 
@@ -203,6 +201,7 @@ All files needed to move and resume a completed session remain below one directo
         |   |-- responses/
         |   |-- references/
         |   |-- review.json
+        |   |-- operator-review.json
         |   `-- cache/
         `-- recordings/
             `-- camera-<id>/
@@ -233,19 +232,19 @@ Discovery scans direct children only and rejects symbolic links. A completed ses
 
 Absolute paths are excluded from checkpoint plan identity, so a completed directory can move intact to another local filesystem path. Leo does not perform that move.
 
-## Reference-Based Analysis
+## Checklist And Evidence Analysis
 
-Analyze has two operator steps: prepare an exercise, then evaluate a completed recording. The operator saves exactly one checklist with optional manually labeled JPEG/PNG references. AI formatting remains a proposal until the operator applies, edits and saves it. Draft changes or comments cannot silently reach analysis.
+The operator prepares an exercise through four screens: source/context, reference images, clarification/final wording, and confirmation. The original checklist, model proposals, questions, operator answers and one final checklist stay separate. Source changes make old answers visibly stale; confirmation requires explicit reconciliation. A saved publication is immutable.
 
-`create_run` freezes the published exercise revision, copied reference originals, model set, execution policy, source hashes and full planned coverage. It validates the reference-plus-candidate image capacity and memory policy before publishing the run. `execute_run` progresses through independent reading, visual review of every window, at most one additional evidence round per criterion, explicit evidence selection and a final visual comparison. It saves original outputs separately from the derived result. Reference examples cannot be cited as candidate evidence.
+`create_run` freezes that revision, reference originals, one model, evidence options, execution limits, source hashes and all planned windows. Every overlapping window receives the complete checklist once. A text consolidation combines all cited observations into one result per criterion. There is no multi-reader vote, per-window visual reviewer, evidence selector or agent retrieval loop.
 
-The evidence selector accounts for every visual review. Explicit negative observations from readers or reviewers remain in the required final evidence pack even if the selector would omit them. Selection is not a judgment: the final reviewer receives actual candidate images. Required unresolved comparisons or an oversized decisive pack produce Cannot verify, not a pass obtained by dropping evidence. Matching model answers alone cannot establish correctness.
+An optional independent closer look receives original images, reference pixels if enabled, and the operator's policy, without the first verdict. It is limited to one episode per criterion and must retain every original citation. Distant or over-budget evidence remains for human review. Reference pixels and automatic rechecks default off; manual rechecks share the same single allowance. Configuration ambiguity and unresolved contradictions stay Cannot verify.
 
-Sampling periods retain inclusive starts, exclusive ends, recorded camera participation and cadence. Frame sets remain atomic across available cameras. Recording gaps are explicit; no automatic pre-roll, post-roll or native-video inference is added. Denser revisits are bounded and only use eligible recorded periods. Sampled absence cannot prove omission or hidden state.
+Sampling preserves recorded camera participation, cadence, source identities and gaps. Missing samples cannot prove omission or hidden state. Responses are saved before checkpoints; explicit Resume reuses completed jobs and preserves failures. Older strategy runs are read-only summaries with their original files retained, not resumed under the replacement engine.
 
-Accepted responses are saved before checkpoint projection. Resume reconstructs completed jobs and retries unfinished work using the original model/input snapshots and current matching credentials. Reruns create new UUID directories. Corrections append to a separate history, leaving model judgments unchanged.
+The operator can inspect original footage, save a reasoned correction, mark each current result reviewed and record an overall student assessment. Corrections never overwrite model output. A changed result makes its review and the previous overall assessment stale. The next run starts with fresh review state.
 
-The candidate viewer prepares a bounded MP4 derivative from the cited MKV segment and serves it through an opaque registered asset with byte-range support. Playback opens at the cited session time, can seek, and can extend context to at most one minute within the same segment. Reference examples remain separately labeled. See [analysis workflow](analysis-workflow.md) for component contracts and failure handling.
+The candidate viewer creates a bounded MP4 derivative from the cited MKV segment with seeking and up to one minute of context. Reference examples stay separately labeled. See [analysis workflow](analysis-workflow.md) for contracts, persistence and limits.
 
 ## End-To-End Coverage
 
@@ -334,5 +333,5 @@ Structured events cover settings state, preview startup, recorder attempts and c
 - Parsed and filterable in-app log viewing is not implemented; see [issue #50](https://github.com/noahfraiture/leo/issues/50). Automatic log retention is not implemented; see [issue #51](https://github.com/noahfraiture/leo/issues/51). Automatic deletion, export and storage forecasting are absent. Candidate evidence playback is available through bounded derived clips.
 - Physical camera acceptance and timeout calibration remain separate hardware work. Current acceptance uses local virtual cameras and fixtures only.
 - Camera discovery, keychain integration, hot apply, automatic restart, and moving or aggregating old sessions are not implemented.
-- A bounded request is buffered in memory. Each criterion currently covers all eligible temporal windows, so long checklists can create many model calls. The memory allowance estimates model residency and cannot force external-server eviction. Analysis has durable resume but no explicit Cancel control.
+- A bounded request is buffered in memory. Each eligible temporal window is scanned once for the entire checklist. Long recordings can still create large consolidations; provider context failures pause explicitly without truncation or fallback. The memory allowance estimates model residency and cannot force external-server eviction. Analysis has durable resume but no explicit Cancel control.
 - Packaged media executables, multiple concurrent sessions or analyses, and recording cancellation are not implemented.
