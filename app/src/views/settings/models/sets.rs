@@ -50,9 +50,9 @@ pub fn ModelSets() -> Element {
                             class: "select select-bordered w-full",
                             value: "{set.reviewer_id}",
                             onchange: move |e| state.write().draft.workflow.model_sets[i].reviewer_id = e.value(),
-                            option { value: "", "Select reviewer" }
+                            option { value: "", selected: set.reviewer_id.is_empty(), "Select reviewer" }
                             for model in &settings.models {
-                                option { value: "{model.id}", "{model.name}" }
+                                option { key: "{model.id}", value: "{model.id}", selected: model.id == set.reviewer_id, "{model.name}" }
                             }
                         }
                     }
@@ -62,9 +62,9 @@ pub fn ModelSets() -> Element {
                             class: "select select-bordered w-full",
                             value: "{set.formatter_id}",
                             onchange: move |e| state.write().draft.workflow.model_sets[i].formatter_id = e.value(),
-                            option { value: "", "Select checklist model" }
+                            option { value: "", selected: set.formatter_id.is_empty(), "Select checklist model" }
                             for model in &settings.models {
-                                option { value: "{model.id}", "{model.name}" }
+                                option { key: "{model.id}", value: "{model.id}", selected: model.id == set.formatter_id, "{model.name}" }
                             }
                         }
                     }

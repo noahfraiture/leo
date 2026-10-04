@@ -45,8 +45,8 @@ pub fn Connections() -> Element {
                                     Transport::ChatCompletions
                                 };
                             },
-                            option { value: "chat", "Chat Completions (LM Studio / OpenRouter)" }
-                            option { value: "responses", "Responses (OpenAI)" }
+                            option { value: "chat", selected: provider.transport == Transport::ChatCompletions, "Chat Completions (LM Studio / OpenRouter)" }
+                            option { value: "responses", selected: provider.transport == Transport::Responses, "Responses (OpenAI)" }
                         }
                     }
                     label {

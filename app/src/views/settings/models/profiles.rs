@@ -30,9 +30,10 @@ pub fn Models() -> Element {
                             class: "select select-bordered w-full",
                             value: "{model.provider_id}",
                             onchange: move |e| state.write().draft.workflow.models[i].provider_id = e.value(),
-                            option { value: "", "Select connection" }
+                            option { value: "", selected: model.provider_id.is_empty(), "Select connection" }
                             for p in &settings.providers {
-                                option { value: "{p.id}", "{p.name}" }
+                                // Select the option when it mounts, before the native select has a value.
+                                option { key: "{p.id}", value: "{p.id}", selected: p.id == model.provider_id, "{p.name}" }
                             }
                         }
                     }
