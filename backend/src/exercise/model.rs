@@ -97,9 +97,16 @@ pub struct ExerciseDraft {
     pub edit_version: u64,
     pub checklist: Checklist,
     pub references: Vec<ReferenceAsset>,
+    #[serde(default)]
+    pub preparation: super::Preparation,
 }
 
 impl ExerciseDraft {
+    /// Original wording for preparation; analysis uses only the final checklist.
+    pub fn source_checklist(&self) -> &Checklist {
+        self.preparation.source.as_ref().unwrap_or(&self.checklist)
+    }
+
     /// Validate structure and links while allowing unfinished operator wording in a draft.
     pub fn validate(&self) -> Result<()> {
         if self.schema_version != SCHEMA_VERSION || self.id.is_nil() {
@@ -133,12 +140,30 @@ impl ExerciseDraft {
                 ));
             }
         }
+        self.preparation.validate(&self.checklist)?;
         Ok(())
     }
 
     /// Require a usable final checklist without inventing exercise policy or visual facts.
     pub fn validate_for_publication(&self) -> Result<()> {
         self.validate()?;
+        if self.preparation.questions.iter().any(|question| {
+            self.source_checklist()
+                .criteria
+                .iter()
+                .find(|item| item.id == question.criterion_id)
+                .is_none_or(|item| item.text != question.source_text)
+        }) {
+            return Err(Error::Invalid(
+                "Review or remove questions whose original wording changed".into(),
+            ));
+        }
+        if self.preparation.needs_reconciliation()? {
+            return Err(Error::Invalid(
+                "Review the final checklist after changing its source or clarification answers"
+                    .into(),
+            ));
+        }
         if self.name.trim().is_empty()
             || self.checklist.format_version.trim().is_empty()
             || self.checklist.criteria.is_empty()
@@ -176,4 +201,6 @@ pub struct ExerciseRevision {
     pub name: String,
     pub checklist: Checklist,
     pub references: Vec<ReferenceAsset>,
+    #[serde(default)]
+    pub preparation: super::Preparation,
 }

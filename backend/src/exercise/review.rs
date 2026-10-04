@@ -68,7 +68,7 @@ impl ChecklistProposal {
             exercise_id: draft.id,
             edit_version: draft.edit_version,
             draft_fingerprint: draft_fingerprint(draft)?,
-            source_text: draft.checklist.source_text(),
+            source_text: draft.source_checklist().source_text(),
             criteria,
             comments,
         };
@@ -79,9 +79,8 @@ impl ChecklistProposal {
     /// Reject responses for changed drafts and invalid source/comment anchors.
     pub fn validate_against(&self, draft: &ExerciseDraft) -> Result<()> {
         if self.exercise_id != draft.id
-            || self.edit_version != draft.edit_version
             || self.draft_fingerprint != draft_fingerprint(draft)?
-            || self.source_text != draft.checklist.source_text()
+            || self.source_text != draft.source_checklist().source_text()
         {
             return Err(Error::StaleProposal);
         }
@@ -121,5 +120,12 @@ impl ChecklistProposal {
 }
 
 fn draft_fingerprint(draft: &ExerciseDraft) -> Result<String> {
-    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(draft)?)))
+    let mut inputs = draft.clone();
+    inputs.preparation.last_review = None;
+    inputs.preparation.proposal = None;
+    inputs.edit_version = 0;
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&inputs)?)
+    ))
 }

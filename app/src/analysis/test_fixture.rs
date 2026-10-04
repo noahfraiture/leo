@@ -56,6 +56,7 @@ pub fn snapshot(session_id: Uuid, run_id: Uuid, stage: RunStage) -> RunSnapshot 
             }],
         },
         references: Vec::new(),
+        preparation: Default::default(),
     };
     let jobs = vec![JobRecord {
         id: "reader-job".into(),

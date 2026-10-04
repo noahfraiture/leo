@@ -37,6 +37,7 @@ impl ExerciseStore {
                 criteria: Vec::new(),
             },
             references: Vec::new(),
+            preparation: Default::default(),
         };
         let directory = self.root.join(draft.id.to_string());
         fs::create_dir(&directory)?;
@@ -119,6 +120,7 @@ impl ExerciseStore {
             name: draft.name.clone(),
             checklist: draft.checklist.clone(),
             references: draft.references.clone(),
+            preparation: draft.preparation.clone(),
         };
         persistence::write_json(
             &directory
@@ -151,6 +153,7 @@ impl ExerciseStore {
             edit_version: revision.edit_version,
             checklist: revision.checklist.clone(),
             references: revision.references.clone(),
+            preparation: revision.preparation.clone(),
         }
         .validate_for_publication()?;
         Ok(revision)

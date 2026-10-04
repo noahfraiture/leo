@@ -1,4 +1,4 @@
-//! Checklist wording assistance validated by the bounded format comparison.
+//! Video-blind wording assistance. Structure is validated; fidelity remains an operator decision.
 //! Responses remain source-linked proposals and never publish an exercise revision.
 
 use std::collections::HashMap;
@@ -17,7 +17,7 @@ use super::{
 /// Identifies the concise operator text format selected by the format-fidelity experiment.
 pub const CHECKLIST_FORMAT_VERSION: &str = "leo-checklist-concise-v1";
 
-const INSTRUCTIONS: &str = "You format an operator-owned exercise checklist. Do not evaluate a candidate or invent exercise policy. Preserve source language, every action, negation, quantity, condition, allowed order, repetition and retry rule. One output criterion per source criterion, retaining the exact source_id. Keep compound requirements together. Do not assume numbered steps impose strict order unless the source says so. Do not replace ambiguous wording by your preferred interpretation: preserve it and ask a comment question. Suggested policy changes, assumptions and questions belong only in comments, never in criterion text. No generic safety advice or extra domain instructions. Output a JSON object matching the supplied schema. No markdown fences.\nRewrite each source as concise action/outcome text in its existing language. No field labels or extra headings.";
+const INSTRUCTIONS: &str = "You format an operator-owned exercise checklist. Do not evaluate a candidate or invent exercise policy. Preserve source language, every action, negation, quantity, condition, allowed order, repetition and retry rule. One output criterion per source criterion, retaining the exact source_id. Keep compound requirements together. Use the supplied operator order policy. If unspecified, ask rather than assuming that list position imposes order. Use operator answers as clarification, never unanswered questions as requirements. Do not replace ambiguous wording by your preferred interpretation: preserve it and ask a comment question. Suggested policy changes, assumptions and questions belong only in comments, never in criterion text. No generic safety advice or extra domain instructions. Output a JSON object matching the supplied schema. No markdown fences.\nRewrite each source as concise action/outcome text in its existing language. No field labels or extra headings.";
 
 #[derive(Serialize)]
 struct SourceCriterion<'a> {
@@ -66,9 +66,9 @@ pub async fn format_checklist(
 
 fn formatting_job(draft: &ExerciseDraft) -> Result<StructuredJob> {
     draft.validate()?;
-    if draft.checklist.criteria.is_empty()
+    if draft.source_checklist().criteria.is_empty()
         || draft
-            .checklist
+            .source_checklist()
             .criteria
             .iter()
             .any(|item| item.text.trim().is_empty())
@@ -78,7 +78,7 @@ fn formatting_job(draft: &ExerciseDraft) -> Result<StructuredJob> {
         ));
     }
     let source = draft
-        .checklist
+        .source_checklist()
         .criteria
         .iter()
         .map(|item| SourceCriterion {
@@ -93,7 +93,12 @@ fn formatting_job(draft: &ExerciseDraft) -> Result<StructuredJob> {
             "{INSTRUCTIONS}\nSchema: {}",
             serde_json::to_string(&schema)?
         ),
-        text: serde_json::to_string(&source)?,
+        text: serde_json::to_string(&serde_json::json!({
+            "source": source,
+            "sceneContext": draft.preparation.scene_context,
+            "orderPolicy": draft.preparation.order,
+            "clarifications": draft.preparation.questions.iter().filter(|question| draft.source_checklist().criteria.iter().any(|item| item.id == question.criterion_id && item.text == question.source_text)).collect::<Vec<_>>(),
+        }))?,
         images: Vec::new(),
         max_output_tokens: None,
     })
@@ -106,7 +111,7 @@ fn proposal_from_response(
     // Ranges refer to the exact source_text rendering, including its two-newline separators.
     let mut offset = 0;
     let sources = draft
-        .checklist
+        .source_checklist()
         .criteria
         .iter()
         .enumerate()
@@ -135,7 +140,7 @@ fn proposal_from_response(
     }
     // Provider ordering cannot reorder the operator's criteria or their reference links.
     let criteria = draft
-        .checklist
+        .source_checklist()
         .criteria
         .iter()
         .map(|item| ProposedCriterion {
@@ -192,6 +197,7 @@ mod tests {
                 ],
             },
             references: Vec::new(),
+            preparation: Default::default(),
         }
     }
 
@@ -216,12 +222,18 @@ mod tests {
         let mut output = response(&draft);
         output.criteria.reverse();
         output.comments.push(FormattedComment {
-            source_id: draft.checklist.criteria[1].id.to_string(),
+            source_id: draft.source_checklist().criteria[1].id.to_string(),
             question: "Sur quelle table ?".into(),
         });
         let proposal = proposal_from_response(&draft, output).unwrap();
-        assert_eq!(proposal.criteria[0].text, draft.checklist.criteria[0].text);
-        assert_eq!(proposal.criteria[1].text, draft.checklist.criteria[1].text);
+        assert_eq!(
+            proposal.criteria[0].text,
+            draft.source_checklist().criteria[0].text
+        );
+        assert_eq!(
+            proposal.criteria[1].text,
+            draft.source_checklist().criteria[1].text
+        );
         assert_eq!(proposal.comments[0].proposed_item, Some(1));
     }
 
@@ -229,7 +241,12 @@ mod tests {
     fn source_ranges_preserve_utf8_text_and_separators() {
         let draft = draft();
         let proposal = proposal_from_response(&draft, response(&draft)).unwrap();
-        for (source, proposed) in draft.checklist.criteria.iter().zip(&proposal.criteria) {
+        for (source, proposed) in draft
+            .source_checklist()
+            .criteria
+            .iter()
+            .zip(&proposal.criteria)
+        {
             let range = &proposed.source_ranges[0];
             assert_eq!(&proposal.source_text[range.start..range.end], source.text);
         }

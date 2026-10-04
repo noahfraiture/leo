@@ -48,6 +48,7 @@ fn draft(name: &str) -> ExerciseDraft {
             }],
         },
         references: Vec::new(),
+        preparation: Default::default(),
     }
 }
 
@@ -60,6 +61,7 @@ fn publication(draft: &ExerciseDraft) -> ExerciseRevision {
         name: draft.name.clone(),
         checklist: draft.checklist.clone(),
         references: draft.references.clone(),
+        preparation: draft.preparation.clone(),
     }
 }
 

@@ -6,6 +6,7 @@ mod formatter;
 mod image;
 mod model;
 mod persistence;
+mod preparation;
 mod review;
 mod store;
 
@@ -16,6 +17,7 @@ pub use model::{
     Checklist, Criterion, ExerciseDraft, ExerciseRevision, ImageAsset, ImageMediaType,
     ReferenceAsset,
 };
+pub use preparation::{ChecklistOrder, Clarification, Preparation};
 pub use review::{
     ChecklistProposal, ProposalComment, ProposalCommentKind, ProposedCriterion, SourceRange,
 };
