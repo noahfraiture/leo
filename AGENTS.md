@@ -15,3 +15,10 @@ This is a project to make video analysis of student exercise. Check the architec
 - In new or substantially reorganized modules, use private items or plain `pub`; do not use restricted `pub(...)` visibility. Keep child modules private and expose only documented module APIs.
 - Never set `LEO_RUN_PAID_OPENAI_TEST=1` or run a paid model test without explicit user approval. Compile-only feature checks are allowed. Never run blanket ignored tests; filter approved ignored tests by exact name.
 - Document public or main components: primary structs, ambiguous fields, entry-point methods, and modules when helpful. Keep documentation concise—usually one or two sentences explaining a component’s responsibility to someone returning to the code after a week. Also add a brief comment for non-trivial code when its behavior or purpose is not obvious.
+- When reviewing your own code, use a subagent that should focus on simplicity and readability. The code must be well organized in modules, each functions much have clear responsibility, avoid over logic splitting (functions of one line for example) or structuraly over complex function (too many responsibility of too many level of intendation), follow modern rust idiomatic code
+- Keep commits under 1000 lines. More is allowed if it doesn't make sense to split the commit or there's generated code.
+- Aim for a good test coverage but more importantly :
+  - each test must make sense and actually test something
+  - each test must test a single responsibility
+  - tests must be easily extensible and readable
+  - avoid multiple tests testing the same logic and same code
