@@ -1,5 +1,5 @@
-@import "tailwindcss";
-@source not "./assets/styling/daisyui.mjs";
+@import "tailwindcss" source(none);
+@source "./src";
 @plugin "./assets/styling/daisyui.mjs" {
     themes: cupcake --default, dark --prefersdark;
 }
