@@ -127,7 +127,6 @@ pub fn ChecklistEditor(exercise_id: Uuid) -> Element {
                     "Add blank step"
                 }
             }
-            super::formatting::ChecklistAssistance { exercise_id }
         }
     }
 }

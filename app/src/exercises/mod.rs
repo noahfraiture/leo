@@ -3,6 +3,7 @@
 mod checklist;
 mod editor;
 mod formatting;
+mod preparation;
 mod references;
 mod state;
 mod tasks;

@@ -23,13 +23,14 @@ pub fn ChecklistAssistance(exercise_id: Uuid) -> Element {
     let active_task = gate.active.read().as_ref().map(|task| task.label.clone());
     let active = use_context::<ResolvedSettings>();
     let workflow = active.settings.workflow;
-    let Some((formatting, proposal, notes, stale, ready, selected_set)) =
+    let Some((formatting, proposal, stale, ready, selected_model)) =
         state.read().configurations.get(&exercise_id).map(|editor| {
             (
                 editor.formatting,
-                editor.proposal.clone(),
-                editor.review_notes.clone(),
+                editor.draft.preparation.proposal.clone(),
                 editor
+                    .draft
+                    .preparation
                     .proposal
                     .as_ref()
                     .is_some_and(|proposal| proposal.validate_against(&editor.draft).is_err()),
@@ -42,21 +43,21 @@ pub fn ChecklistAssistance(exercise_id: Uuid) -> Element {
                         .all(|item| !item.text.trim().is_empty()),
                 state
                     .read()
-                    .formatter_set_id
+                    .formatter_model_id
                     .clone()
-                    .or_else(|| workflow.model_sets.first().map(|set| set.id.clone())),
+                    .or_else(|| workflow.models.first().map(|model| model.id.clone())),
             )
         })
     else {
         return rsx! {};
     };
     let choices = workflow
-        .model_sets
+        .models
         .iter()
-        .map(|set| (set.id.clone(), set.name.clone()))
+        .map(|model| (model.id.clone(), model.name.clone()))
         .collect::<Vec<_>>();
     let requester = context.clone();
-    let request_set = selected_set.clone();
+    let request_model = selected_model.clone();
     rsx! {
         section {
             class: "mt-4 rounded-box border border-base-300 p-3",
@@ -67,28 +68,28 @@ pub fn ChecklistAssistance(exercise_id: Uuid) -> Element {
             }
             div { class: "mt-3 flex flex-wrap items-end gap-2",
                 label { class: "form-control min-w-48 flex-1",
-                    span { class: "label-text mb-1", "Model set for checklist review" }
+                    span { class: "label-text mb-1", "Checklist review model" }
                     select {
-                        id: "exercise-formatter-model-set",
+                        id: "exercise-formatter-model",
                         class: "select select-bordered w-full",
-                        value: selected_set.unwrap_or_default(),
+                        value: selected_model.clone().unwrap_or_default(),
                         disabled: formatting,
-                        onchange: move |event| state.write().formatter_set_id = Some(event.value()),
+                        onchange: move |event| state.write().formatter_model_id = Some(event.value()),
                         if choices.is_empty() {
-                            option { value: "", "Add a model set in Settings, then restart" }
+                            option { value: "", "Add a model in Settings, then restart" }
                         }
                         for (id, name) in choices {
-                            option { value: "{id}", "{name}" }
+                            option { key: "{id}", value: "{id}", selected: selected_model.as_ref() == Some(&id), "{name}" }
                         }
                     }
                 }
                 button {
                     id: "exercise-format",
                     class: "btn btn-outline",
-                    disabled: formatting || active_task.is_some() || !ready || request_set.is_none(),
+                    disabled: formatting || active_task.is_some() || !ready || request_model.is_none(),
                     onclick: move |_| {
-                        if let Some(set_id) = request_set.clone() {
-                            request(requester.clone(), exercise_id, workflow.clone(), set_id, gate);
+                        if let Some(model_id) = request_model.clone() {
+                            request(requester.clone(), exercise_id, workflow.clone(), model_id, gate);
                         }
                     },
                     if formatting {
@@ -141,32 +142,14 @@ pub fn ChecklistAssistance(exercise_id: Uuid) -> Element {
                         class: "btn btn-ghost btn-sm",
                         onclick: move |_| {
                             if let Some(editor) = state.write().configurations.get_mut(&exercise_id) {
-                                editor.proposal = None;
+                                editor.draft.preparation.proposal = None;
                             }
                         },
                         "Dismiss proposal"
                     }
                 }
             }
-            if let Some(notes) = notes {
-                if !notes.comments.is_empty() {
-                    div { class: "mt-3",
-                        p { class: "text-sm",
-                            "Questions from your last applied review. They are not checklist requirements."
-                        }
-                        ReviewComments { proposal: notes }
-                        button {
-                            class: "btn btn-ghost btn-sm",
-                            onclick: move |_| {
-                                if let Some(editor) = state.write().configurations.get_mut(&exercise_id) {
-                                    editor.review_notes = None;
-                                }
-                            },
-                            "Dismiss review notes"
-                        }
-                    }
-                }
-            }
+
         }
     }
 }
@@ -191,7 +174,7 @@ fn ProposalItem(exercise_id: Uuid, index: usize, source: String, text: String) -
                             .write()
                             .configurations
                             .get_mut(&exercise_id)
-                            .and_then(|editor| editor.proposal.as_mut())
+                            .and_then(|editor| editor.draft.preparation.proposal.as_mut())
                             .and_then(|proposal| proposal.criteria.get_mut(index))
                         {
                             item.text = event.value();
@@ -239,7 +222,7 @@ fn request(
     mut context: ExerciseContext,
     exercise_id: Uuid,
     workflow: WorkflowSettings,
-    set_id: String,
+    model_id: String,
     gate: InferenceGate,
 ) {
     let lease = match gate.acquire("checklist review") {
@@ -259,6 +242,13 @@ fn request(
         if editor.formatting {
             return;
         }
+        if editor.draft.preparation.source.is_none() {
+            editor.draft.preparation.source = Some(editor.draft.checklist.clone());
+            if let Err(error) = editor.draft.preparation.reconcile() {
+                editor.error = Some(error.to_string());
+                return;
+            }
+        }
         editor.formatting = true;
         editor.error = None;
         editor.draft.clone()
@@ -266,8 +256,13 @@ fn request(
     dioxus::dioxus_core::spawn_forever(async move {
         let _lease = lease;
         let result = async {
-            let resolved = workflow.resolve(&set_id)?;
-            let model = resolved.formatter;
+            let model = workflow
+                .models
+                .iter()
+                .find(|profile| profile.id == model_id)
+                .ok_or("The checklist review model is missing.")?
+                .resolve(&workflow.providers)
+                .map_err(|error| error.to_string())?;
             plan_execution(
                 &[ScheduledJob {
                     id: "checklist-format".into(),
@@ -297,7 +292,11 @@ fn request(
         if let Some(editor) = context.state.write().configurations.get_mut(&exercise_id) {
             editor.formatting = false;
             match result {
-                Ok(proposal) => editor.proposal = Some(proposal),
+                Ok(proposal) => {
+                    if let Err(error) = editor.receive_proposal(proposal) {
+                        editor.error = Some(error);
+                    }
+                }
                 Err(error) => editor.error = Some(error),
             }
         }

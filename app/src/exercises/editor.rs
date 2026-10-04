@@ -43,7 +43,7 @@ pub fn ExerciseEditor() -> Element {
                             option { value: "", "Create your first configuration" }
                         }
                         for (id, name) in choices {
-                            option { value: "{id}", "{name}" }
+                            option { key: "{id}", value: "{id}", selected: selected_id == Some(id), "{name}" }
                         }
                     }
                 }
@@ -80,6 +80,7 @@ pub fn ExerciseEditor() -> Element {
 fn ConfigurationBody(exercise_id: Uuid) -> Element {
     let context = use_context::<ExerciseContext>();
     let mut state = context.state;
+    let mut step = use_signal(|| 0usize);
     let Some((name, dirty, published, busy, error, validation_error)) =
         state.read().configurations.get(&exercise_id).map(|editor| {
             (
@@ -104,17 +105,38 @@ fn ConfigurationBody(exercise_id: Uuid) -> Element {
     let draft_saver = context.clone();
     let publisher = context.clone();
     rsx! {
-        label { class: "form-control",
-            span { class: "label-text mb-1", "Exercise name" }
-            input {
-                id: "exercise-name",
-                class: "input input-bordered w-full",
-                value: name,
-                oninput: move |event| state.write().edit(exercise_id, |draft| draft.name = event.value()),
+        nav { class: "tabs tabs-boxed flex-wrap", aria_label: "Exercise preparation steps",
+            for (index, title) in ["1. Exercise", "2. References", "3. Clarify", "4. Confirm"].iter().enumerate() {
+                button { class: if step() == index { "tab tab-active" } else { "tab" },
+                    onclick: move |_| step.set(index), "{title}"
+                }
             }
         }
-        ChecklistEditor { exercise_id }
-        ReferenceLibrary { exercise_id }
+        match step() {
+            0 => rsx! {
+                label { class: "form-control",
+                    span { class: "label-text mb-1", "Exercise name" }
+                    input { id: "exercise-name", class: "input input-bordered w-full", value: name,
+                        oninput: move |event| state.write().edit(exercise_id, |draft| draft.name = event.value()),
+                    }
+                }
+                super::preparation::ContextEditor { exercise_id }
+                super::preparation::OriginalChecklist { exercise_id }
+            },
+            1 => rsx! { ReferenceLibrary { exercise_id } },
+            2 => rsx! {
+                super::formatting::ChecklistAssistance { exercise_id }
+                super::preparation::ClarificationAnswers { exercise_id }
+                h3 { class: "font-semibold", "Your final checklist" }
+                p { class: "text-sm opacity-70", "Edit this wording freely. Only the checklist you confirm is used for assessment." }
+                ChecklistEditor { exercise_id }
+            },
+            _ => rsx! { super::preparation::Confirmation { exercise_id } },
+        }
+        div { class: "flex gap-2",
+            button { class: "btn btn-ghost btn-sm", disabled: step() == 0, onclick: move |_| step -= 1, "Back" }
+            button { class: "btn btn-outline btn-sm", disabled: step() == 3, onclick: move |_| step += 1, "Continue" }
+        }
         if let Some(error) = error {
             p { class: "alert alert-error", role: "alert", "{error}" }
         }
@@ -137,10 +159,10 @@ fn ConfigurationBody(exercise_id: Uuid) -> Element {
             button {
                 id: "exercise-publish",
                 class: "btn btn-primary",
-                disabled: busy || validation_error.is_some() || (!dirty && published),
+                disabled: busy || step() != 3 || validation_error.is_some() || (!dirty && published),
                 aria_describedby: validation_error.as_ref().map(|_| "exercise-publication-error"),
                 onclick: move |_| tasks::save(publisher.clone(), exercise_id, true),
-                "Save configuration"
+                "Confirm configuration"
             }
             p { class: "text-sm", role: "status",
                 if busy {

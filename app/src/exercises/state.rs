@@ -25,8 +25,6 @@ pub struct ExerciseEditorState {
     pub saving: bool,
     pub importing: bool,
     pub formatting: bool,
-    pub proposal: Option<ChecklistProposal>,
-    pub review_notes: Option<ChecklistProposal>,
     pub error: Option<String>,
 }
 
@@ -42,8 +40,6 @@ impl ExerciseEditorState {
             saving: false,
             importing: false,
             formatting: false,
-            proposal: None,
-            review_notes: None,
             error: None,
         }
     }
@@ -67,10 +63,65 @@ impl ExerciseEditorState {
         self.saving = false;
     }
 
+    /// Explicitly add operator-created final steps to preparation without replacing earlier source.
+    pub fn include_new_source_steps(&mut self) {
+        if let Some(source) = &mut self.draft.preparation.source {
+            for item in &self.draft.checklist.criteria {
+                if !source
+                    .criteria
+                    .iter()
+                    .any(|original| original.id == item.id)
+                {
+                    source.criteria.push(item.clone());
+                }
+            }
+        }
+    }
+
+    /// Retain source and questions without changing the authoritative final wording.
+    pub fn receive_proposal(&mut self, proposal: ChecklistProposal) -> Result<(), String> {
+        proposal
+            .validate_against(&self.draft)
+            .map_err(|error| error.to_string())?;
+        let sources = self.draft.source_checklist().criteria.clone();
+        let mut questions = self.draft.preparation.questions.clone();
+        for comment in &proposal.comments {
+            let Some(item) = comment.proposed_item.and_then(|index| sources.get(index)) else {
+                continue;
+            };
+            if !questions.iter().any(|question| {
+                question.criterion_id == item.id
+                    && question.question == comment.text
+                    && question.source_text == item.text
+            }) {
+                questions.push(backend::exercise::Clarification {
+                    criterion_id: item.id,
+                    source_text: item.text.clone(),
+                    question: comment.text.clone(),
+                    answer: String::new(),
+                });
+            }
+        }
+        self.draft.preparation.questions = questions;
+        if self.draft.preparation.reviewed_basis.is_none() {
+            self.draft
+                .preparation
+                .reconcile()
+                .map_err(|error| error.to_string())?;
+        }
+        let review =
+            ChecklistProposal::for_draft(&self.draft, proposal.criteria, proposal.comments)
+                .map_err(|error| error.to_string())?;
+        self.draft.preparation.proposal = Some(review);
+        Ok(())
+    }
+
     /// Apply edited suggestions while retaining each exactly mapped source criterion's identity.
-    /// Review comments remain temporary notes and never become checklist requirements.
+    /// Questions and the exact proposal are retained separately from checklist requirements.
     pub fn apply_proposal(&mut self) -> Result<(), String> {
         let proposal = self
+            .draft
+            .preparation
             .proposal
             .as_ref()
             .ok_or("There is no proposal to apply.")?;
@@ -79,7 +130,7 @@ impl ExerciseEditorState {
             .map_err(|error| error.to_string())?;
         let mut offset = 0;
         let mut sources = BTreeMap::new();
-        for criterion in &self.draft.checklist.criteria {
+        for criterion in &self.draft.source_checklist().criteria {
             sources.insert((offset, offset + criterion.text.len()), criterion.id);
             offset += criterion.text.len() + 2;
         }
@@ -99,9 +150,18 @@ impl ExerciseEditorState {
         if !sources.is_empty() {
             return Err("This proposal omits an original checklist step.".into());
         }
-        self.draft.checklist.criteria = criteria;
+        // Suggestions change wording only. Operator additions, removals and ordering survive.
+        for item in &mut self.draft.checklist.criteria {
+            if let Some(proposed) = criteria.iter().find(|proposed| proposed.id == item.id) {
+                item.text = proposed.text.clone();
+            }
+        }
         self.draft.checklist.format_version = backend::exercise::CHECKLIST_FORMAT_VERSION.into();
-        self.review_notes = self.proposal.take();
+        self.draft.preparation.last_review = self.draft.preparation.proposal.take();
+        self.draft
+            .preparation
+            .reconcile()
+            .map_err(|error| error.to_string())?;
         self.error = None;
         Ok(())
     }
@@ -115,7 +175,7 @@ pub struct ExercisePageState {
     pub loading: bool,
     pub creating: bool,
     pub error: Option<String>,
-    pub formatter_set_id: Option<String>,
+    pub formatter_model_id: Option<String>,
 }
 
 impl ExercisePageState {
