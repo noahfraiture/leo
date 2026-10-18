@@ -29,6 +29,14 @@ pub fn open_evidence(
         let Some(entry) = session.runs.get_mut(&run_id) else {
             return;
         };
+        // Repeated citation clicks must not launch duplicate hash reads and conversions.
+        if entry.playback.loading
+            && entry.playback.frame_id.as_ref() == Some(&frame_id)
+            && entry.playback.before_ms == before_ms
+            && entry.playback.after_ms == after_ms
+        {
+            return;
+        }
         entry.playback.frame_id = Some(frame_id.clone());
         entry.playback.request_id = Some(request_id);
         entry.playback.before_ms = before_ms;
@@ -102,6 +110,7 @@ pub fn load_references(mut context: AnalysisContext, session_id: Uuid, run_id: U
             entry.snapshot.inputs.exercise.references.clone(),
         )
     };
+    let expected_directory = directory.clone();
     dioxus::dioxus_core::spawn_forever(async move {
         let result = tokio::task::spawn_blocking(move || {
             let store = RunStore::new(directory);
@@ -128,6 +137,7 @@ pub fn load_references(mut context: AnalysisContext, session_id: Uuid, run_id: U
             .write()
             .sessions
             .get_mut(&session_id)
+            .filter(|session| session.directory == expected_directory)
             .and_then(|session| session.runs.get_mut(&run_id))
         {
             entry.references_loading = false;
@@ -137,4 +147,81 @@ pub fn load_references(mut context: AnalysisContext, session_id: Uuid, run_id: U
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dioxus::dioxus_core::NoOpMutations;
+    use std::{cell::RefCell, rc::Rc};
+
+    fn root(holder: Rc<RefCell<Option<AnalysisContext>>>) -> Element {
+        super::super::use_analysis_context();
+        *holder.borrow_mut() = Some(use_context::<AnalysisContext>());
+        rsx! {}
+    }
+
+    #[test]
+    fn playback_preparation_reuses_only_an_identical_pending_request() {
+        for (frame, before, after, loading, duplicate) in [
+            ("candidate-1", 5000, 10000, true, true),
+            ("candidate-2", 5000, 10000, true, false),
+            ("candidate-1", 15000, 10000, true, false),
+            ("candidate-1", 5000, 20000, true, false),
+            ("candidate-1", 5000, 10000, false, false),
+        ] {
+            let holder = Rc::new(RefCell::new(None));
+            let mut dom = VirtualDom::new_with_props(root, holder.clone());
+            dom.rebuild(&mut NoOpMutations);
+            let mut context = holder.borrow().unwrap();
+            let session_id = Uuid::new_v4();
+            let run_id = Uuid::new_v4();
+            let original_request = Uuid::new_v4();
+            dom.in_runtime(|| {
+                let mut page = context.state.write();
+                page.apply_snapshot(super::super::test_snapshot(
+                    session_id,
+                    run_id,
+                    backend::analysis::RunStage::Ready,
+                ));
+                let playback = &mut page
+                    .sessions
+                    .get_mut(&session_id)
+                    .unwrap()
+                    .runs
+                    .get_mut(&run_id)
+                    .unwrap()
+                    .playback;
+                playback.frame_id = Some("candidate-1".into());
+                playback.request_id = Some(original_request);
+                playback.before_ms = 5000;
+                playback.after_ms = 10000;
+                playback.loading = loading;
+                playback.error = (!loading).then(|| "Previous attempt failed".into());
+            });
+
+            // Inspect admission before polling root tasks; no media or model I/O is needed.
+            dom.in_runtime(|| {
+                open_evidence(
+                    context,
+                    MediaRegistry::default(),
+                    session_id,
+                    run_id,
+                    frame.into(),
+                    before,
+                    after,
+                )
+            });
+
+            let page = context.state.read();
+            let playback = &page.sessions[&session_id].runs[&run_id].playback;
+            assert_eq!(
+                playback.request_id == Some(original_request),
+                duplicate,
+                "frame={frame}, before={before}, after={after}, loading={loading}"
+            );
+            assert!(playback.loading);
+            assert!(playback.error.is_none());
+        }
+    }
 }

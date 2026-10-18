@@ -6,7 +6,10 @@ use sha2::{Digest, Sha256};
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::Duration,
 };
+
+const PLAYBACK_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// A short MP4 derivative and the mapping from its playback time to the session timeline.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,10 +35,7 @@ pub fn prepare_playback(
     let frame = manifest
         .frame(frame_id)
         .ok_or_else(|| EvidenceError::Invalid("Unknown candidate citation".into()))?;
-    let source = manifest
-        .sources
-        .get(frame.source_index)
-        .ok_or_else(|| EvidenceError::Invalid("Unknown recording segment".into()))?;
+    let source = manifest.source_for(frame)?;
     if before_ms.saturating_add(after_ms) == 0 || before_ms.saturating_add(after_ms) > 60_000 {
         return Err(EvidenceError::Invalid(
             "Playback context must be between 1 millisecond and 60 seconds".into(),
@@ -47,20 +47,6 @@ pub fn prepare_playback(
         .and_then(|duration| u64::try_from(duration).ok())
         .filter(|duration| *duration > 0)
         .ok_or_else(|| EvidenceError::Invalid("Invalid segment time".into()))?;
-    let expected_session_offset = i64::try_from(frame.recording_offset_ms)
-        .ok()
-        .and_then(|offset| source.start_utc_ms.checked_add(offset))
-        .and_then(|utc| utc.checked_sub(manifest.session_start_utc_ms))
-        .and_then(|offset| u64::try_from(offset).ok());
-    if frame.recording_offset_ms >= segment_length
-        || frame.camera_id != source.camera_id
-        || expected_session_offset != Some(frame.session_offset_ms)
-        || frame.session_offset_ms >= manifest.duration_ms
-    {
-        return Err(EvidenceError::Invalid(
-            "Citation is outside the segment".into(),
-        ));
-    }
     let session_begin_in_segment = manifest
         .session_start_utc_ms
         .saturating_sub(source.start_utc_ms)
@@ -106,8 +92,8 @@ pub fn prepare_playback(
             .arg(format!("{start}ms")).arg("-i").arg(&path)
             .args(["-t",&format!("{duration}ms"),"-map","0:v:0","-an","-vf","scale=w='min(iw,1280)':h='min(ih,720)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1","-c:v","libx264","-preset","veryfast","-crf","23","-maxrate","4M","-bufsize","8M","-pix_fmt","yuv420p","-movflags","+faststart","-f","mp4"])
             .arg(temporary.path());
-        let result = command.as_inner_mut().output()?;
-        if !result.status.success() {
+        let status = crate::analysis::process::run(command.as_inner_mut(), PLAYBACK_TIMEOUT)?;
+        if !status.success() {
             return Err(EvidenceError::Invalid(
                 "Could not prepare recording playback".into(),
             ));

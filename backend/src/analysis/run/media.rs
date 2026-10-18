@@ -36,7 +36,6 @@ fn references(
     snapshot: &RunSnapshot,
     job: &JobRecord,
 ) -> RunResult<(Vec<StructuredImage>, Vec<(uuid::Uuid, String)>)> {
-    let directory = store.directory(snapshot.inputs.id)?;
     let mut images = Vec::new();
     let mut reference_hashes = Vec::new();
     for reference in snapshot
@@ -52,16 +51,7 @@ fn references(
         })
     {
         let asset = &reference.image;
-        let original = fs::read(directory.join("references").join(format!(
-            "{}.{}",
-            asset.id,
-            asset.media_type.extension()
-        )))?;
-        if original.len() as u64 != asset.byte_length || store::hash(&original) != asset.sha256 {
-            return Err(RunError::Invalid(
-                "A copied reference original changed".into(),
-            ));
-        }
+        let original = store.read_reference(snapshot, asset.id)?;
         let maximum = match snapshot.inputs.evidence_policy.image_size {
             ImageSizePolicy::Original => asset.width.max(asset.height),
             ImageSizePolicy::MaximumLongEdge(limit) => limit,
@@ -97,6 +87,7 @@ fn candidates(
             .evidence
             .frame(id)
             .ok_or_else(|| RunError::Invalid("Unknown candidate image".into()))?;
+        snapshot.checkpoint.evidence.source_for(frame)?;
         let cache_key = store::hash(&serde_json::to_vec(&(
             frame,
             snapshot.inputs.evidence_policy.image_size,

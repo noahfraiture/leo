@@ -76,6 +76,9 @@ pub enum Error {
         source: io::Error,
     },
 
+    #[error("FFmpeg did not extract a frame within {timeout:?}")]
+    FfmpegTimeout { timeout: Duration },
+
     #[error("FFmpeg exited unsuccessfully with {status}")]
     FfmpegExit { status: ExitStatus },
 

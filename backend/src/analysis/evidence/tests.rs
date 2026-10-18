@@ -83,3 +83,47 @@ fn changed_source_cannot_resume() {
     std::fs::write(file, b"modified").unwrap();
     assert!(verify_sources(dir.path(), &m).is_err());
 }
+
+#[test]
+fn materialization_rejects_inconsistent_session_offsets_before_opening_media() {
+    let mut evidence = manifest();
+    evidence.sources.push(RecordingSource {
+        relative_path: "missing.mkv".into(),
+        camera_id: 1,
+        start_utc_ms: 0,
+        end_utc_ms: 6000,
+        size_bytes: 1,
+        sha256: "hash".into(),
+    });
+    evidence.frames[0].session_offset_ms = 1000;
+    let error = materialize_frame(
+        std::path::Path::new("/missing"),
+        &evidence,
+        &evidence.frames[0],
+        crate::profiles::ImageSizePolicy::Original,
+    )
+    .unwrap_err();
+    assert!(matches!(error, EvidenceError::Invalid(_)), "{error}");
+}
+
+#[test]
+fn candidate_sources_reject_invalid_or_overflowing_segment_times() {
+    let mut evidence = manifest();
+    evidence.sources.push(RecordingSource {
+        relative_path: "source.mkv".into(),
+        camera_id: 1,
+        start_utc_ms: 0,
+        end_utc_ms: 6000,
+        size_bytes: 1,
+        sha256: "hash".into(),
+    });
+    assert!(evidence.source_for(&evidence.frames[0]).is_ok());
+    for (start, end) in [(0, 0), (1000, 0), (i64::MIN, i64::MAX)] {
+        evidence.sources[0].start_utc_ms = start;
+        evidence.sources[0].end_utc_ms = end;
+        assert!(matches!(
+            evidence.source_for(&evidence.frames[0]),
+            Err(EvidenceError::Invalid(_))
+        ));
+    }
+}

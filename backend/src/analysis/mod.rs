@@ -4,11 +4,13 @@ mod agent;
 mod analyzer;
 mod error;
 mod evidence;
+mod process;
 mod run;
 mod session;
 mod video;
 pub use evidence::gather_evidence_with_budget;
 pub use evidence::{PlaybackClip, prepare_playback};
+pub use process::stop_media_processes;
 
 pub use agent::{AnalysisResponse, ChecklistProgress, Observation, OpenAiConfig};
 pub use analyzer::{AnalysisCheckpoint, AnalysisWarning};

@@ -66,6 +66,9 @@ impl DesktopRuntime {
 
     /// Stops child processes and flushes logging in ownership order.
     pub fn shutdown(&mut self) {
+        if let Err(error) = backend::analysis::stop_media_processes() {
+            tracing::error!(%error, "analysis media process shutdown failed");
+        }
         if let Some(runtime) = self.recorder.take() {
             tracing::info!("recorder runtime stopping");
             if let Err(error) = runtime.shutdown() {

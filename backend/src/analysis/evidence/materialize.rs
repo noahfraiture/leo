@@ -38,20 +38,7 @@ pub fn materialize_frame(
     frame: &CandidateFrame,
     size: ImageSizePolicy,
 ) -> Result<(Vec<u8>, SentImage), EvidenceError> {
-    if manifest.frame(&frame.id) != Some(frame) {
-        return Err(EvidenceError::Invalid("Unknown candidate frame".into()));
-    }
-    let source = manifest
-        .sources
-        .get(frame.source_index)
-        .ok_or_else(|| EvidenceError::Invalid("Unknown source".into()))?;
-    if source.camera_id != frame.camera_id
-        || frame.recording_offset_ms >= (source.end_utc_ms - source.start_utc_ms) as u64
-    {
-        return Err(EvidenceError::Invalid(
-            "Candidate frame is outside its segment".into(),
-        ));
-    }
+    let source = manifest.source_for(frame)?;
     let path = source_path(directory, &source.relative_path)?;
     let bytes = super::super::video::extract_jpeg(
         &path,

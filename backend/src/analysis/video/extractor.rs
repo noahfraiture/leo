@@ -7,6 +7,8 @@ use crate::profiles::ImageSizePolicy;
 
 use super::error::{Error, Result};
 
+const EXTRACTION_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Extracts one video frame at a recording-relative offset as JPEG bytes.
 pub fn extract_jpeg(input: &Path, offset: Duration, size: ImageSizePolicy) -> Result<Vec<u8>> {
     let directory = TempDir::new().map_err(|source| Error::CreateFrameTempDir { source })?;
@@ -35,22 +37,25 @@ pub fn extract_jpeg(input: &Path, offset: Duration, size: ImageSizePolicy) -> Re
         .codec_video("mjpeg")
         .format("image2")
         .arg(&frame);
-    let output = command
-        .as_inner_mut()
-        .output()
-        .map_err(|source| Error::FfmpegRun { source })?;
+    let status = crate::analysis::process::run(command.as_inner_mut(), EXTRACTION_TIMEOUT)
+        .map_err(|source| {
+            if source.kind() == io::ErrorKind::TimedOut {
+                Error::FfmpegTimeout {
+                    timeout: EXTRACTION_TIMEOUT,
+                }
+            } else {
+                Error::FfmpegRun { source }
+            }
+        })?;
 
-    if !output.status.success() {
+    if !status.success() {
         tracing::error!(
             path = %input.display(),
             offset_ms = %offset_ms,
-            status = %output.status,
-            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            status = %status,
             "FFmpeg frame extraction failed"
         );
-        return Err(Error::FfmpegExit {
-            status: output.status,
-        });
+        return Err(Error::FfmpegExit { status });
     }
 
     read_jpeg(&frame)

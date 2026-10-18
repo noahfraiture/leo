@@ -1,4 +1,4 @@
-use super::super::AnalysisWarning;
+use super::{super::AnalysisWarning, EvidenceError};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -86,5 +86,37 @@ impl EvidenceManifest {
     /// Resolves a citation only if it names a candidate frame from this frozen plan.
     pub fn frame(&self, id: &str) -> Option<&CandidateFrame> {
         self.frames.iter().find(|frame| frame.id == id)
+    }
+
+    /// Resolve a registered frame only when its camera and both timeline offsets match its source.
+    pub fn source_for(&self, frame: &CandidateFrame) -> Result<&RecordingSource, EvidenceError> {
+        if self.frame(&frame.id) != Some(frame) {
+            return Err(EvidenceError::Invalid("Unknown candidate frame".into()));
+        }
+        let source = self
+            .sources
+            .get(frame.source_index)
+            .ok_or_else(|| EvidenceError::Invalid("Unknown recording segment".into()))?;
+        let segment_length = source
+            .end_utc_ms
+            .checked_sub(source.start_utc_ms)
+            .and_then(|length| u64::try_from(length).ok())
+            .filter(|length| *length > 0)
+            .ok_or_else(|| EvidenceError::Invalid("Invalid segment time".into()))?;
+        let expected_offset = i64::try_from(frame.recording_offset_ms)
+            .ok()
+            .and_then(|offset| source.start_utc_ms.checked_add(offset))
+            .and_then(|utc| utc.checked_sub(self.session_start_utc_ms))
+            .and_then(|offset| u64::try_from(offset).ok());
+        if source.camera_id != frame.camera_id
+            || frame.recording_offset_ms >= segment_length
+            || frame.session_offset_ms >= self.duration_ms
+            || expected_offset != Some(frame.session_offset_ms)
+        {
+            return Err(EvidenceError::Invalid(
+                "Candidate frame is outside its segment or session timeline".into(),
+            ));
+        }
+        Ok(source)
     }
 }
