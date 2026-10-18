@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Read,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     time::Duration,
@@ -112,6 +113,25 @@ fn saved_settings_are_owner_only() {
         .permissions()
         .mode();
     assert_eq!(mode & 0o777, 0o600);
+}
+
+#[test]
+fn settings_replacement_preserves_a_readers_complete_previous_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(root.path());
+    let original = populated_settings(root.path().join("data"));
+    store.save(&original).unwrap();
+    let original_bytes = fs::read(&store.settings_path).unwrap();
+    let mut reader = fs::File::open(&store.settings_path).unwrap();
+    let mut updated = original;
+    updated.cameras[0].name = "Renamed room".into();
+
+    store.save(&updated).unwrap();
+
+    let mut reader_bytes = Vec::new();
+    reader.read_to_end(&mut reader_bytes).unwrap();
+    assert_eq!(reader_bytes, original_bytes);
+    assert!(store.load().unwrap().unwrap().settings == updated);
 }
 
 #[test]

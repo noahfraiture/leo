@@ -18,7 +18,7 @@ pub fn Connections() -> Element {
                         "Connection name"
                         input {
                             class: "input input-bordered w-full",
-                            value: "{provider.name}",
+                            initial_value: "{provider.name}",
                             oninput: move |e| state.write().draft.workflow.providers[i].name = e.value(),
                         }
                     }
@@ -27,7 +27,7 @@ pub fn Connections() -> Element {
                         input {
                             class: "input input-bordered w-full",
                             r#type: "url",
-                            value: "{provider.base_url}",
+                            initial_value: "{provider.base_url}",
                             placeholder: "http://localhost:1234/v1",
                             oninput: move |e| state.write().draft.workflow.providers[i].base_url = e.value(),
                         }
@@ -56,7 +56,7 @@ pub fn Connections() -> Element {
                             class: "input input-bordered w-full",
                             r#type: "password",
                             autocomplete: "off",
-                            value: "{provider.api_key}",
+                            initial_value: "{provider.api_key}",
                             oninput: move |e| state.write().draft.workflow.providers[i].api_key = e.value(),
                         }
                     }

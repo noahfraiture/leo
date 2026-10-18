@@ -2,14 +2,17 @@ use crate::views::SettingsContext;
 use backend::model::ModelSet;
 use dioxus::prelude::*;
 
-/// A set chooses independent readers and a visual reviewer; formatting is a separate model role.
+/// Preserves editable model sets from earlier workflows without applying their roles to Analyze.
 #[component]
 pub fn ModelSets() -> Element {
     let mut state = use_context::<SettingsContext>().state;
     let settings = state.read().draft.workflow.clone();
     rsx! {
         div { class: "flex flex-col gap-3",
-            h3 { class: "font-semibold", "3. Model sets" }
+            h3 { class: "font-semibold", "3. Legacy model sets" }
+            p { class: "text-sm opacity-70",
+                "These saved sets belong to earlier workflows. Checklist review and recording analysis now select a model directly and do not use these roles."
+            }
             for (i, set) in settings.model_sets.iter().enumerate() {
                 div {
                     key: "{set.id}",
@@ -18,14 +21,14 @@ pub fn ModelSets() -> Element {
                         "Set name"
                         input {
                             class: "input input-bordered w-full",
-                            value: "{set.name}",
+                            initial_value: "{set.name}",
                             oninput: move |e| state.write().draft.workflow.model_sets[i].name = e.value(),
                         }
                     }
                     fieldset {
                         legend { class: "font-medium", "Independent readers" }
                         for (m, model) in settings.models.iter().enumerate() {
-                            label { class: "flex items-center gap-2 py-1",
+                            label { key: "{model.id}", class: "flex items-center gap-2 py-1",
                                 input {
                                     r#type: "checkbox",
                                     class: "checkbox checkbox-sm",
@@ -67,9 +70,6 @@ pub fn ModelSets() -> Element {
                                 option { key: "{model.id}", value: "{model.id}", selected: model.id == set.formatter_id, "{model.name}" }
                             }
                         }
-                    }
-                    p { class: "text-xs opacity-70",
-                        "The reviewer examines visual evidence for every criterion, including when readers agree."
                     }
                     if let Err(error) = settings.resolve(&set.id) {
                         p { class: "text-warning text-sm", "{error}" }

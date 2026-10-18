@@ -106,7 +106,12 @@ fn MonitoringProfileEditor(profile: MonitoringProfileDraft) -> Element {
                 class: "btn btn-outline btn-sm",
                 r#type: "button",
                 disabled: referenced,
-                onclick: move |_| state.write().draft.monitoring_profiles.retain(|p| p.id != id),
+                onclick: move |_| {
+                    let mut page = state.write();
+                    if !page.draft.cameras.iter().any(|camera| camera.initial_monitoring_profile_id == id) {
+                        page.draft.monitoring_profiles.retain(|profile| profile.id != id);
+                    }
+                },
                 "Remove monitoring profile"
             }
             if referenced {
@@ -129,7 +134,7 @@ fn ProfileField(
             input {
                 id,
                 class: "input input-bordered w-full",
-                value,
+                initial_value: value,
                 oninput: move |event| oninput.call(event.value()),
             }
         }

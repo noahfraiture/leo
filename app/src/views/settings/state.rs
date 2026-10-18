@@ -66,11 +66,15 @@ pub fn camera_has_error(errors: &HashMap<SettingsField, String>, camera_id: u32)
 #[derive(Clone)]
 pub struct SettingsPageState {
     pub draft: SettingsDraft,
+    /// The last persisted snapshot, kept separate from edits made after a save begins.
+    saved_draft: SettingsDraft,
     pub selected_camera_id: Option<u32>,
     pub field_errors: HashMap<SettingsField, String>,
     /// Preserve incomplete numeric edits across Settings navigation without changing saved values.
     pub number_inputs: HashMap<SettingsField, String>,
     pub save_error: Option<String>,
+    /// A root-owned save is in progress, including when Settings is not the current route.
+    pub saving: bool,
     pub restart_required: bool,
 }
 
@@ -78,22 +82,28 @@ impl SettingsPageState {
     /// Creates an editable settings draft.
     pub fn new(settings: Settings) -> Self {
         let selected_camera_id = settings.cameras.first().map(|camera| camera.id);
+        let draft = SettingsDraft::from(settings);
         Self {
-            draft: SettingsDraft::from(settings),
+            saved_draft: draft.clone(),
+            draft,
             selected_camera_id,
             field_errors: HashMap::new(),
             number_inputs: HashMap::new(),
             save_error: None,
+            saving: false,
             restart_required: false,
         }
     }
 
-    /// Adds and selects a camera with the next monotonic ID.
-    pub fn add_camera(&mut self) -> u32 {
+    /// Adds and selects the next monotonic camera ID, or reports exhaustion without editing.
+    pub fn add_camera(&mut self) -> Option<u32> {
         let id = self.draft.next_camera_id;
-        self.draft.next_camera_id = id
-            .checked_add(1)
-            .expect("camera IDs should not be exhausted");
+        let Some(next_id) = id.checked_add(1) else {
+            self.save_error =
+                Some("Camera IDs are exhausted. Existing cameras remain editable.".into());
+            return None;
+        };
+        self.draft.next_camera_id = next_id;
         self.draft.cameras.push(CameraDraft {
             id,
             name: format!("Camera {id}"),
@@ -106,7 +116,7 @@ impl SettingsPageState {
                 .map_or(0, |profile| profile.id),
         });
         self.selected_camera_id = Some(id);
-        id
+        Some(id)
     }
 
     /// Removes only the selected camera and selects its nearest remaining neighbor.
@@ -240,12 +250,25 @@ impl SettingsPageState {
         }
     }
 
-    /// Marks the draft as saved; runtime services still require a restart.
-    pub fn mark_saved(&mut self) {
-        self.field_errors.clear();
-        self.number_inputs.clear();
+    /// Track exactly the saved snapshot, preserving later edits and unfinished numeric input.
+    pub fn finish_save(&mut self, submitted: SettingsDraft) {
+        if self.draft == submitted {
+            self.number_inputs
+                .retain(|field, _| self.field_errors.contains_key(field));
+        }
+        self.saved_draft = submitted;
         self.save_error = None;
+        self.saving = false;
         self.restart_required = true;
+    }
+
+    /// Invalid numeric text is an edit even when the last valid typed value has not changed.
+    pub fn has_unsaved_changes(&self) -> bool {
+        self.draft != self.saved_draft
+            || self
+                .number_inputs
+                .keys()
+                .any(|field| self.field_errors.contains_key(field))
     }
 
     /// Remove a model and its unfinished numeric edits without touching another model's errors.

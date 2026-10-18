@@ -115,7 +115,7 @@ fn form_composes_all_sections_and_keeps_editable_secrets_local_to_inputs() {
 #[test]
 fn camera_field_error_is_accessibly_described() {
     let mut state = SettingsPageState::new(ApplicationSettings::default());
-    state.add_camera();
+    state.add_camera().unwrap();
     state.draft.cameras[0].rtsp_url = "http://wrong".into();
     state.field_errors = match state.submission() {
         Err(errors) => errors,
@@ -134,10 +134,33 @@ fn camera_field_error_is_accessibly_described() {
 }
 
 #[test]
+fn settings_controls_are_disabled_while_the_background_save_is_running() {
+    let mut state = SettingsPageState::new(ApplicationSettings::default());
+    state.saving = true;
+
+    let html = render_settings(state, None);
+
+    assert!(opening_tag_with_marker(&html, "fieldset", "disabled").contains("disabled"));
+    crate::test_support::assert_button_disabled(&html, "Saving settings...", true);
+}
+
+#[test]
+fn editing_after_a_save_does_not_present_the_new_values_as_saved() {
+    let mut state = SettingsPageState::new(ApplicationSettings::default());
+    state.finish_save(state.draft.clone());
+    state.draft.recorder_timeout_secs = "31".into();
+
+    let html = render_settings(state, None);
+
+    assert!(html.contains("Unsaved changes"));
+    assert!(!html.contains("Settings saved. Restart Leo to apply them."));
+}
+
+#[test]
 fn camera_list_marks_each_camera_with_a_validation_error() {
     let mut state = SettingsPageState::new(ApplicationSettings::default());
     for _ in 0..3 {
-        let id = state.add_camera();
+        let id = state.add_camera().unwrap();
         state.draft.cameras[usize::try_from(id - 1).unwrap()].rtsp_url =
             format!("rtsp://camera-{id}.example/stream");
     }

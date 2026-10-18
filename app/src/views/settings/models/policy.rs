@@ -24,7 +24,7 @@ pub fn Execution() -> Element {
                 },
             }
             p { class: "text-sm opacity-70",
-                "Leo runs models together when their combined allowances fit. Hosted models use zero local memory. Leave room for macOS. Your local server must unload idle models when switching; scheduling cannot unload them automatically."
+                "Checklist review and analysis use one model at a time. Its estimated memory allowance must fit this budget; hosted models use zero local memory. Leave room for the operating system and other apps. Your local server must manage unused models; Leo cannot unload them."
             }
             NumberField {
                 name: "concurrent",
@@ -49,6 +49,9 @@ pub fn Execution() -> Element {
                         state.write().draft.workflow.execution.max_jobs_per_model = value as usize;
                     }
                 },
+            }
+            p { class: "text-xs opacity-70",
+                "The current workflow sends one request at a time. These saved limits do not enable parallel analysis."
             }
             NumberField {
                 name: "timeout",

@@ -20,7 +20,7 @@ pub fn Models() -> Element {
                         "Display name"
                         input {
                             class: "input input-bordered w-full",
-                            value: "{model.name}",
+                            initial_value: "{model.name}",
                             oninput: move |e| state.write().draft.workflow.models[i].name = e.value(),
                         }
                     }
@@ -41,7 +41,7 @@ pub fn Models() -> Element {
                         "Model identifier"
                         input {
                             class: "input input-bordered w-full",
-                            value: "{model.model}",
+                            initial_value: "{model.model}",
                             placeholder: "Identifier from your model server",
                             oninput: move |e| state.write().draft.workflow.models[i].model = e.value(),
                         }

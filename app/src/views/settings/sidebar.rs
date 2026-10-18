@@ -6,9 +6,18 @@ use super::state::SettingsContext;
 #[component]
 pub fn SettingsSidebar() -> Element {
     let SettingsContext { state, .. } = use_context::<SettingsContext>();
-    let (camera_count, restart_required) = {
+    let (camera_count, status) = {
         let page = state.read();
-        (page.draft.cameras.len(), page.restart_required)
+        let status = if page.saving {
+            "Saving settings..."
+        } else if page.has_unsaved_changes() {
+            "Unsaved changes"
+        } else if page.restart_required {
+            "Restart required"
+        } else {
+            "Ready to save"
+        };
+        (page.draft.cameras.len(), status)
     };
 
     rsx! {
@@ -21,13 +30,7 @@ pub fn SettingsSidebar() -> Element {
                 "Settings"
             }
             p { class: "text-sm", "Configured cameras: {camera_count}" }
-            p { class: "text-sm",
-                if restart_required {
-                    "Restart required"
-                } else {
-                    "Ready to save"
-                }
-            }
+            p { class: "text-sm", "{status}" }
         }
     }
 }

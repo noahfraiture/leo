@@ -37,7 +37,7 @@ pub fn RecordingSettingsSection() -> Element {
                     r#type: "number",
                     min: "1",
                     step: "1",
-                    value: timeout,
+                    initial_value: timeout,
                     aria_invalid: error.as_ref().map(|_| "true"),
                     aria_describedby: error
                         .as_ref()

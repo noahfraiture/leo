@@ -1,6 +1,7 @@
 //! Persisted model connections and run policy for the operator-owned checklist workflow.
 use backend::model::{
-    ExecutionPolicy, ModelProfile, ModelSet, ProviderConnection, ResolvedModelSet,
+    ExecutionPolicy, ModelProfile, ModelSet, ModelSnapshot, ProviderConnection, ResolvedModelSet,
+    ScheduledJob, plan_execution,
 };
 use backend::profiles::{ImageDetailPolicy, ImageSizePolicy};
 use serde::{Deserialize, Serialize};
@@ -36,6 +37,25 @@ pub struct WorkflowSettings {
     pub evidence: EvidenceSettings,
 }
 impl WorkflowSettings {
+    /// Resolve one selected profile and check its request policy without inspecting unrelated profiles.
+    pub fn resolve_model(&self, id: &str) -> backend::model::Result<ModelSnapshot> {
+        let mut matches = self.models.iter().filter(|model| model.id == id);
+        let model = matches.next().ok_or(backend::model::Error::UnknownModel)?;
+        if matches.next().is_some() {
+            return Err(backend::model::Error::UnknownModel);
+        }
+        let model = model.resolve(&self.providers)?;
+        plan_execution(
+            &[ScheduledJob {
+                id: "selected-model".into(),
+                profile_id: model.profile.id.clone(),
+            }],
+            std::slice::from_ref(&model),
+            &self.execution,
+        )?;
+        Ok(model)
+    }
+
     /// Resolves only the selected set. An unrelated invalid set cannot disable this run.
     pub fn resolve(&self, id: &str) -> Result<ResolvedModelSet, String> {
         self.execution.validate().map_err(|e| e.to_string())?;
@@ -66,3 +86,7 @@ impl WorkflowSettings {
         Ok(resolved)
     }
 }
+
+#[cfg(test)]
+#[path = "tests/workflow.rs"]
+mod tests;

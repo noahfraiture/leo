@@ -1,7 +1,7 @@
 use std::{
-    fs::{self, OpenOptions},
+    fs::{self, File},
     io::{self, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -200,7 +200,7 @@ impl SettingsStore {
         Ok(Some(resolved))
     }
 
-    /// Validates settings, creates their directories, and writes the settings file.
+    /// Validates settings and atomically publishes a synchronized, owner-only settings file.
     pub fn save(&self, settings: &Settings) -> Result<(), Error> {
         let resolved = self.resolve(settings.clone())?;
         prepare_directories(&resolved, &self.settings_path)?;
@@ -231,22 +231,23 @@ fn write_settings(settings: &Settings, path: &Path) -> Result<(), Error> {
             source,
         })?;
     bytes.push(b'\n');
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|source| Error::WriteSettings {
-            path: path.to_owned(),
-            source,
-        })?;
-    file.set_permissions(fs::Permissions::from_mode(0o600))
-        .and_then(|()| file.write_all(&bytes))
-        .map_err(|source| Error::WriteSettings {
-            path: path.to_owned(),
-            source,
-        })
+    let parent = path.parent().expect("settings paths always have a parent");
+    let publish = || -> io::Result<()> {
+        // Keep the previous configuration intact until its complete replacement is durable.
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
+        temporary.write_all(&bytes)?;
+        temporary.flush()?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(path).map_err(|error| error.error)?;
+        File::open(parent)?.sync_all()
+    };
+    publish().map_err(|source| Error::WriteSettings {
+        path: path.to_owned(),
+        source,
+    })
 }
 
 #[cfg(test)]

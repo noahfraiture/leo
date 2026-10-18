@@ -42,25 +42,31 @@ pub fn StorageSettingsSection() -> Element {
                     r#for: "settings-data-root-picker",
                     "Choose data root"
                 }
-                input {
-                    key: "{file_input_key}",
-                    id: "settings-data-root-picker",
-                    class: "file-input file-input-bordered w-full",
-                    r#type: "file",
-                    directory: true,
-                    aria_invalid: data_root_error.as_ref().map(|_| "true"),
-                    aria_describedby: data_root_error
-                        .as_ref()
-                        .map(|_| "settings-data-root-error"),
-                    onchange: move |event| {
-                        let selected = event
-                            .files()
-                            .into_iter()
-                            .next()
-                            .map(|file| file.path());
-                        if let Some(path) = selected {
-                            state.write().draft.data_root = Some(path);
-                        }
+                // A keyed fragment replaces the native chooser when its selection is cleared.
+                for picker_key in [file_input_key()] {
+                    input {
+                        key: "{picker_key}",
+                        id: "settings-data-root-picker",
+                        class: "file-input file-input-bordered w-full",
+                        r#type: "file",
+                        directory: true,
+                        aria_invalid: data_root_error.as_ref().map(|_| "true"),
+                        aria_describedby: data_root_error
+                            .as_ref()
+                            .map(|_| "settings-data-root-error"),
+                        onchange: move |event| {
+                            if file_input_key() != picker_key {
+                                return;
+                            }
+                            let selected = event
+                                .files()
+                                .into_iter()
+                                .next()
+                                .map(|file| file.path());
+                            if let Some(path) = selected {
+                                state.write().draft.data_root = Some(path);
+                            }
+                        },
                     },
                 }
                 if let Some(ref error) = data_root_error {
@@ -70,16 +76,20 @@ pub fn StorageSettingsSection() -> Element {
                         "{error}"
                     }
                 }
-                button {
-                    class: "btn btn-outline btn-sm self-start",
-                    r#type: "button",
-                    disabled: custom_root.is_none(),
-                    onclick: move |_| {
-                        state.write().draft.data_root = None;
-                        let next = file_input_key().wrapping_add(1);
-                        file_input_key.set(next);
-                    },
-                    "Clear selected folder"
+                for picker_key in [file_input_key()] {
+                    button {
+                        key: "{picker_key}",
+                        class: "btn btn-outline btn-sm self-start",
+                        r#type: "button",
+                        disabled: custom_root.is_none(),
+                        onclick: move |_| {
+                            if file_input_key() == picker_key {
+                                state.write().draft.data_root = None;
+                                file_input_key.set(picker_key.wrapping_add(1));
+                            }
+                        },
+                        "Clear selected folder"
+                    }
                 }
             }
             p { class: "mt-3 text-sm",

@@ -59,7 +59,7 @@ pub fn CameraSettingsSection() -> Element {
                     class: "btn btn-sm",
                     r#type: "button",
                     onclick: move |_| {
-                        state.write().add_camera();
+                        let _ = state.write().add_camera();
                     },
                     "Add camera"
                 }
@@ -92,7 +92,7 @@ pub fn CameraSettingsSection() -> Element {
             }
 
             if let Some((camera, name_error, url_error, cadence_error)) = selected {
-                div { class: "mt-5 flex min-w-0 flex-col gap-4 border-t border-base-300 pt-5",
+                div { key: "{camera.id}", class: "mt-5 flex min-w-0 flex-col gap-4 border-t border-base-300 pt-5",
                     div { class: "flex flex-wrap items-center justify-between gap-2",
                         div {
                             h3 { class: "font-semibold", "Selected camera" }
@@ -116,7 +116,7 @@ pub fn CameraSettingsSection() -> Element {
                             id: "camera-{camera.id}-name",
                             class: "input input-bordered w-full",
                             r#type: "text",
-                            value: camera.name,
+                            initial_value: camera.name,
                             aria_invalid: name_error.as_ref().map(|_| "true"),
                             aria_describedby: name_error
                                                             .as_ref()
@@ -152,7 +152,7 @@ pub fn CameraSettingsSection() -> Element {
                             id: "camera-{camera.id}-rtsp-url",
                             class: "input input-bordered w-full",
                             r#type: "text",
-                            value: camera.rtsp_url,
+                            initial_value: camera.rtsp_url,
                             aria_invalid: url_error.as_ref().map(|_| "true"),
                             aria_describedby: url_error
                                                             .as_ref()

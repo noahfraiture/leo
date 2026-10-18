@@ -1,4 +1,4 @@
-//! Operator forms for named model connections, independent reader sets, and memory limits.
+//! Operator forms for model connections, profiles, resource limits, and retained legacy sets.
 mod connections;
 mod numbers;
 mod policy;

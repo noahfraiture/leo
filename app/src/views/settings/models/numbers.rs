@@ -42,7 +42,7 @@ pub fn NumberField(
                 class: "input input-bordered w-full",
                 r#type: "text",
                 inputmode: "numeric",
-                value: text,
+                initial_value: text,
                 placeholder: if optional { "Provider default" } else { "" },
                 aria_invalid: error.as_ref().map(|_| "true"),
                 aria_describedby: error.as_ref().map(|_| error_id.clone()),
@@ -113,7 +113,6 @@ fn record_input(
         }
     }
     page.save_error = None;
-    page.restart_required = false;
     parsed
 }
 
@@ -186,5 +185,32 @@ mod tests {
             record_input(&mut page, field, "6000".into(), 1, u64::MAX, true),
             Ok(Some(6000))
         );
+    }
+
+    #[test]
+    fn unfinished_number_input_remains_unsaved_after_an_earlier_save_completes() {
+        let mut page = SettingsPageState::new(crate::settings::Settings::default());
+        let submitted = page.draft.clone();
+        let field = SettingsField::WorkflowNumber {
+            model_id: None,
+            name: "memory",
+        };
+        record_input(
+            &mut page,
+            field.clone(),
+            "unfinished".into(),
+            0,
+            49152,
+            false,
+        )
+        .unwrap_err();
+
+        page.finish_save(submitted);
+
+        assert!(page.restart_required);
+        assert!(page.has_unsaved_changes());
+        assert_eq!(page.number_inputs[&field], "unfinished");
+        assert!(page.field_errors.contains_key(&field));
+        assert!(page.submission().is_err());
     }
 }

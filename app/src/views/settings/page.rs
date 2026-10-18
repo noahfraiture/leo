@@ -40,33 +40,49 @@ pub fn Settings() -> Element {
                 novalidate: true,
                 onsubmit: move |event| {
                     event.prevent_default();
-                    let settings = {
+                    let (settings, submitted) = {
                         let mut page = state.write();
                         let Some(settings) = begin_save(&mut page) else {
                             return;
                         };
-                        settings
+                        (settings, page.draft.clone())
                     };
-                    let mut page = state.write();
-                    match save_store.save(&settings) {
-                        Ok(()) => page.mark_saved(),
-                        Err(_) => page.save_error = Some(SAVE_ERROR.into()),
-                    }
+                    let store = save_store.clone();
+                    dioxus::dioxus_core::spawn_forever(async move {
+                        let result = tokio::task::spawn_blocking(move || store.save(&settings)).await;
+                        let mut page = state.write();
+                        match result {
+                            Ok(Ok(())) => page.finish_save(submitted),
+                            _ => {
+                                page.saving = false;
+                                page.save_error = Some(SAVE_ERROR.into());
+                            }
+                        }
+                    });
                 },
 
-                div { class: "grid grid-cols-1 gap-6 xl:grid-cols-2",
-                    CameraSettingsSection {}
-                    div { class: "flex min-w-0 flex-col gap-6",
-                        StorageSettingsSection {}
-                        RecordingSettingsSection {}
-                        MonitoringProfilesSection {}
-                        ModelSettingsSection {}
+                fieldset {
+                    class: "flex min-w-0 flex-col gap-6",
+                    disabled: state.read().saving,
+                    div { class: "grid grid-cols-1 gap-6 xl:grid-cols-2",
+                        CameraSettingsSection {}
+                        div { class: "flex min-w-0 flex-col gap-6",
+                            StorageSettingsSection {}
+                            RecordingSettingsSection {}
+                            MonitoringProfilesSection {}
+                            ModelSettingsSection {}
+                        }
                     }
-                }
-                ApplicationSettingsSection {}
+                    ApplicationSettingsSection {}
 
-                div { class: "flex flex-col items-start gap-2 sm:flex-row sm:items-center",
-                    button { class: "btn btn-primary", r#type: "submit", "Save settings" }
+                    div { class: "flex flex-col items-start gap-2 sm:flex-row sm:items-center",
+                        button {
+                            class: "btn btn-primary",
+                            r#type: "submit",
+                            disabled: state.read().saving,
+                            if state.read().saving { "Saving settings..." } else { "Save settings" }
+                        }
+                    }
                 }
             }
         }
@@ -98,7 +114,15 @@ fn SettingsNotices() -> Element {
         if let Some(error) = &page.save_error {
             div { class: "alert alert-error mb-4", role: "alert", "{error}" }
         }
-        if page.restart_required {
+        if !page.saving && page.has_unsaved_changes() {
+            div { class: "alert alert-warning mb-4", role: "status", aria_live: "polite",
+                if page.restart_required {
+                    "Unsaved changes. Restarting applies the previously saved settings; save again to keep your latest edits."
+                } else {
+                    "Unsaved changes. Save settings to keep your latest edits."
+                }
+            }
+        } else if !page.saving && page.restart_required {
             div {
                 class: "alert alert-success mb-4",
                 role: "status",
@@ -110,10 +134,14 @@ fn SettingsNotices() -> Element {
 }
 
 fn begin_save(page: &mut SettingsPageState) -> Option<ApplicationSettings> {
+    if page.saving {
+        return None;
+    }
     match page.submission() {
         Ok(settings) => {
             page.field_errors.clear();
             page.save_error = None;
+            page.saving = true;
             Some(settings)
         }
         Err(errors) => {
