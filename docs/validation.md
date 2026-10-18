@@ -10,7 +10,11 @@ Use the smallest check supported by the resources currently available. Run comma
 just test-unit test-e2e
 ```
 
-This is a free, local-only check. **Pass:** both recipes exit successfully. They cover unit behavior, local media, recorder reconnect, the mock provider, and the desktop happy, analysis-recovery, and preview-degraded workflows. The latter changes profiles and participation, injects a metadata append failure, verifies both cameras keep recording across it, decodes the retained video, and records a subsequent session. Local evidence checks also verify resizing, image detail, and output-token limits.
+This is a free, local-only check. **Pass:** both recipes exit successfully. They cover unit behavior, local media, recorder reconnect, the mock provider, and the desktop happy, analysis-recovery, preview-degraded, exercise-library recovery, queued clarification events, rapid preparation navigation and delayed text-render workflows. An isolated MediaMTX check accepts the current bridge password and rejects missing or stale credentials; the full desktop flow checks live authenticated previews and rejects an anonymous request. Preview degradation changes profiles and participation, injects a metadata append failure, verifies both cameras keep recording across it, decodes the retained video, and records a subsequent session. Library recovery retains damaged draft and publication files while a healthy exercise is edited and published. Clarification checks remove a question repeatedly with late input and verify the remaining answer on disk. Navigation and typing checks verify saved edits after queued clicks or an older host render. The checklist check also verifies that Apply visibly replaces edited wording and saves the result, using only the loopback mock provider. Other editor checks make no model requests. Local evidence checks also verify resizing, image detail, and output-token limits.
+
+The review-text scenario checks correction reasons, assessment notes and restored drafts across runs without requesting video playback. It also verifies that an unchanged saved assessment cannot be submitted twice, including through a queued click. It does not replace the complete scenario's playback, seeking and decoded-pixel requirements. A platform playback rejection is an incomplete playback check, even if review-text passes.
+
+The Settings text scenario checks twenty fields across delayed renders, switches between two disposable camera configurations, saves, returns after navigation, and verifies stored values. It makes no model requests and does not start recording.
 
 ## 2. Local real provider
 
@@ -26,7 +30,7 @@ LEO_RUN_PAID_OPENAI_TEST=1 LEO_E2E_REAL_OPENAI=1 just test-paid
 
 **Requires:** the local and provider checks pass; the actual H.264 RTSP camera or cameras and intended external storage are available; and the provider request has explicit cost approval.
 
-1. Launch `just app`. In Settings, configure the actual camera or cameras, select the external data root, configure monitoring profiles, named model connections, readers and reviewer, and their memory/request limits, choose the log level, and confirm the recorder timeout.
+1. Launch `just app`. In Settings, configure the actual camera or cameras, select the external data root, configure monitoring profiles, named model connections and profiles with their memory/request limits, choose the log level, and confirm the recorder timeout. Checklist review and recording analysis each select a model directly in Analyze; legacy model sets are not used by this flow.
 2. Save, restart Leo, and confirm Settings shows the intended data path.
 3. Confirm every configured physical preview moves.
 4. Start a session and confirm every configured camera records.

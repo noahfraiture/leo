@@ -47,6 +47,7 @@ Preview and recording make independent RTSP/TCP connections. Preview availabilit
 | `exercise` | Saves one operator-owned checklist, immutable revisions and manually imported reference originals; AI assistance produces source-linked proposals and questions, kept distinct from operator decisions. |
 | `model` | Explicit provider transports, structured request contracts and scheduling under a shared memory allowance. |
 | `analysis::evidence` | Reuses recorded sampling schedules, resolves source identities, extracts bounded images and seekable playback clips. |
+| `analysis::process` | Bounds file-producing media conversions and owns child cleanup on completion, timeout, polling errors, and normal desktop shutdown. |
 | `analysis::run` | Freezes inputs, scans each window once for all criteria, consolidates observations, optionally rechecks one episode, and saves separate operator review history. |
 | `analysis::session` / `analyzer` | Historical single-model evaluator retained for reproducible prior experiments; not the desktop Analyze flow. |
 
@@ -67,11 +68,13 @@ Each camera has a nonblank name and an RTSP URL. Participation and monitoring ca
 
 Execution policy controls total local model memory, simultaneous requests, requests per model and timeout. Hosted profiles have memory cost zero but still count toward concurrency. Local model allowances are estimates supplied by the operator, not measured RAM. A local server must evict idle models when required; request scheduling does not unload them. The current analysis executes requests sequentially with one model. Evidence window span, overlap and image derivatives are frozen per run. All request image limits include reference images.
 
-Invalid optional model configuration cannot disable recording. Each selected model resolves independently, so an unrelated incomplete model set cannot block a usable profile. Numeric editor text is retained and validated instead of silently replacing an invalid entry with its previous value. Recorder timeout must fit FFmpeg microseconds and a Rust deadline; reconnect delay remains one second and graceful Stop five seconds.
+Invalid optional model configuration cannot disable recording. Each selected model resolves independently and checks its memory allowance and request policy before analysis or checklist review is offered, so an unrelated incomplete model set cannot block a usable profile. Numeric editor text is retained and validated instead of silently replacing an invalid entry with its previous value. Recorder timeout must fit FFmpeg microseconds and a Rust deadline; reconnect delay remains one second and graceful Stop five seconds.
 
-`dataRoot: null` selects the platform default. Save validates recording fields, creates required settings and session directories, and writes owner-only settings. Invalid optional profile definitions can be saved with warnings so they cannot prevent correcting recording configuration. Malformed optional JSON sections load independently with a visible feature error; the original file is not rewritten on load. Diagnostic log-directory creation is best effort.
+Settings text inputs retain native typing while input events update the root-owned draft. The selected camera editor is keyed by stable camera ID, so switching cameras replaces its native fields with that camera's own values. Saves preserve later edits, and returning from another route restores the current draft.
 
-Settings displays complete RTSP URLs for editing, but errors and logs omit them. The API key is masked by default. Save is allowed during recording or analysis. It neither interrupts active work nor changes logging, storage, cameras, preview, recorder, catalogue, or provider until restart, and changing the data root does not move existing sessions. There is no import, migration, hot reload, or automatic restart.
+`dataRoot: null` selects the platform default. Save validates recording fields, creates required settings and session directories, and atomically publishes synchronized owner-only settings. A root-owned worker performs storage operations while the Settings form is disabled; navigation and recording controls remain responsive. Invalid optional profile definitions can be saved with warnings so they cannot prevent correcting recording configuration. Malformed optional JSON sections load independently with a visible feature error; the original file is not rewritten on load. Diagnostic log-directory creation is best effort.
+
+Settings displays complete RTSP URLs for editing, but errors and logs omit them. The API key is masked by default. Save is allowed during recording or analysis. Later edits remain visibly unsaved, and save completion acknowledges only the submitted snapshot. It neither interrupts active work nor changes logging, storage, cameras, preview, recorder, catalogue, or provider until restart, and changing the data root does not move existing sessions. There is no import, migration, hot reload, or automatic restart.
 
 ## Desktop Ownership
 
@@ -95,9 +98,13 @@ Every shell branch receives `RuntimeAvailability` and `SettingsContext`. Concret
 
 Zero cameras is a ready runtime: Leo skips MediaMTX, retains catalogue discovery and Analyze, omits Start from Monitor, and independently rejects an attempted empty start before creating session storage. Preview startup failure is warning-only: it produces ready operator state with recovery guidance, and recording remains available.
 
-The desktop event-loop owner retains `RecorderRuntime`, the preview `Bridge`, and `LogGuard`. On normal loop destruction it requests recorder shutdown, interrupts in-progress readiness or finalization, stops or kills and reaps children, joins the management thread, stops and reaps MediaMTX, and then drops the log guard so queued JSON events flush.
+The desktop event-loop owner retains `RecorderRuntime`, the preview `Bridge`, and `LogGuard`. On normal loop destruction it first closes analysis conversion admission and stops and reaps registered converter children, including conversions running on blocking workers. It then requests recorder shutdown, interrupts in-progress readiness or finalization, stops or kills and reaps children, joins the management thread, stops and reaps MediaMTX, and drops the log guard so queued JSON events flush.
 
 `ReadyApp` owns the single recorder event receiver and allocates one `Signal<OperatorState>` in Dioxus's root scope above the router. Root-scoped session and analysis futures own work across awaits, so changing between Monitor and Analyze cannot cancel recording finalization or model analysis. Recorder threads communicate with UI state only through the event channel.
+
+Start reserves its transition synchronously, then a worker creates exclusive staging directories before the recorder starts. The initial metadata write and failed-start directory cleanup also run on workers. Every continuation rechecks ownership before proceeding or publishing, so a late startup failure cannot delete a fault-owned folder or replace its warning.
+
+If the recorder event channel closes, recorder availability stays failed until restart. This blocks another Start even if the app was idle or a successful Stop was still publishing its completed recording.
 
 ## Preview
 
@@ -112,9 +119,11 @@ configured camera RTSP URL
     -> native webview video element
 ```
 
-The generated configuration disables recording and unrelated protocols and grants anonymous read access only from loopback to generated paths. Credential-bearing RTSP URLs remain in the private temporary configuration and are never sent to the webview. The webview receives only loopback WHEP and reader-script URLs.
+The generated configuration disables recording and unrelated protocols and grants read access only from loopback to generated paths. Each bridge startup generates a fresh preview password, held in its private temporary configuration and passed to Leo's mounted WHEP readers. Other browser pages cannot read the preview without that password. Credential-bearing RTSP URLs remain in the private configuration and are never sent to the webview. Preview access is separate from camera and provider credentials and is never persisted in settings or analysis inputs.
 
-Monitor keeps one keyed feed mounted per configured camera. It displays preview failure, analysis inclusion, and recorder status separately. Recorder states are Idle, Starting, Recording, or Reconnecting.
+The MediaMTX version check has a five-second deadline and accepts at most 128 bytes of output. A stalled check is stopped and reaped, then reported as a preview warning while the recording interface remains available.
+
+Monitor keeps one keyed feed mounted per configured camera. Each reader verifies a per-mount owner token and retains its own video element, so delayed configuration delivery, script loading and cleanup cannot claim a newer view's stream after navigation. An unmounted feed does not start a reader when loading finishes. Monitor displays preview failure, analysis inclusion, and recorder status separately. Recorder states are Idle, Starting, Recording, or Reconnecting.
 
 ## Session Lifecycle
 
@@ -168,7 +177,7 @@ Other camera supervisors continue independently, and retries continue until Stop
 
 ### Stop
 
-Operator Stop first attempts the durable end event and always commands recorder Stop, even if the event append failed. Each camera receives FFmpeg's graceful `q`; a child still alive after five seconds is killed and reaped. Every nonempty attempt is probed before promotion:
+Operator Stop first attempts the durable end event and always commands recorder Stop, even if the event append failed. End-event writes, completion-marker synchronization and catalogue reads run in filesystem workers; the root-owned task awaits them in order without blocking UI navigation. Fatal cleanup also writes its end event on a worker. Each camera receives FFmpeg's graceful `q`; a child still alive after five seconds is killed and reaped. Every nonempty attempt is probed before promotion:
 
 - exactly one video stream is required;
 - container start must be finite and nonnegative;
@@ -177,7 +186,7 @@ Operator Stop first attempts the durable end event and always commands recorder 
 - valid media is atomically renamed to `<segment-start-UTC-ms>.mkv` without overwrite;
 - empty attempts are removed and invalid nonempty attempts remain for diagnosis.
 
-After recorder Stop, probing, and promotion succeed, the workflow returns to Idle even if the end event or completion marker failed. Such failures produce a metadata warning and keep the incomplete folder discoverable, allowing the next session. Only a valid ended log plus a durable completion marker makes a session eligible for analysis. Recorder cleanup or media-finalization failures still leave the session Faulted.
+After recorder Stop, probing, and promotion succeed, the workflow returns to Idle even if the end event or completion marker failed. Such failures produce a metadata warning and keep the incomplete folder discoverable, allowing the next session. Discovery failure retains existing rows, and its error remains visible alongside any metadata warning. Stop admission invalidates older catalogue reads and reserves discovery until finalization applies its own result. Only a valid ended log plus a durable completion marker makes a session eligible for analysis. Recorder cleanup or media-finalization failures still leave the session Faulted.
 
 ## Portable Session Storage
 
@@ -214,6 +223,8 @@ The `camera-<id>/` directory repeats for every camera recorded in the session.
 
 The directory timestamp is a collision-resistant creation key; the UUID in `events.jsonl` is the durable session identity. After Stop finalization, `recording-complete` is installed without overwrite as a synchronized one-byte sentinel, the parent directory is synchronized, and the marker is truncated and synchronized to its accepted zero-byte state. A complete run directory is atomically published after analysis planning. An active or crashed recording can lack the completion marker.
 
+Exercise writers and analysis execution/review hold exclusive file-lock guards. A guard explicitly unlocks before closing its descriptor, so a descriptor duplicated during child process creation cannot extend the writer's ownership. A competing run reports busy; lock I/O failures remain storage errors.
+
 In practice, the files form a small commit protocol:
 
 | Path | Created or changed when | Meaning |
@@ -226,7 +237,7 @@ In practice, the files form a small commit protocol:
 
 `Session::load` reconstructs state by replaying `events.jsonl`; there is no separate mutable session snapshot. The catalogue requires both a valid ended log and the completion marker. Analysis then combines that replayed timeline with the finalized segments, so moving the whole completed directory does not change the plan identity.
 
-The catalogue also returns direct recording folders with missing or invalid metadata as incomplete. Analyze offers folder access without treating these as analyzable sessions. No automatic repair or crash-continuity subsystem is provided.
+The catalogue also returns direct recording folders with missing or invalid metadata as incomplete. Copied folders sharing a session ID are all unavailable until only one remains in the catalogue, so selection and cached analysis cannot target the wrong folder. A saved run copied under a different recording is listed as unavailable and cannot update that recording's history or another recording's cached corrections. Original files remain in place. Analyze offers folder access without treating these as analyzable sessions. Manual refresh runs in a root-owned background task, preserving later selection changes and rejecting results superseded by newer discovery. No automatic repair or crash-continuity subsystem is provided.
 
 Discovery scans direct children only and rejects symbolic links. A completed session requires both a valid ended event log and the marker. Finalized segment discovery accepts only direct regular files whose names are numeric UTC milliseconds with exact `.mkv` extension. It ignores partial and unrelated files, probes duration, rejects duplicate starts and same-camera overlap, and sorts by stable camera ID and start time.
 
@@ -236,7 +247,15 @@ Absolute paths are excluded from checkpoint plan identity, so a completed direct
 
 The operator prepares an exercise through four screens: source/context, reference images, clarification/final wording, and confirmation. The original checklist, model proposals, questions, operator answers and one final checklist stay separate. Source changes make old answers visibly stale; confirmation requires explicit reconciliation. A saved publication is immutable.
 
-`create_run` freezes that revision, reference originals, one model, evidence options, execution limits, source hashes and all planned windows. Every overlapping window receives the complete checklist once. A text consolidation combines all cited observations into one result per criterion. There is no multi-reader vote, per-window visual reviewer, evidence selector or agent retrieval loop.
+Library discovery isolates damaged configuration folders and keeps their paths visible for repair while healthy drafts remain available. A damaged publication does not discard its editable draft or affect other configurations; its storage warning persists through ordinary edits, and the unreadable publication is not offered for analysis. Discovery leaves retained files untouched. Folder buttons verify a direct directory and await the platform launcher asynchronously, so the launch wait does not block navigation or recording controls; the file browser can remain open after Leo closes.
+
+Clarification rows have stable runtime identities separate from their persisted text. Queued remove, answer and source-confirmation events target those identities, so a removed row cannot retarget a neighboring question or trigger an index panic. The identities survive route changes, saves and new suggestions within the editor, and are neither saved nor sent to a provider.
+
+Back and Continue clamp their state changes to the four preparation steps. Already queued clicks cannot underflow the first step or move beyond confirmation.
+
+Operator text fields use native initial values while input events update their root-owned draft. Delayed host renders cannot replace more recent typing; returning to the editor restores the draft's current text. A new review explicitly replaces the displayed suggestions, and Apply replaces the final checklist fields. Add consumes pasted steps and replaces the cleared input. Runtime edit identities reject input queued from the previous fields and prevent an old Add event from consuming a newer paste buffer. Criterion identities and reference links remain stable.
+
+`create_run` rechecks the selected recording's session identity before discovering media, rejecting a folder replaced after catalogue selection. It freezes the exercise revision, reference originals, one model, evidence options, execution limits, source hashes and all planned windows. Every overlapping window receives the complete checklist once. A text consolidation combines all cited observations into one result per criterion. There is no multi-reader vote, per-window visual reviewer, evidence selector or agent retrieval loop.
 
 An optional independent closer look receives original images, reference pixels if enabled, and the operator's policy, without the first verdict. It is limited to one episode per criterion and must retain every original citation. Distant or over-budget evidence remains for human review. Reference pixels and automatic rechecks default off; manual rechecks share the same single allowance. Configuration ambiguity and unresolved contradictions stay Cannot verify.
 
@@ -244,11 +263,15 @@ Sampling preserves recorded camera participation, cadence, source identities and
 
 The operator can inspect original footage, save a reasoned correction, mark each current result reviewed and record an overall student assessment. Corrections never overwrite model output. A changed result makes its review and the previous overall assessment stale. The next run starts with fresh review state.
 
-The candidate viewer creates a bounded MP4 derivative from the cited MKV segment with seeking and up to one minute of context. Reference examples stay separately labeled. See [analysis workflow](analysis-workflow.md) for contracts, persistence and limits.
+Only one human review write is admitted per run. Review decision writes temporarily disable that run's model actions, and active model work blocks its overall assessment Save before the new checkpoint arrives. Draft editing, navigation and writes to other runs remain available. The same admission checks guard queued clicks as well as the visible buttons.
+
+Correction reasons and assessment notes retain native typing across delayed renders. A successful correction save replaces its reason field only when the submitted draft still matches; later edits remain intact. The reason field's runtime identity also includes its criterion, so selection changes restore the correct unsaved draft.
+
+The candidate viewer creates a bounded MP4 derivative from the cited MKV segment with seeking and up to one minute of context. Repeated identical clicks share a pending preparation; another timestamp or context length starts a new request, and failed preparation can be retried. Reopening the same canonical derivative reuses its asset URL. Each accepted request gives the player a distinct identity so it resets to the selected citation and rejects older metadata callbacks. Reference examples stay separately labeled. See [analysis workflow](analysis-workflow.md) for contracts, persistence and limits.
 
 ## End-To-End Coverage
 
-Leo has focused integration slices plus three opt-in macOS desktop E2E scenarios. They use the same explicit two-fixture setup: both fixture-camera binaries and the production WKWebView application entry point. The scenarios cover the complete Start-through-Analyze flow, resuming unfinished jobs after one provider failure, and recording when preview startup fails, including mixed profiles, bulk assignment, participation changes, a forced metadata-write failure, retained playable video, and a subsequent session. The fixed setup does not constrain production camera count.
+Leo has focused integration slices plus three opt-in macOS recording and analysis E2E scenarios. They use the same explicit two-fixture setup: both fixture-camera binaries and the production WKWebView application entry point. The scenarios cover the complete Start-through-Analyze flow, resuming unfinished jobs after one provider failure, and recording when preview startup fails, including mixed profiles, bulk assignment, participation changes, a forced metadata-write failure, retained playable video, and a subsequent session. The fixed setup does not constrain production camera count. Additional zero-camera checks cover library recovery alongside damaged files, queued clarification events, bounded preparation navigation, delayed typing, explicit proposal application, paste/delete/publication controls, legacy model assignments and profile persistence. They verify saved edits; only the proposal check contacts the loopback mock provider.
 
 | Coverage | What is real | What is substituted or absent |
 | --- | --- | --- |
@@ -260,6 +283,10 @@ Leo has focused integration slices plus three opt-in macOS desktop E2E scenarios
 | Paid evaluation compile check | The historical evaluator type-checks through the backend checkpoint API. | It does not run or contact OpenAI without separate approval. |
 
 The desktop E2E creates a strict owner-only temporary settings file and injects its explicit path through a feature-gated launcher; this is a test seam, not a production override. Provider variables are removed from the app child. The mounted driver reads the ready-only active `ResolvedSettings` context and permits only a numeric loopback provider or real mode with both paid gates, which keeps its safety decision aligned with the runtime actually under test.
+
+Before driving a scenario, the native driver also runs the production preview-reader program against controlled video elements and a reader double. This checks delayed unmount/remount ownership and normal attachment/cleanup without opening an extra connection; it is separate from the scenario's real WebRTC preview checks.
+
+A separate local review-text scenario reuses recording and analysis setup to check delayed typing, correction consumption, saved notes and draft restoration across runs. It omits playback operations, allowing these checks when the platform rejects scripted playback. The complete scenario still requires playback, seeking and decoded pixels.
 
 Packaged-app pointer automation and physical-camera acceptance remain separate work. External-storage loss has an optional manual drill in the [validation checklist](validation.md); hot recovery is not implemented. The complete desktop scenario has a doubly gated real-OpenAI mode for manual output judgment.
 
@@ -297,12 +324,14 @@ nix develop --command cargo test -p camera --test rtsp_stream host_recorder_star
 nix develop --command cargo test -p camera --test rtsp_stream host_recorder_reconnects_into_a_second_segment -- --ignored --exact --nocapture
 ```
 
-The three local desktop scenarios are also exact ignored Cargo tests:
+The local desktop scenarios are also exact ignored Cargo tests:
 
 ```bash
 LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 cargo test -p camera --features desktop-e2e --test desktop_e2e desktop_operator_flow_records_two_cameras_and_analyzes -- --ignored --exact --nocapture --test-threads=1
 LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 cargo test -p camera --features desktop-e2e --test desktop_e2e desktop_analysis_resumes_after_transient_provider_failure -- --ignored --exact --nocapture --test-threads=1
 LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 cargo test -p camera --features desktop-e2e --test desktop_e2e desktop_recording_remains_usable_without_preview -- --ignored --exact --nocapture --test-threads=1
+LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 cargo test -p camera --features desktop-e2e --test desktop_e2e library::desktop_exercise_library_keeps_healthy_configurations_available -- --ignored --exact --nocapture --test-threads=1
+LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 cargo test -p camera --features desktop-e2e --test desktop_e2e questions::desktop_question_events_keep_the_remaining_answer_intact -- --ignored --exact --nocapture --test-threads=1
 ```
 
 ## Paid Evaluation Gates

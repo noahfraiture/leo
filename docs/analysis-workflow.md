@@ -82,9 +82,19 @@ sessions/<recording>/analyses/<run-id>/
   cache/                  reproducible images and playback clips
 ```
 
-No provider secrets are stored in run inputs. Resume uses current credentials only when the saved connection identity matches. Changed source recordings or changed cached images are rejected. An interrupted checkpoint is reconstructed from durable responses; completed requests are not repeated. Provider failures pause without silent retry. A request interrupted before its response was saved may be sent again only through explicit Resume.
+No provider secrets are stored in run inputs. Resume uses current credentials only when the saved connection identity matches. Changed source recordings or changed cached images are rejected. Loading a run also checks the current recording metadata identity, so replacing the recording at the same folder cannot admit further analysis or human review writes into its old run. An interrupted checkpoint is reconstructed from durable responses; completed requests are not repeated. Provider failures pause without silent retry. A request interrupted before its response was saved may be sent again only through explicit Resume.
+
+Renaming a provider connection or updating its credentials does not replace frozen run inputs. Resume still requires the same connection ID, normalized destination URL and transport.
+
+Exercise JSON is limited to 16 MiB and run JSON to 64 MiB. Writers reject oversized serialized data before publication, preserving the last readable draft, checkpoint or review history.
 
 Run-format 1 history remains discoverable as a read-only summary. Its original inputs, evidence, replies and correction files stay in place. It cannot resume through the schema-2 engine. A new analysis creates a separate run instead of migrating or overwriting it.
+
+Refreshing history hides cached runs whose saved files are missing or unreadable, retaining unsaved review drafts in memory for restoration. Reads cannot hide an active run or replace progress received after the read began. If the recording moves to a different catalogue folder, history reloads from that folder after current model and review writes finish; older workers cannot publish into the new selection. A failure to read the history folder remains a visible storage error.
+
+Queued Start, Resume and closer-look actions verify the current folder and wait for pending history reads before claiming work. Resume and closer looks also require an available cached run, so retained drafts cannot execute an unavailable history entry.
+
+Frame extraction has a 60-second process deadline; preparing a playback clip has a 120-second deadline. Timed-out converters are killed and reaped, and incomplete derivatives are not published. Normal desktop shutdown also stops and reaps active converters and rejects new conversions from workers that are still running.
 
 The overall assessment is valid only for a ready run whose current findings and corrections match the reviewed version. New evidence or a correction invalidates affected review marks; a pending or failed recheck makes the previous overall assessment historical. Review state never transfers to another recording or rerun.
 
