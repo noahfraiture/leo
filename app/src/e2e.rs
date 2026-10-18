@@ -17,12 +17,25 @@ pub fn launch(settings_path: PathBuf) {
 }
 
 const COMPLETE_ANALYSIS_SCENARIO: &str = "complete-analysis";
+const REVIEW_TEXT_SCENARIO: &str = "review-text";
+const SETTINGS_TEXT_SCENARIO: &str = "settings-text";
+const CAMERA_EVENTS_SCENARIO: &str = "camera-events";
+const PROFILE_EVENTS_SCENARIO: &str = "profile-events";
+const MODEL_SET_EVENTS_SCENARIO: &str = "model-set-events";
 const ANALYSIS_RECOVERY_SCENARIO: &str = "analysis-recovery";
 const RECORD_WITHOUT_PREVIEW_SCENARIO: &str = "record-without-preview";
 const RECORDING_REHEARSAL_SCENARIO: &str = "recording-rehearsal";
 const SAVE_PROFILES_SCENARIO: &str = "save-profiles";
 const RELOAD_PROFILES_SCENARIO: &str = "reload-profiles";
 const ANALYZE_EXISTING_SCENARIO: &str = "analyze-existing";
+const EXERCISE_RECOVERY_SCENARIO: &str = "exercise-recovery";
+const QUESTION_EVENTS_SCENARIO: &str = "question-events";
+const PREPARATION_NAVIGATION_SCENARIO: &str = "preparation-navigation";
+const RAPID_EXERCISE_INPUT_SCENARIO: &str = "rapid-exercise-input";
+const CHECKLIST_REPLACEMENT_SCENARIO: &str = "checklist-replacement";
+const CHECKLIST_PASTE_EVENTS_SCENARIO: &str = "checklist-paste-events";
+const CHECKLIST_DELETE_EVENTS_SCENARIO: &str = "checklist-delete-events";
+const CHECKLIST_PUBLISH_EVENTS_SCENARIO: &str = "checklist-publish-events";
 const DRIVER_SCRIPT: &str = include_str!("e2e/driver.js");
 
 /// Drives the mounted production UI when the E2E result paths are configured.
@@ -84,9 +97,14 @@ pub fn DesktopE2eDriver() -> Element {
         }
 
         Some(spawn(async move {
+            let preview_program =
+                serde_json::to_string(include_str!("components/camera/reader.js"))
+                    .expect("preview program serializes");
             let script = format!(
-                "{}\n{}",
+                "const previewReaderProgram = {preview_program};\n{}\n{}\n{}\n{}",
+                include_str!("e2e/preview_lifecycle.js"),
                 include_str!("media/pixel_probe.js"),
+                include_str!("e2e/editing.js"),
                 DRIVER_SCRIPT
             );
             let mut driver = document::eval(&script);
@@ -143,12 +161,25 @@ pub fn DesktopE2eDriver() -> Element {
 fn selected_driver_scenario(configured: Option<&str>) -> Option<&'static str> {
     match configured.unwrap_or(COMPLETE_ANALYSIS_SCENARIO) {
         COMPLETE_ANALYSIS_SCENARIO => Some(COMPLETE_ANALYSIS_SCENARIO),
+        REVIEW_TEXT_SCENARIO => Some(REVIEW_TEXT_SCENARIO),
+        SETTINGS_TEXT_SCENARIO => Some(SETTINGS_TEXT_SCENARIO),
+        CAMERA_EVENTS_SCENARIO => Some(CAMERA_EVENTS_SCENARIO),
+        PROFILE_EVENTS_SCENARIO => Some(PROFILE_EVENTS_SCENARIO),
+        MODEL_SET_EVENTS_SCENARIO => Some(MODEL_SET_EVENTS_SCENARIO),
         ANALYSIS_RECOVERY_SCENARIO => Some(ANALYSIS_RECOVERY_SCENARIO),
         RECORD_WITHOUT_PREVIEW_SCENARIO => Some(RECORD_WITHOUT_PREVIEW_SCENARIO),
         RECORDING_REHEARSAL_SCENARIO => Some(RECORDING_REHEARSAL_SCENARIO),
         SAVE_PROFILES_SCENARIO => Some(SAVE_PROFILES_SCENARIO),
         RELOAD_PROFILES_SCENARIO => Some(RELOAD_PROFILES_SCENARIO),
         ANALYZE_EXISTING_SCENARIO => Some(ANALYZE_EXISTING_SCENARIO),
+        EXERCISE_RECOVERY_SCENARIO => Some(EXERCISE_RECOVERY_SCENARIO),
+        QUESTION_EVENTS_SCENARIO => Some(QUESTION_EVENTS_SCENARIO),
+        PREPARATION_NAVIGATION_SCENARIO => Some(PREPARATION_NAVIGATION_SCENARIO),
+        RAPID_EXERCISE_INPUT_SCENARIO => Some(RAPID_EXERCISE_INPUT_SCENARIO),
+        CHECKLIST_REPLACEMENT_SCENARIO => Some(CHECKLIST_REPLACEMENT_SCENARIO),
+        CHECKLIST_PASTE_EVENTS_SCENARIO => Some(CHECKLIST_PASTE_EVENTS_SCENARIO),
+        CHECKLIST_DELETE_EVENTS_SCENARIO => Some(CHECKLIST_DELETE_EVENTS_SCENARIO),
+        CHECKLIST_PUBLISH_EVENTS_SCENARIO => Some(CHECKLIST_PUBLISH_EVENTS_SCENARIO),
         _ => None,
     }
 }
