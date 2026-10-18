@@ -9,7 +9,7 @@ pub enum RunError {
     Worker(#[from] tokio::task::JoinError),
     #[error("invalid analysis run: {0}")]
     Invalid(String),
-    #[error("analysis is already running")]
+    #[error("This run is busy. Wait for the current operation to finish.")]
     Busy,
     #[error(transparent)]
     Model(#[from] crate::model::Error),

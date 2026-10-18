@@ -7,6 +7,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("exercise data is not valid JSON")]
     Json(#[from] serde_json::Error),
+    #[error("exercise JSON exceeds the 16 MiB storage limit")]
+    JsonTooLarge,
     #[error(transparent)]
     Model(#[from] crate::model::Error),
     #[error("exercise data is invalid: {0}")]

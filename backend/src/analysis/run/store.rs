@@ -1,14 +1,19 @@
 //! Atomic local run persistence. Saved responses are the source of truth after interruption.
 use super::{RunError, RunResult, legacy::ArchivedRun, model::*};
-use crate::exercise::ExerciseStore;
+use crate::{
+    FileLock,
+    exercise::{ExerciseStore, MAX_IMAGE_BYTES},
+};
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File, OpenOptions, TryLockError},
     io::{Read, Write},
     path::{Path, PathBuf},
 };
 use uuid::Uuid;
+
+const MAX_JSON_BYTES: u64 = 64 * 1024 * 1024;
 
 /// History tolerates one damaged or older run without hiding other recordings' results.
 #[derive(Debug, Clone, Default)]
@@ -185,10 +190,12 @@ impl RunStore {
             false,
         )
     }
-    pub fn execution_lock(&self, id: Uuid) -> RunResult<File> {
+    /// Reserve this run's model execution until the returned guard is dropped.
+    pub fn execution_lock(&self, id: Uuid) -> RunResult<FileLock> {
         lock_file(&self.directory(id)?.join(".execution-lock"))
     }
-    pub fn review_lock(&self, id: Uuid) -> RunResult<File> {
+    /// Serialize operator review writes until the returned guard is dropped.
+    pub fn review_lock(&self, id: Uuid) -> RunResult<FileLock> {
         lock_file(&self.directory(id)?.join(".review-lock"))
     }
     pub fn directory(&self, id: Uuid) -> RunResult<PathBuf> {
@@ -199,6 +206,7 @@ impl RunStore {
         require_directory(&directory)?;
         Ok(directory)
     }
+    /// Read one bounded, verified original copied into this run; links are not frozen originals.
     pub fn read_reference(&self, snapshot: &RunSnapshot, asset_id: Uuid) -> RunResult<Vec<u8>> {
         let asset = snapshot
             .inputs
@@ -212,10 +220,19 @@ impl RunStore {
             .directory(snapshot.inputs.id)?
             .join("references")
             .join(format!("{}.{}", asset.id, asset.media_type.extension()));
-        if !fs::symlink_metadata(&path)?.file_type().is_file() {
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_file() {
             return Err(RunError::Invalid("Expected a reference original".into()));
         }
-        let bytes = fs::read(path)?;
+        if metadata.len() > MAX_IMAGE_BYTES || asset.byte_length > MAX_IMAGE_BYTES {
+            return Err(RunError::Invalid(
+                "Reference original exceeds the image size limit".into(),
+            ));
+        }
+        let mut bytes = Vec::new();
+        File::open(path)?
+            .take(MAX_IMAGE_BYTES + 1)
+            .read_to_end(&mut bytes)?;
         if bytes.len() as u64 != asset.byte_length || hash(&bytes) != asset.sha256 {
             return Err(RunError::Invalid("Reference original changed".into()));
         }
@@ -241,19 +258,28 @@ impl RunStore {
 }
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> RunResult<T> {
     let metadata = fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_file() || metadata.len() > 64 * 1024 * 1024 {
+    if !metadata.file_type().is_file() || metadata.len() > MAX_JSON_BYTES {
         return Err(RunError::Invalid("Invalid analysis file".into()));
     }
     let mut bytes = Vec::new();
     File::open(path)?
-        .take(64 * 1024 * 1024 + 1)
+        .take(MAX_JSON_BYTES + 1)
         .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_JSON_BYTES {
+        return Err(RunError::Invalid("Invalid analysis file".into()));
+    }
     Ok(serde_json::from_slice(&bytes)?)
 }
 
 pub fn write_json(path: &Path, value: &impl Serialize, replace: bool) -> RunResult<()> {
     let mut bytes = serde_json::to_vec_pretty(value)?;
     bytes.push(b'\n');
+    // Keep every published checkpoint and history within the reader's existing limit.
+    if bytes.len() as u64 > MAX_JSON_BYTES {
+        return Err(RunError::Invalid(
+            "Analysis JSON exceeds the 64 MiB storage limit".into(),
+        ));
+    }
     write_bytes(path, &bytes, replace)
 }
 
@@ -291,7 +317,7 @@ fn require_directory(path: &Path) -> RunResult<()> {
     Ok(())
 }
 
-fn lock_file(path: &Path) -> RunResult<File> {
+fn lock_file(path: &Path) -> RunResult<FileLock> {
     if fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.file_type().is_file()) {
         return Err(RunError::Invalid("Invalid analysis lock".into()));
     }
@@ -301,8 +327,10 @@ fn lock_file(path: &Path) -> RunResult<File> {
         .read(true)
         .write(true)
         .open(path)?;
-    file.try_lock().map_err(|_| RunError::Busy)?;
-    Ok(file)
+    FileLock::try_acquire(file).map_err(|error| match error {
+        TryLockError::WouldBlock => RunError::Busy,
+        TryLockError::Error(error) => RunError::Io(error),
+    })
 }
 
 pub fn hash(bytes: &[u8]) -> String {

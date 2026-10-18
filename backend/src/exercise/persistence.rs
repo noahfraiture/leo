@@ -6,7 +6,11 @@ use std::{
 
 use serde::{Serialize, de::DeserializeOwned};
 
+use crate::FileLock;
+
 use super::{Error, Result};
+
+const MAX_JSON_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Create a direct directory, rejecting a symlink in its place.
 pub fn ensure_directory(path: &Path) -> Result<()> {
@@ -55,15 +59,20 @@ pub fn read_bytes(path: &Path, limit: u64) -> Result<Vec<u8>> {
 }
 
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    Ok(serde_json::from_slice(&read_bytes(
-        path,
-        16 * 1024 * 1024,
-    )?)?)
+    let bytes = read_bytes(path, MAX_JSON_BYTES).map_err(|error| match error {
+        Error::ImageTooLarge => Error::JsonTooLarge,
+        error => error,
+    })?;
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
 pub fn write_json(path: &Path, value: &impl Serialize, replace: bool) -> Result<()> {
     let mut bytes = serde_json::to_vec_pretty(value)?;
     bytes.push(b'\n');
+    // Never replace readable saved data with JSON that this store cannot reopen.
+    if bytes.len() as u64 > MAX_JSON_BYTES {
+        return Err(Error::JsonTooLarge);
+    }
     write_bytes(path, &bytes, replace)
 }
 
@@ -86,8 +95,8 @@ pub fn write_bytes(path: &Path, bytes: &[u8], replace: bool) -> Result<()> {
     Ok(())
 }
 
-/// Serialize writers across store instances; dropping the returned file releases the lock.
-pub fn lock(directory: &Path) -> Result<File> {
+/// Serialize writers across store instances; dropping the guard explicitly releases ownership.
+pub fn lock(directory: &Path) -> Result<FileLock> {
     let path = directory.join(".lock");
     match fs::symlink_metadata(&path) {
         Ok(metadata) if !metadata.file_type().is_file() => return Err(Error::InvalidStorageEntry),
@@ -100,6 +109,5 @@ pub fn lock(directory: &Path) -> Result<File> {
         .read(true)
         .write(true)
         .open(path)?;
-    file.lock()?;
-    Ok(file)
+    FileLock::acquire(file).map_err(Into::into)
 }

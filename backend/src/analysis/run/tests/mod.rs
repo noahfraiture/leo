@@ -6,6 +6,23 @@ use super::*;
 use support::{Fixture, ModelServer, request_body};
 
 #[tokio::test]
+async fn an_execution_owner_prevents_competing_inference_until_its_guard_is_dropped() {
+    let server = ModelServer::new(false);
+    let fixture = Fixture::new(&server.base_url);
+    let owner = fixture.store.execution_lock(fixture.run_id).unwrap();
+
+    assert!(matches!(
+        execute_run(fixture.request(), |_| {}).await,
+        Err(RunError::Busy)
+    ));
+    assert!(server.requests.lock().unwrap().is_empty());
+    drop(owner);
+
+    let completed = execute_run(fixture.request(), |_| {}).await.unwrap();
+    assert_eq!(completed.checkpoint.stage, RunStage::Ready);
+}
+
+#[tokio::test]
 async fn complete_scan_uses_one_request_per_window_and_one_consolidation() {
     let server = ModelServer::new(false);
     let fixture = Fixture::new(&server.base_url);

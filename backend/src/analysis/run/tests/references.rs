@@ -109,3 +109,45 @@ fn modified_reference_originals_are_rejected_before_a_model_request() {
     fs::write(path, b"changed pixels").unwrap();
     assert!(jobs::prepare(&fixture.store, &snapshot, &snapshot.checkpoint.jobs[0]).is_err());
 }
+
+#[cfg(unix)]
+#[test]
+fn frozen_reference_symlinks_are_rejected_by_model_preparation() {
+    let fixture = Fixture::new("http://127.0.0.1:1/v1");
+    let mut snapshot = fixture.snapshot();
+    attach_references(&fixture, &mut snapshot);
+    snapshot.inputs.evidence_policy.reference_images = true;
+    let asset = &snapshot.inputs.exercise.references[0].image;
+    let directory = fixture.store.directory(fixture.run_id).unwrap();
+    let original = directory
+        .join("references")
+        .join(format!("{}.png", asset.id));
+    let moved = directory.join("moved-original.png");
+    fs::rename(&original, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &original).unwrap();
+
+    assert!(fixture.store.read_reference(&snapshot, asset.id).is_err());
+    assert!(jobs::prepare(&fixture.store, &snapshot, &snapshot.checkpoint.jobs[0]).is_err());
+}
+
+#[test]
+fn frozen_reference_reads_enforce_the_import_size_limit() {
+    let fixture = Fixture::new("http://127.0.0.1:1/v1");
+    let mut snapshot = fixture.snapshot();
+    attach_references(&fixture, &mut snapshot);
+    let asset = &mut snapshot.inputs.exercise.references[0].image;
+    let path = fixture
+        .store
+        .directory(fixture.run_id)
+        .unwrap()
+        .join("references")
+        .join(format!("{}.png", asset.id));
+    let bytes = vec![0; crate::exercise::MAX_IMAGE_BYTES as usize + 1];
+    fs::write(path, &bytes).unwrap();
+    asset.byte_length = bytes.len() as u64;
+    asset.sha256 = store::hash(&bytes);
+    let id = asset.id;
+    drop(bytes);
+
+    assert!(fixture.store.read_reference(&snapshot, id).is_err());
+}

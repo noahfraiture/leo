@@ -10,5 +10,8 @@ pub mod profiles;
 pub mod recording;
 pub mod session;
 
+mod file_lock;
+pub use file_lock::FileLock;
+
 #[cfg(test)]
 mod tests;
