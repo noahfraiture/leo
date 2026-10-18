@@ -1,6 +1,6 @@
 use super::labels::recorded_at;
 use crate::analysis::{AnalysisContext, AnalysisPageState, AnalysisTab};
-use crate::operator::OperatorState;
+use crate::operator::{OperatorState, SessionRunState};
 use dioxus::prelude::*;
 
 /// Renders completed sessions and their derived analysis state.
@@ -27,7 +27,33 @@ pub fn Sidebar() -> Element {
             .collect::<Vec<_>>()
     };
 
-    let incomplete = operator.read().incomplete_sessions.clone();
+    let incomplete = {
+        let state = operator.read();
+        // A healthy capture has no end marker yet. Keep its row for any later fault or repair.
+        let current_capture = match &state.session {
+            SessionRunState::Starting { directory }
+            | SessionRunState::Active { directory, .. }
+            | SessionRunState::Stopping { directory }
+                if state.metadata_error.is_none() =>
+            {
+                Some(directory)
+            }
+            _ => None,
+        };
+        state
+            .incomplete_sessions
+            .iter()
+            .filter(|directory| Some(*directory) != current_capture)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let refreshing = operator.read().session_refresh_id.is_some();
+    let finalizing = matches!(operator.read().session, SessionRunState::Stopping { .. });
+    let refresh_completed = operator
+        .read()
+        .completed_session_refresh_id
+        .map(|id| id.to_string())
+        .unwrap_or_default();
     rsx! {
         section {
             class: "flex flex-col gap-4",
@@ -39,18 +65,19 @@ pub fn Sidebar() -> Element {
                     "Completed sessions"
                 }
                 button {
+                    id: "session-refresh",
+                    "data-refresh-completed": refresh_completed,
                     class: "btn btn-sm",
                     r#type: "button",
-                    onclick: move |_| {
-                        let mut state = operator.write();
-                        if let Err(error) = state.refresh_sessions() {
-                            state.set_transient_message(Some(error.to_string()));
-                        } else {
-                            state.set_transient_message(None);
-                        }
-                    },
+                    disabled: refreshing || finalizing,
+                    onclick: move |_| crate::operator::spawn_session_refresh(operator),
                     "Refresh sessions"
                 }
+            }
+            if refreshing {
+                p { class: "text-sm", role: "status", "Refreshing sessions..." }
+            } else if finalizing {
+                p { class: "text-sm", role: "status", "Sessions will refresh when recording finishes." }
             }
             if rows.is_empty() {
                 p { class: "text-sm", "No completed sessions found." }
@@ -82,25 +109,12 @@ pub fn Sidebar() -> Element {
                 h3 { class: "font-semibold", "Recordings needing repair" }
                 for directory in incomplete {
                     div { class: "rounded-box border border-base-300 p-3 text-sm",
-                        p { "Metadata incomplete; repair before analysis." }
+                        p { "Recording metadata or identity needs repair before analysis." }
                         p { class: "break-all", "{directory.display()}" }
                         button {
                             class: "btn btn-outline btn-sm mt-2",
                             r#type: "button",
-                            onclick: move |_| {
-                                let program = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-                                let opened = std::process::Command::new(program)
-                                    .arg(&directory)
-                                    .status()
-                                    .is_ok_and(|status| status.success());
-                                if !opened {
-                                    operator
-                                        .write()
-                                        .set_transient_message(
-                                            Some("Could not open the recording folder.".into()),
-                                        );
-                                }
-                            },
+                            onclick: move |_| crate::operator::spawn_open_folder(operator, directory.clone()),
                             "Open recording folder"
                         }
                     }

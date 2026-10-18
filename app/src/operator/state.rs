@@ -1,7 +1,6 @@
 //! Route-independent operator state and its synchronous transitions.
 
 use std::{
-    fs,
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -9,7 +8,10 @@ use std::{
 use backend::{
     profiles::MonitoringProfile,
     recording::{RecorderEvent, RecorderHandle, RecorderStatus, RecordingCamera},
-    session::{OperatorAction, SessionCamera, SessionController, StoredSession, list_sessions},
+    session::{
+        OperatorAction, SessionCamera, SessionCatalog, SessionController, StoredSession,
+        list_sessions,
+    },
 };
 use uuid::Uuid;
 
@@ -33,6 +35,7 @@ pub enum SessionRunState {
     Active {
         directory: PathBuf,
         controller: Option<SessionController>,
+        /// Monotonic timeline origin, retained even if metadata later becomes unavailable.
         started_at: Instant,
     },
     Stopping {
@@ -62,6 +65,8 @@ pub struct StartSessionRequest {
 /// Active resources moved out of [`OperatorState`] before the recorder Stop await.
 pub struct StopSessionRequest {
     pub directory: PathBuf,
+    /// Catalogue root read by the finalization worker after media and marker handling.
+    pub session_root: PathBuf,
     pub controller: Option<SessionController>,
     pub recorder: RecorderHandle,
 }
@@ -83,11 +88,17 @@ pub struct OperatorState {
     /// Retained recordings that cannot yet enter analysis.
     pub incomplete_sessions: Vec<PathBuf>,
     pub selected_session_id: Option<Uuid>,
+    /// Current catalogue read; newer discovery invalidates its result before it can replace rows.
+    pub session_refresh_id: Option<Uuid>,
+    /// Most recent finished manual refresh, exposed as a DOM acknowledgement for desktop checks.
+    pub completed_session_refresh_id: Option<Uuid>,
     /// Analysis activity token held to prevent simultaneous recording startup.
     pub running_analysis_id: Option<Uuid>,
     pub message: Option<String>,
     /// Persistent warning independent of capture health and transient action messages.
     pub metadata_error: Option<String>,
+    /// A closed recorder runtime cannot accept another session until the app restarts.
+    pub recorder_error: Option<String>,
     pub session_root: PathBuf,
     pub monitoring_profiles: Vec<MonitoringProfile>,
     pub monitoring_config_error: Option<String>,
@@ -123,9 +134,12 @@ impl OperatorState {
             sessions: Vec::new(),
             incomplete_sessions: Vec::new(),
             selected_session_id: None,
+            session_refresh_id: None,
+            completed_session_refresh_id: None,
             running_analysis_id: None,
             message: None,
             metadata_error: None,
+            recorder_error: None,
             session_root,
             monitoring_profiles: settings.monitoring_profiles,
             monitoring_config_error,
@@ -154,10 +168,22 @@ impl OperatorState {
         }
     }
 
-    /// Creates exclusive staging storage and moves Idle to Starting.
+    /// Add a failure without replacing other action errors or the canonical recorder fault.
+    pub fn report_transient_error(&mut self, error: String) {
+        let message = match &self.message {
+            Some(message) => format!("{message}; {error}"),
+            None => error,
+        };
+        self.set_transient_message(Some(message));
+    }
+
+    /// Reserves the Start transition before filesystem or recorder work begins.
     pub fn begin_start(&mut self, utc_ms: i64) -> Result<StartSessionRequest, Error> {
         if !matches!(self.session, SessionRunState::Idle) {
             return Err(Error::StartUnavailable);
+        }
+        if self.recorder_error.is_some() {
+            return Err(Error::RecorderUnavailable);
         }
         if self.running_analysis_id.is_some() {
             return Err(Error::AnalysisRunning);
@@ -166,14 +192,7 @@ impl OperatorState {
             return Err(Error::NoCamerasConfigured);
         }
 
-        create_dir_all(&self.session_root)?;
         let directory = self.session_root.join(utc_ms.to_string());
-        create_dir(&directory)?;
-        let recordings_root = directory.join("recordings");
-        create_dir(&recordings_root)?;
-        for camera in &self.cameras {
-            create_dir(&recordings_root.join(format!("camera-{}", camera.config.id)))?;
-        }
 
         let camera_ids = self
             .cameras
@@ -237,10 +256,17 @@ impl OperatorState {
             }
         }
         tracing::info!(path = %directory.display(), "session start completed");
+        let elapsed = controller
+            .as_ref()
+            .map(SessionController::elapsed)
+            .unwrap_or_default();
+        let started_at = Instant::now()
+            .checked_sub(elapsed)
+            .unwrap_or_else(Instant::now);
         self.session = SessionRunState::Active {
             directory,
             controller,
-            started_at: Instant::now(),
+            started_at,
         };
         self.message = None;
     }
@@ -280,15 +306,18 @@ impl OperatorState {
         self.session = SessionRunState::Stopping {
             directory: directory.clone(),
         };
+        // Finalization owns the next catalogue publication; older reads must not publish during it.
+        self.session_refresh_id = None;
         Ok(StopSessionRequest {
             directory,
+            session_root: self.session_root.clone(),
             controller,
             recorder: self.recorder.clone(),
         })
     }
 
-    /// Returns a finalized Stopping session to Idle and refreshes discovery.
-    pub fn finish_stop(&mut self) -> Result<(), Error> {
+    /// Returns finalized capture to Idle and applies discovery already completed by its worker.
+    pub fn finish_stop(&mut self, catalogue: Result<SessionCatalog, String>) -> Result<(), Error> {
         let SessionRunState::Stopping { directory } = &self.session else {
             return Err(Error::StopUnavailable);
         };
@@ -298,7 +327,9 @@ impl OperatorState {
         }
         self.session = SessionRunState::Idle;
         self.message = None;
-        self.refresh_sessions()
+        self.session_refresh_id = None;
+        self.apply_catalogue_result(catalogue);
+        Ok(())
     }
 
     /// Claims one active/starting fatal cleanup and immediately blocks duplicates.
@@ -475,8 +506,50 @@ impl OperatorState {
 
     /// Rebuilds marker-gated rows while preserving a still-present selection.
     pub fn refresh_sessions(&mut self) -> Result<(), Error> {
-        let selected = self.selected_session_id;
+        self.session_refresh_id = None;
         let catalogue = list_sessions(&self.session_root)?;
+        self.apply_catalogue(catalogue);
+        Ok(())
+    }
+
+    /// Claim one background refresh unless discovery is already owned by a read or finalization.
+    pub fn begin_session_refresh(&mut self) -> Option<(Uuid, PathBuf)> {
+        if self.session_refresh_id.is_some()
+            || matches!(self.session, SessionRunState::Stopping { .. })
+        {
+            return None;
+        }
+        let id = Uuid::new_v4();
+        self.session_refresh_id = Some(id);
+        self.set_transient_message(None);
+        Some((id, self.session_root.clone()))
+    }
+
+    /// Publish only the current read, preserving selection changes and newer discovery.
+    pub fn finish_session_refresh(&mut self, id: Uuid, result: Result<SessionCatalog, String>) {
+        if self.session_refresh_id != Some(id) {
+            return;
+        }
+        self.session_refresh_id = None;
+        self.completed_session_refresh_id = Some(id);
+        self.apply_catalogue_result(result);
+    }
+
+    fn apply_catalogue_result(&mut self, result: Result<SessionCatalog, String>) {
+        match result {
+            Ok(catalogue) => {
+                self.apply_catalogue(catalogue);
+            }
+            Err(error) => {
+                self.report_transient_error(format!(
+                    "Session list could not be refreshed: {error}"
+                ));
+            }
+        }
+    }
+
+    fn apply_catalogue(&mut self, catalogue: SessionCatalog) {
+        let selected = self.selected_session_id;
         self.incomplete_sessions = catalogue.incomplete;
         self.sessions = catalogue
             .sessions
@@ -490,7 +563,6 @@ impl OperatorState {
                     .any(|row| row.stored.session.id == *selected)
             })
             .or_else(|| self.sessions.first().map(|row| row.stored.session.id));
-        Ok(())
     }
 
     fn camera_index(&self, camera_id: u32) -> Result<usize, Error> {
@@ -499,20 +571,6 @@ impl OperatorState {
             .position(|camera| camera.config.id == camera_id)
             .ok_or(Error::UnknownCamera { camera_id })
     }
-}
-
-fn create_dir_all(path: &Path) -> Result<(), Error> {
-    fs::create_dir_all(path).map_err(|source| Error::CreateDirectory {
-        path: path.to_owned(),
-        source,
-    })
-}
-
-fn create_dir(path: &Path) -> Result<(), Error> {
-    fs::create_dir(path).map_err(|source| Error::CreateDirectory {
-        path: path.to_owned(),
-        source,
-    })
 }
 
 #[cfg(all(test, unix))]

@@ -164,6 +164,9 @@ impl RenderHarness {
             .begin_start(START_UTC_MS)
             .expect("idle render state should begin starting");
         let directory = request.directory.clone();
+        request
+            .prepare_storage()
+            .expect("fixture storage should be created");
         let controller = SessionController::create(
             request.events_path,
             request.session_cameras,

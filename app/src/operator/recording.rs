@@ -8,13 +8,25 @@ use std::{
 
 use backend::{
     recording::{Error as RecorderError, RecorderEvent, RecordingSegment},
-    session::{OperatorAction, SessionController, mark_recording_complete},
+    session::{
+        OperatorAction, SessionCatalog, SessionController, list_sessions, mark_recording_complete,
+    },
 };
 use dioxus::prelude::{ReadableExt, Signal, WritableExt};
 
 use super::{
     FaultSessionRequest, OperatorState, SessionRunState, StartSessionRequest, StopSessionRequest,
 };
+
+/// Wait for session filesystem work without blocking the UI executor.
+async fn run_storage<T: Send + 'static>(
+    operation: impl FnOnce() -> Result<T, backend::session::Error> + Send + 'static,
+) -> Result<T, super::error::SessionStorageError> {
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(super::error::SessionStorageError::Worker)?
+        .map_err(Into::into)
+}
 
 /// Starts one route-independent session task after claiming the synchronous transition.
 pub fn spawn_start_session(mut operator: Signal<OperatorState>, utc_ms: i64) {
@@ -106,6 +118,7 @@ pub fn handle_recorder_event_channel_closed(
     operator: &mut OperatorState,
 ) -> Option<FaultSessionRequest> {
     let message = "Recorder runtime stopped unexpectedly.".to_owned();
+    operator.recorder_error = Some(message.clone());
     let cleanup = operator.begin_fault(message.clone(), true);
     if cleanup.is_none() {
         operator.set_transient_message(Some(message));
@@ -159,13 +172,44 @@ enum StartOutcome {
 }
 
 enum StopOutcome {
-    Completed { warning: Option<String> },
-    Faulted { directory: PathBuf, message: String },
+    Completed {
+        warning: Option<String>,
+        catalogue: Result<SessionCatalog, String>,
+    },
+    Faulted {
+        directory: PathBuf,
+        message: String,
+    },
 }
 
 struct FaultOutcome {
     directory: PathBuf,
     message: String,
+}
+
+impl StartSessionRequest {
+    /// Create exclusive staging directories on a worker before any recorder starts.
+    /// A collision preserves the existing folder; partial creation remains available for diagnosis.
+    pub fn prepare_storage(&self) -> Result<(), super::Error> {
+        let root = self.directory.parent().unwrap_or(Path::new("."));
+        fs::create_dir_all(root).map_err(|source| super::Error::CreateDirectory {
+            path: root.to_owned(),
+            source,
+        })?;
+        for directory in std::iter::once(self.directory.clone())
+            .chain(std::iter::once(self.directory.join("recordings")))
+            .chain(self.recording_cameras.iter().map(|camera| {
+                self.directory
+                    .join(format!("recordings/camera-{}", camera.id))
+            }))
+        {
+            fs::create_dir(&directory).map_err(|source| super::Error::CreateDirectory {
+                path: directory,
+                source,
+            })?;
+        }
+        Ok(())
+    }
 }
 
 async fn run_start_session_with<StartFuture, Continue>(
@@ -175,8 +219,28 @@ async fn run_start_session_with<StartFuture, Continue>(
 ) -> StartOutcome
 where
     StartFuture: Future<Output = Result<(), RecorderError>>,
-    Continue: FnOnce(&Path) -> bool,
+    Continue: Fn(&Path) -> bool,
 {
+    let directory = request.directory.clone();
+    let prepared = tokio::task::spawn_blocking(move || {
+        request.prepare_storage()?;
+        Ok::<_, super::Error>(request)
+    })
+    .await
+    .map_err(|error| super::error::SessionStorageError::Worker(error).to_string())
+    .and_then(|result| result.map_err(|error| error.to_string()));
+    if !continue_start(&directory) {
+        return StartOutcome::Superseded;
+    }
+    let request = match prepared {
+        Ok(request) => request,
+        Err(error) => {
+            return StartOutcome::Idle {
+                directory,
+                message: format!("Session start storage failed: {error}"),
+            };
+        }
+    };
     let camera_ids = request
         .recording_cameras
         .iter()
@@ -187,7 +251,15 @@ where
         camera_ids = ?camera_ids,
         "recorder start awaiting all cameras"
     );
-    if let Err(error) = start.await {
+    let started = start.await;
+    if !continue_start(&request.directory) {
+        tracing::info!(
+            path = %request.directory.display(),
+            "session start continuation owned by fault cleanup"
+        );
+        return StartOutcome::Superseded;
+    }
+    if let Err(error) = started {
         let message = format!("Session start failed: {error}");
         tracing::error!(
             path = %request.directory.display(),
@@ -200,25 +272,24 @@ where
                 message,
             };
         }
-        return remove_failed_start(request.directory, message);
-    }
-    if !continue_start(&request.directory) {
-        tracing::info!(
-            path = %request.directory.display(),
-            "session start continuation owned by fault cleanup"
-        );
-        return StartOutcome::Superseded;
+        return remove_failed_start(request.directory, message).await;
     }
 
     let metadata = match request.metadata_error {
         Some(error) => Err(error),
-        None => SessionController::create(
-            request.events_path,
-            request.session_cameras,
-            request.monitoring_profiles,
-        )
+        None => run_storage(move || {
+            SessionController::create(
+                request.events_path,
+                request.session_cameras,
+                request.monitoring_profiles,
+            )
+        })
+        .await
         .map_err(|error| error.to_string()),
     };
+    if !continue_start(&request.directory) {
+        return StartOutcome::Superseded;
+    }
     let (controller, metadata_error) = match metadata {
         Ok(controller) => (Some(controller), None),
         Err(error) => (
@@ -235,8 +306,13 @@ where
     }
 }
 
-fn remove_failed_start(directory: PathBuf, message: String) -> StartOutcome {
-    match fs::remove_dir_all(&directory) {
+async fn remove_failed_start(directory: PathBuf, message: String) -> StartOutcome {
+    let staging = directory.clone();
+    let removed = tokio::task::spawn_blocking(move || fs::remove_dir_all(staging))
+        .await
+        .map_err(|error| super::error::SessionStorageError::Worker(error).to_string())
+        .and_then(|result| result.map_err(|error| error.to_string()));
+    match removed {
         Ok(()) => StartOutcome::Idle { directory, message },
         Err(error) => StartOutcome::Idle {
             message: format!(
@@ -254,13 +330,17 @@ fn apply_start_outcome(operator: &mut OperatorState, outcome: StartOutcome) {
             directory,
             controller,
             metadata_error,
-        } => {
+        } if start_is_current(operator, &directory) => {
             operator.finish_start(directory, controller);
             operator.metadata_error = metadata_error;
         }
-        StartOutcome::Idle { directory, message } => operator.fail_start(&directory, message),
-        StartOutcome::Faulted { directory, message } => operator.finish_fault(directory, message),
-        StartOutcome::Superseded => {}
+        StartOutcome::Idle { directory, message } if start_is_current(operator, &directory) => {
+            operator.fail_start(&directory, message)
+        }
+        StartOutcome::Faulted { directory, message } if start_is_current(operator, &directory) => {
+            operator.finish_fault(directory, message)
+        }
+        _ => {}
     }
 }
 
@@ -272,16 +352,17 @@ fn start_is_current(operator: &OperatorState, directory: &Path) -> bool {
 }
 
 async fn run_stop_session_with<StopFuture>(
-    mut request: StopSessionRequest,
+    request: StopSessionRequest,
     stop: StopFuture,
 ) -> StopOutcome
 where
     StopFuture: Future<Output = Result<Vec<RecordingSegment>, RecorderError>>,
 {
-    let end = match request.controller.as_mut() {
-        Some(controller) => controller.apply(OperatorAction::EndSession),
+    let end = run_storage(move || match request.controller {
+        Some(mut controller) => controller.apply(OperatorAction::EndSession),
         None => Err(backend::session::Error::MissingSessionStart),
-    };
+    })
+    .await;
     if let Err(error) = &end {
         tracing::error!(
             path = %request.directory.display(),
@@ -303,52 +384,55 @@ where
         tracing::info!(path = %request.directory.display(), "recorder Stop completed");
     }
 
-    let message = match (end, stopped) {
-        (Ok(()), Ok(_)) => match mark_recording_complete(&request.directory) {
-            Ok(()) => {
-                tracing::info!(
-                    path = %request.directory.display(),
-                    "recording completion marker written"
-                );
-                return StopOutcome::Completed { warning: None };
+    if let Err(stop_error) = stopped {
+        let message = match end {
+            Ok(()) => format!("Recorder Stop failed: {stop_error}"),
+            Err(end_error) => {
+                format!("Session end event failed: {end_error}; recorder Stop failed: {stop_error}")
             }
-            Err(error) => {
-                return StopOutcome::Completed {
-                    warning: Some(format!(
-                        "Recording saved; metadata needs repair. Completion marker failed: {error}"
-                    )),
-                };
-            }
-        },
-        (Err(error), Ok(_)) => {
-            return StopOutcome::Completed {
-                warning: Some(format!(
-                    "Recording saved; metadata needs repair. Session end event failed: {error}"
-                )),
-            };
-        }
-        (Ok(()), Err(error)) => format!("Recorder Stop failed: {error}"),
-        (Err(end_error), Err(stop_error)) => {
-            format!("Session end event failed: {end_error}; recorder Stop failed: {stop_error}")
-        }
-    };
-    StopOutcome::Faulted {
-        directory: request.directory,
-        message,
+        };
+        return StopOutcome::Faulted {
+            directory: request.directory,
+            message,
+        };
     }
+
+    let warning = match end {
+        Ok(()) => {
+            let directory = request.directory.clone();
+            match run_storage(move || mark_recording_complete(&directory)).await {
+                Ok(()) => {
+                    tracing::info!(
+                        path = %request.directory.display(),
+                        "recording completion marker written"
+                    );
+                    None
+                }
+                Err(error) => Some(format!(
+                    "Recording saved; metadata needs repair. Completion marker failed: {error}"
+                )),
+            }
+        }
+        Err(error) => Some(format!(
+            "Recording saved; metadata needs repair. Session end event failed: {error}"
+        )),
+    };
+    let catalogue = run_storage(move || list_sessions(&request.session_root))
+        .await
+        .map_err(|error| error.to_string());
+    StopOutcome::Completed { warning, catalogue }
 }
 
 fn apply_stop_outcome(operator: &mut OperatorState, outcome: StopOutcome) {
     match outcome {
-        StopOutcome::Completed { warning } => {
+        StopOutcome::Completed { warning, catalogue } => {
             operator.metadata_error = None;
-            if let Err(error) = operator.finish_stop() {
-                operator.set_transient_message(Some(format!(
-                    "Completed session refresh failed: {error}"
-                )));
+            if let Err(error) = operator.finish_stop(catalogue) {
+                operator
+                    .set_transient_message(Some(format!("Session stop could not finish: {error}")));
             }
             if let Some(warning) = warning {
-                operator.message = Some(warning);
+                operator.report_transient_error(warning);
             }
         }
         StopOutcome::Faulted { directory, message } => operator.finish_fault(directory, message),
@@ -356,16 +440,19 @@ fn apply_stop_outcome(operator: &mut OperatorState, outcome: StopOutcome) {
 }
 
 async fn run_fault_session_with<StopFuture>(
-    mut request: FaultSessionRequest,
+    request: FaultSessionRequest,
     stop: StopFuture,
 ) -> FaultOutcome
 where
     StopFuture: Future<Output = Result<Vec<RecordingSegment>, RecorderError>>,
 {
-    let end_error = request
-        .controller
-        .as_mut()
-        .and_then(|controller| controller.apply(OperatorAction::EndSession).err());
+    let append_end = request.controller.is_some();
+    let end_error = match request.controller {
+        Some(mut controller) => run_storage(move || controller.apply(OperatorAction::EndSession))
+            .await
+            .err(),
+        None => None,
+    };
     let stop_error = stop.await.err();
     let mut message = request.message;
     if let Some(error) = end_error {
@@ -376,7 +463,7 @@ where
     }
     tracing::error!(
         path = %request.directory.display(),
-        append_end = request.controller.is_some(),
+        append_end,
         cleanup_failed = message.contains("cleanup failed"),
         "fatal session cleanup finished"
     );

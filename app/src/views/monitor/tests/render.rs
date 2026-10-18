@@ -28,6 +28,25 @@ fn idle_monitor_offers_recording_and_stable_previews() {
 }
 
 #[test]
+fn unavailable_recorder_disables_start_without_hiding_live_previews() {
+    let mut harness = RenderHarness::new();
+    assert!(
+        crate::operator::handle_recorder_event_channel_closed(harness.operator_mut()).is_none()
+    );
+    harness.operator_mut().set_transient_message(None);
+
+    let html = harness.render(ready_preview());
+
+    assert_button_disabled(&html, "Start session", true);
+    assert!(
+        html.contains("Recorder runtime stopped unexpectedly."),
+        "{html}"
+    );
+    assert!(html.contains("Restart Leo"), "{html}");
+    assert_two_stable_previews(&html);
+}
+
+#[test]
 fn active_monitor_keeps_recording_health_and_analysis_controls_separate() {
     let mut harness = RenderHarness::new();
     let directory = harness.activate();

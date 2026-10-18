@@ -94,6 +94,9 @@ fn start_active(workflow: &mut OperatorState) -> PathBuf {
     let request = workflow
         .begin_start(START_UTC_MS)
         .expect("idle workflow should begin starting");
+    request
+        .prepare_storage()
+        .expect("fixture storage should be created");
     let controller = SessionController::create(
         request.events_path.clone(),
         request.session_cameras.clone(),
@@ -103,6 +106,34 @@ fn start_active(workflow: &mut OperatorState) -> PathBuf {
     let directory = request.directory.clone();
     workflow.finish_start(directory.clone(), Some(controller));
     directory
+}
+
+#[test]
+fn elapsed_display_keeps_the_metadata_timeline_origin() {
+    let mut harness = Harness::new();
+    let request = harness.workflow.begin_start(START_UTC_MS).unwrap();
+    request.prepare_storage().unwrap();
+    let controller = SessionController::create(
+        request.events_path,
+        request.session_cameras,
+        request.monitoring_profiles,
+    )
+    .unwrap();
+    // Metadata synchronization or a delayed UI continuation can finish after the timeline starts.
+    std::thread::sleep(Duration::from_millis(100));
+    let elapsed_before_activation = controller.elapsed();
+    harness
+        .workflow
+        .finish_start(request.directory, Some(controller));
+
+    let SessionRunState::Active { started_at, .. } = &harness.workflow.session else {
+        panic!("session should be active");
+    };
+    assert!(
+        started_at.elapsed() >= elapsed_before_activation,
+        "the displayed timer reset after the recording metadata timeline had already started"
+    );
+    harness.shutdown();
 }
 
 fn write_session(
@@ -184,7 +215,7 @@ fn camera_selection_clears_transient_message_but_preserves_fault_message() {
 }
 
 #[test]
-fn begin_start_creates_storage_and_records_every_camera() {
+fn begin_start_reserves_every_camera_without_touching_storage() {
     let mut harness = Harness::new();
 
     let request = harness
@@ -201,10 +232,7 @@ fn begin_start_creates_storage_and_records_every_camera() {
         harness.workflow.session_root.join(START_UTC_MS.to_string())
     );
     assert_eq!(request.events_path, request.directory.join("events.jsonl"));
-    assert!(request.directory.is_dir());
-    assert!(request.directory.join("recordings").is_dir());
-    assert!(request.directory.join("recordings/camera-1").is_dir());
-    assert!(request.directory.join("recordings/camera-2").is_dir());
+    assert!(!harness.workflow.session_root.exists());
     assert_eq!(
         request
             .recording_cameras
@@ -253,11 +281,14 @@ fn empty_camera_start_is_rejected_before_creating_storage() {
 fn stop_transitions_active_to_stopping_then_idle_and_refreshes() {
     let mut harness = Harness::new();
     let directory = start_active(&mut harness.workflow);
+    let (stale_id, _) = harness.workflow.begin_session_refresh().unwrap();
 
     let mut request = harness
         .workflow
         .begin_stop()
         .expect("active workflow should begin stopping");
+    assert!(harness.workflow.session_refresh_id.is_none());
+    assert!(harness.workflow.begin_session_refresh().is_none());
     assert!(matches!(
         &harness.workflow.session,
         SessionRunState::Stopping { directory: actual } if actual == &directory
@@ -269,10 +300,14 @@ fn stop_transitions_active_to_stopping_then_idle_and_refreshes() {
         .apply(OperatorAction::EndSession)
         .expect("session end should be written");
     mark_recording_complete(&directory).expect("session should be marked complete");
+    let catalogue = backend::session::list_sessions(&harness.workflow.session_root).unwrap();
     harness
         .workflow
-        .finish_stop()
+        .finish_stop(Ok(catalogue))
         .expect("stopped session should refresh");
+    harness
+        .workflow
+        .finish_session_refresh(stale_id, Ok(Default::default()));
 
     assert!(matches!(harness.workflow.session, SessionRunState::Idle));
     assert!(
@@ -287,6 +322,7 @@ fn stop_transitions_active_to_stopping_then_idle_and_refreshes() {
         harness.workflow.selected_session_id,
         Some(harness.workflow.sessions[0].stored.session.id)
     );
+    assert!(harness.workflow.begin_session_refresh().is_some());
 
     harness.shutdown();
 }
@@ -303,6 +339,9 @@ fn duplicate_start_and_stop_requests_are_rejected() {
     assert!(harness.workflow.begin_start(START_UTC_MS + 1).is_err());
     assert!(harness.workflow.begin_stop().is_err());
 
+    request
+        .prepare_storage()
+        .expect("fixture storage should be created");
     let controller = SessionController::create(
         request.events_path,
         request.session_cameras,
@@ -374,6 +413,9 @@ fn fatal_event_while_starting_cannot_reactivate_the_session() {
         .begin_fault("recorder failed after readiness".into(), true)
         .expect("a starting recorder fault should request cleanup");
     assert!(cleanup.controller.is_none());
+    request
+        .prepare_storage()
+        .expect("fixture storage should be created");
     let controller = SessionController::create(
         request.events_path,
         request.session_cameras,
@@ -457,6 +499,9 @@ fn reconnecting_before_finish_start_is_preserved() {
             status: RecorderStatus::Reconnecting,
             message: Some("camera stream interrupted".into()),
         });
+    request
+        .prepare_storage()
+        .expect("fixture storage should be created");
     let controller = SessionController::create(
         request.events_path,
         request.session_cameras,
@@ -521,6 +566,9 @@ fn participation_is_written_before_display_state_changes() {
         .workflow
         .begin_start(START_UTC_MS)
         .expect("session should begin starting");
+    request
+        .prepare_storage()
+        .expect("fixture storage should be created");
     let controller = SessionController::create(
         request.events_path,
         vec![request.session_cameras[0].clone()],
@@ -616,4 +664,110 @@ fn refresh_sessions_preserves_an_older_selection() {
     );
 
     harness.shutdown();
+}
+
+#[test]
+fn background_catalogue_refresh_preserves_selection_changed_while_loading() {
+    let mut harness = Harness::new();
+    let oldest = Uuid::from_u128(31);
+    let newest = Uuid::from_u128(32);
+    write_session(
+        &harness.workflow.session_root,
+        "oldest",
+        oldest,
+        1_000,
+        true,
+    );
+    write_session(
+        &harness.workflow.session_root,
+        "newest",
+        newest,
+        2_000,
+        true,
+    );
+    harness.workflow.refresh_sessions().unwrap();
+    let (id, root) = harness.workflow.begin_session_refresh().unwrap();
+    assert!(harness.workflow.begin_session_refresh().is_none());
+    let catalogue = backend::session::list_sessions(&root).unwrap();
+    harness.workflow.selected_session_id = Some(oldest);
+
+    harness.workflow.finish_session_refresh(id, Ok(catalogue));
+
+    assert_eq!(harness.workflow.selected_session_id, Some(oldest));
+    assert!(harness.workflow.session_refresh_id.is_none());
+    harness.shutdown();
+}
+
+#[test]
+fn delayed_catalogue_result_cannot_hide_newer_completed_recordings() {
+    let mut harness = Harness::new();
+    let (id, root) = harness.workflow.begin_session_refresh().unwrap();
+    let stale = backend::session::list_sessions(&root).unwrap();
+    let newest = Uuid::from_u128(33);
+    write_session(&root, "newest", newest, 3_000, true);
+    harness.workflow.refresh_sessions().unwrap();
+
+    harness.workflow.finish_session_refresh(id, Ok(stale));
+
+    assert_eq!(harness.workflow.selected_session_id, Some(newest));
+    assert_eq!(harness.workflow.sessions.len(), 1);
+    assert!(harness.workflow.session_refresh_id.is_none());
+    harness.shutdown();
+}
+
+#[test]
+fn catalogue_refresh_failure_releases_admission_and_preserves_current_rows() {
+    let mut harness = Harness::new();
+    let session_id = Uuid::from_u128(34);
+    write_session(
+        &harness.workflow.session_root,
+        "saved",
+        session_id,
+        4_000,
+        true,
+    );
+    harness.workflow.refresh_sessions().unwrap();
+    let (id, _) = harness.workflow.begin_session_refresh().unwrap();
+
+    harness
+        .workflow
+        .finish_session_refresh(id, Err("Catalogue unavailable".into()));
+
+    assert_eq!(harness.workflow.selected_session_id, Some(session_id));
+    assert_eq!(harness.workflow.sessions.len(), 1);
+    assert!(
+        harness
+            .workflow
+            .message
+            .as_ref()
+            .unwrap()
+            .contains("Catalogue unavailable")
+    );
+    assert!(harness.workflow.begin_session_refresh().is_some());
+    harness.shutdown();
+}
+
+#[test]
+fn catalogue_completion_preserves_newer_operator_error_messages() {
+    for refresh_failed in [false, true] {
+        let mut harness = Harness::new();
+        let (id, root) = harness.workflow.begin_session_refresh().unwrap();
+        let result = if refresh_failed {
+            Err("Catalogue unavailable".into())
+        } else {
+            Ok(backend::session::list_sessions(&root).unwrap())
+        };
+        harness
+            .workflow
+            .set_transient_message(Some("A newer recording action failed".into()));
+
+        harness.workflow.finish_session_refresh(id, result);
+
+        let message = harness.workflow.message.as_ref().unwrap();
+        assert!(message.contains("A newer recording action failed"));
+        if refresh_failed {
+            assert!(message.contains("Catalogue unavailable"));
+        }
+        harness.shutdown();
+    }
 }

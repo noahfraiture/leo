@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     fs,
     path::PathBuf,
     sync::{
@@ -19,7 +20,7 @@ use backend::{
 use super::{
     apply_fault_outcome, apply_start_outcome, apply_stop_outcome, handle_recorder_event,
     handle_recorder_event_channel_closed, run_fault_session_with, run_start_session_with,
-    run_stop_session_with, start_is_current,
+    run_stop_session_with, run_storage, start_is_current,
 };
 use crate::{
     operator::{OperatorState, SessionRunState},
@@ -27,6 +28,67 @@ use crate::{
 };
 
 const START_UTC_MS: i64 = 1_786_552_800_000;
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_storage_waits_leave_the_ui_timer_responsive() {
+    let writing = run_storage(|| {
+        std::thread::sleep(Duration::from_millis(250));
+        Ok(())
+    });
+    tokio::pin!(writing);
+
+    tokio::select! {
+        biased;
+        _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+        _ = &mut writing => panic!("Session storage blocked the UI timer"),
+    }
+    writing.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_session_storage_worker_panic_returns_a_typed_failure() {
+    let error = run_storage::<()>(|| panic!("controlled storage worker failure"))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        super::super::error::SessionStorageError::Worker(_)
+    ));
+}
+
+#[tokio::test]
+async fn stop_retains_both_completion_and_discovery_failures() {
+    let harness = Harness::new();
+    let mut workflow = harness.workflow();
+    let directory = make_active(&mut workflow).await;
+    let session_root = workflow.session_root.clone();
+    let retained = session_root.with_extension("offline");
+    let request = workflow.begin_stop().unwrap();
+
+    let outcome = run_stop_session_with(request, async {
+        // Simulate a storage mount changing after the end event without deleting captured files.
+        fs::rename(&session_root, &retained).unwrap();
+        fs::write(&session_root, b"storage unavailable").unwrap();
+        Ok(Vec::new())
+    })
+    .await;
+    apply_stop_outcome(&mut workflow, outcome);
+
+    assert!(matches!(workflow.session, SessionRunState::Idle));
+    assert!(
+        retained
+            .join(directory.file_name().unwrap())
+            .join("events.jsonl")
+            .is_file()
+    );
+    let message = workflow.message.as_deref().unwrap();
+    assert!(message.contains("Completion marker failed"), "{message}");
+    assert!(
+        message.contains("Session list could not be refreshed"),
+        "{message}"
+    );
+    harness.shutdown();
+}
 
 struct Harness {
     temporary: tempfile::TempDir,
@@ -137,6 +199,10 @@ async fn start_actions_stop_reload_and_discovery_preserve_durable_order() {
             !start_events_path.exists(),
             "session start must follow all-camera readiness"
         );
+        let recordings = start_events_path.parent().unwrap().join("recordings");
+        for camera in [1, 2] {
+            assert!(recordings.join(format!("camera-{camera}")).is_dir());
+        }
         Ok(())
     };
     let outcome = run_start_session_with(request, start, |_| true).await;
@@ -227,6 +293,65 @@ async fn all_camera_startup_failure_rolls_back_staging_without_stop() {
 }
 
 #[tokio::test]
+async fn staging_collision_preserves_existing_files_and_never_starts_the_recorder() {
+    let harness = Harness::new();
+    let mut workflow = harness.workflow();
+    let directory = workflow.session_root.join(START_UTC_MS.to_string());
+    fs::create_dir_all(&directory).unwrap();
+    let retained = directory.join("existing-recording.mkv");
+    fs::write(&retained, b"existing bytes").unwrap();
+    let request = workflow.begin_start(START_UTC_MS).unwrap();
+    let started = AtomicBool::new(false);
+
+    let outcome = run_start_session_with(
+        request,
+        async {
+            started.store(true, Ordering::SeqCst);
+            Ok(())
+        },
+        |_| true,
+    )
+    .await;
+    apply_start_outcome(&mut workflow, outcome);
+
+    assert!(!started.load(Ordering::SeqCst));
+    assert!(matches!(workflow.session, SessionRunState::Idle));
+    assert_eq!(fs::read(retained).unwrap(), b"existing bytes");
+    assert!(
+        workflow
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("Session start storage failed")
+    );
+    harness.shutdown();
+}
+
+#[tokio::test]
+async fn superseded_recorder_failure_preserves_the_fault_owned_staging_folder() {
+    let harness = Harness::new();
+    let mut workflow = harness.workflow();
+    let request = workflow.begin_start(START_UTC_MS).unwrap();
+    let retained = request.directory.join("fault-diagnostic.mkv");
+    let current = Cell::new(true);
+
+    let outcome = run_start_session_with(
+        request,
+        async {
+            fs::write(&retained, b"retained fault evidence").unwrap();
+            current.set(false);
+            Err(RecorderError::RecorderStartupFailed)
+        },
+        |_| current.get(),
+    )
+    .await;
+
+    assert_eq!(fs::read(retained).unwrap(), b"retained fault evidence");
+    assert!(matches!(outcome, super::StartOutcome::Superseded));
+    harness.shutdown();
+}
+
+#[tokio::test]
 async fn fault_claimed_before_start_continuation_creates_no_event_log() {
     let harness = Harness::new();
     let mut workflow = harness.workflow();
@@ -238,14 +363,55 @@ async fn fault_claimed_before_start_continuation_creates_no_event_log() {
         .begin_fault("recorder failed after readiness".into(), true)
         .expect("fault should claim cleanup while Starting");
 
-    let outcome = run_start_session_with(request, std::future::ready(Ok(())), |directory| {
-        start_is_current(&workflow, directory)
-    })
+    let started = AtomicBool::new(false);
+    let outcome = run_start_session_with(
+        request,
+        async {
+            started.store(true, Ordering::SeqCst);
+            Ok(())
+        },
+        |directory| start_is_current(&workflow, directory),
+    )
     .await;
     apply_start_outcome(&mut workflow, outcome);
 
     assert!(!events_path.exists());
+    assert!(!started.load(Ordering::SeqCst));
     assert!(matches!(workflow.session, SessionRunState::Faulted { .. }));
+    harness.shutdown();
+}
+
+#[tokio::test]
+async fn superseded_start_outcomes_cannot_replace_a_newer_fault_warning() {
+    let harness = Harness::new();
+    let mut workflow = harness.workflow();
+    let request = workflow.begin_start(START_UTC_MS).unwrap();
+    workflow.begin_fault("recorder fault".into(), true).unwrap();
+    workflow.metadata_error = Some("retained metadata warning".into());
+
+    for outcome in [
+        super::StartOutcome::Active {
+            directory: request.directory.clone(),
+            controller: None,
+            metadata_error: None,
+        },
+        super::StartOutcome::Idle {
+            directory: request.directory.clone(),
+            message: "late startup failure".into(),
+        },
+        super::StartOutcome::Faulted {
+            directory: request.directory,
+            message: "late startup cleanup failure".into(),
+        },
+    ] {
+        apply_start_outcome(&mut workflow, outcome);
+        assert!(matches!(workflow.session, SessionRunState::Faulted { .. }));
+        assert_eq!(workflow.message.as_deref(), Some("recorder fault"));
+        assert_eq!(
+            workflow.metadata_error.as_deref(),
+            Some("retained metadata warning")
+        );
+    }
     harness.shutdown();
 }
 
@@ -273,6 +439,39 @@ async fn recorder_event_channel_closure_faults_an_active_session_once() {
 }
 
 #[tokio::test]
+async fn recorder_channel_closure_while_idle_blocks_start_after_other_actions() {
+    let harness = Harness::new();
+    let mut workflow = harness.workflow();
+    assert!(handle_recorder_event_channel_closed(&mut workflow).is_none());
+
+    workflow.select_camera(2).unwrap();
+
+    assert!(workflow.begin_start(START_UTC_MS).is_err());
+    assert!(!workflow.session_root.exists());
+    harness.shutdown();
+}
+
+#[tokio::test]
+async fn recorder_channel_closure_during_finalization_keeps_future_starts_unavailable() {
+    let harness = Harness::new();
+    let mut workflow = harness.workflow();
+    let directory = make_active(&mut workflow).await;
+    let request = workflow.begin_stop().unwrap();
+    let outcome = run_stop_session_with(request, std::future::ready(Ok(Vec::new()))).await;
+
+    // Recorder Stop succeeded, but its runtime disappears before the UI accepts finalization.
+    assert!(handle_recorder_event_channel_closed(&mut workflow).is_none());
+    apply_stop_outcome(&mut workflow, outcome);
+    workflow.select_camera(2).unwrap();
+
+    assert!(matches!(workflow.session, SessionRunState::Idle));
+    assert!(directory.join("recording-complete").is_file());
+    assert_eq!(workflow.sessions.len(), 1);
+    assert!(workflow.begin_start(START_UTC_MS + 1).is_err());
+    harness.shutdown();
+}
+
+#[tokio::test]
 async fn unavailable_start_metadata_preserves_capture_and_allows_the_next_session() {
     for invalid_profiles in [false, true] {
         let harness = Harness::new();
@@ -280,13 +479,23 @@ async fn unavailable_start_metadata_preserves_capture_and_allows_the_next_sessio
         let mut request = workflow.begin_start(START_UTC_MS).unwrap();
         let directory = request.directory.clone();
         let media = directory.join("recordings/camera-1/retained.mkv");
-        fs::write(&media, b"captured bytes").unwrap();
         if invalid_profiles {
             request.metadata_error = Some("invalid monitoring configuration".into());
-        } else {
-            fs::write(&request.events_path, b"occupied").unwrap();
         }
-        let outcome = run_start_session_with(request, std::future::ready(Ok(())), |_| true).await;
+        let captured = media.clone();
+        let events_path = request.events_path.clone();
+        let outcome = run_start_session_with(
+            request,
+            async move {
+                fs::write(&captured, b"captured bytes").unwrap();
+                if !invalid_profiles {
+                    fs::write(events_path, b"occupied").unwrap();
+                }
+                Ok(())
+            },
+            |_| true,
+        )
+        .await;
         apply_start_outcome(&mut workflow, outcome);
         assert!(matches!(
             workflow.session,

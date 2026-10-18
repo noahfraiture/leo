@@ -56,6 +56,8 @@ pub fn Sidebar() -> Element {
         SessionRunState::Idle => {
             let session_root = state.session_root.display().to_string();
             let analysis_running = state.running_analysis_id.is_some();
+            let recorder_error = state.recorder_error.clone();
+            let start_disabled = analysis_running || recorder_error.is_some();
             drop(state);
 
             rsx! {
@@ -76,7 +78,7 @@ pub fn Sidebar() -> Element {
                     button {
                         class: "btn btn-primary w-full",
                         r#type: "button",
-                        disabled: analysis_running,
+                        disabled: start_disabled,
                         onclick: move |_| {
                             let utc_ms = SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
@@ -96,6 +98,11 @@ pub fn Sidebar() -> Element {
                     }
                     if analysis_running {
                         p { class: "text-sm", "Start is unavailable while analysis is running." }
+                    }
+                    if let Some(error) = recorder_error {
+                        p { class: "text-error text-sm", role: "status",
+                            "{error} Restart Leo before starting another session."
+                        }
                     }
                     if let Some((camera_id, name, participating, profile_id)) = selected {
                         SelectedCameraControls {
