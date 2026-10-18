@@ -51,6 +51,11 @@ fn filter(level: LogLevel) -> EnvFilter {
                 .expect("provider payload filter should be valid"),
         )
         .add_directive(
+            "rig_core::providers::openai=off"
+                .parse()
+                .expect("provider error filter should be valid"),
+        )
+        .add_directive(
             "dioxus_core::diff::node=off"
                 .parse()
                 .expect("Dioxus VNode filter should be valid"),
