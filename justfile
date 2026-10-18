@@ -25,7 +25,7 @@ css:
 test-unit:
     nix develop --command cargo test --workspace --all-targets --all-features --locked
 
-# Run every approved local media and mock desktop end-to-end check.
+# Run local media and mock desktop smoke checks.
 test-e2e:
     nix develop --command cargo test -p backend analysis::video::extractor::tests::extracts_fixture_frame_as_jpeg -- --ignored --exact
     nix develop --command cargo test -p backend analysis::session::tests::full_local_ffmpeg_and_mock_model_analysis_uses_pre_and_post_gap_segments -- --ignored --exact --nocapture
@@ -33,9 +33,23 @@ test-e2e:
     nix develop --command cargo test -p camera --test rtsp_stream host_recorder_records_playable_mkv -- --ignored --exact --nocapture
     nix develop --command cargo test -p camera --test rtsp_stream host_recorder_starts_with_low_bitrate_video -- --ignored --exact --nocapture
     nix develop --command cargo test -p camera --test rtsp_stream host_recorder_reconnects_into_a_second_segment -- --ignored --exact --nocapture
+    nix develop --command cargo test -p app preview::bridge::tests::preview_authentication_rejects_missing_and_stale_passwords -- --ignored --exact --nocapture
     LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 nix develop --command cargo test -p camera --features desktop-e2e --test desktop_e2e desktop_operator_flow_records_two_cameras_and_analyzes -- --ignored --exact --nocapture --test-threads=1
+    LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 nix develop --command cargo test -p camera --features desktop-e2e --test desktop_e2e desktop_review_text_survives_delayed_render_and_run_switching -- --ignored --exact --nocapture --test-threads=1
     LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 nix develop --command cargo test -p camera --features desktop-e2e --test desktop_e2e desktop_analysis_resumes_after_transient_provider_failure -- --ignored --exact --nocapture --test-threads=1
     LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 nix develop --command cargo test -p camera --features desktop-e2e --test desktop_e2e desktop_recording_remains_usable_without_preview -- --ignored --exact --nocapture --test-threads=1
+    LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 nix develop --command cargo test -p camera --features desktop-e2e --test desktop_e2e library::desktop_exercise_library_keeps_healthy_configurations_available -- --ignored --exact --nocapture --test-threads=1
+    LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 nix develop --command cargo test -p camera --features desktop-e2e --test desktop_e2e questions::desktop_question_events_keep_the_remaining_answer_intact -- --ignored --exact --nocapture --test-threads=1
+    LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 nix develop --command cargo test -p camera --features desktop-e2e --test desktop_e2e editing::desktop_preparation_navigation_keeps_queued_events_in_bounds -- --ignored --exact --nocapture --test-threads=1
+    LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 nix develop --command cargo test -p camera --features desktop-e2e --test desktop_e2e editing::desktop_operator_text_keeps_newer_input_during_a_delayed_render -- --ignored --exact --nocapture --test-threads=1
+    LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 nix develop --command cargo test -p camera --features desktop-e2e --test desktop_e2e editing::desktop_checklist_typing_and_explicit_proposals_stay_in_sync -- --ignored --exact --nocapture --test-threads=1
+    LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 nix develop --command cargo test -p camera --features desktop-e2e --test desktop_e2e editing::desktop_paste_controls_cannot_consume_a_replacement_buffer -- --ignored --exact --nocapture --test-threads=1
+    LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 nix develop --command cargo test -p camera --features desktop-e2e --test desktop_e2e editing::desktop_delete_confirmation_stays_with_the_intended_step -- --ignored --exact --nocapture --test-threads=1
+    LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 nix develop --command cargo test -p camera --features desktop-e2e --test desktop_e2e editing::desktop_publication_requires_the_current_confirmation_step -- --ignored --exact --nocapture --test-threads=1
+    LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 nix develop --command cargo test -p camera --features desktop-e2e --test desktop_e2e settings::desktop_settings_typing_survives_delayed_render_and_camera_selection -- --ignored --exact --nocapture --test-threads=1
+    LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 nix develop --command cargo test -p camera --features desktop-e2e --test desktop_e2e settings::desktop_camera_events_keep_the_other_camera_intact -- --ignored --exact --nocapture --test-threads=1
+    LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 nix develop --command cargo test -p camera --features desktop-e2e --test desktop_e2e settings::desktop_profile_removal_rechecks_camera_assignments -- --ignored --exact --nocapture --test-threads=1
+    LEO_E2E_REAL_OPENAI=0 LEO_RUN_PAID_OPENAI_TEST=0 nix develop --command cargo test -p camera --features desktop-e2e --test desktop_e2e settings::desktop_legacy_reader_events_stay_with_their_model -- --ignored --exact --nocapture --test-threads=1
 
 # Run all three real-OpenAI checks only after explicit caller opt-in.
 test-paid:

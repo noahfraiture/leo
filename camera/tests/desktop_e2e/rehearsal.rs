@@ -7,7 +7,6 @@ use std::path::PathBuf;
 #[ignore = "requires a macOS GUI session and a new LEO_E2E_OUTPUT_DIR"]
 fn desktop_profiles_save_and_reload() {
     assert!(env::var_os("LEO_E2E_OUTPUT_DIR").is_some());
-    assert_preview_ports_available();
     let root = real_openai_root();
     let data = root.join("data");
     fs::create_dir(&data).unwrap();

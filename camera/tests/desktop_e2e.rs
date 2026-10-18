@@ -21,6 +21,18 @@ mod workflow_mock;
 #[path = "desktop_e2e/rehearsal.rs"]
 mod rehearsal;
 
+#[path = "desktop_e2e/library.rs"]
+mod library;
+
+#[path = "desktop_e2e/questions.rs"]
+mod questions;
+
+#[path = "desktop_e2e/editing.rs"]
+mod editing;
+
+#[path = "desktop_e2e/settings.rs"]
+mod settings;
+
 use support::{
     MockOpenAi, ProcessGuard, SHUTDOWN_TIMEOUT, assert_preview_ports_available, fixture,
     process_group_exists, read_application_log, real_openai_root, redacted_requests,
@@ -51,6 +63,21 @@ fn real_openai_endpoint_rejects_present_base_url_even_when_empty() {
 #[test]
 #[ignore = "requires a macOS GUI session, MediaMTX, FFmpeg, and FFprobe"]
 fn desktop_operator_flow_records_two_cameras_and_analyzes() {
+    run_operator_flow(COMPLETE_ANALYSIS_SCENARIO);
+}
+
+#[test]
+#[ignore = "requires a macOS GUI session, MediaMTX, FFmpeg, and FFprobe"]
+fn desktop_review_text_survives_delayed_render_and_run_switching() {
+    assert_ne!(
+        env::var("LEO_E2E_REAL_OPENAI").as_deref(),
+        Ok("1"),
+        "the review-text scenario uses only the local mock provider"
+    );
+    run_operator_flow("review-text");
+}
+
+fn run_operator_flow(scenario: &str) {
     let real_openai = env::var("LEO_E2E_REAL_OPENAI").as_deref() == Ok("1");
     let real_provider = if real_openai {
         direct_openai_endpoint(env::var_os("OPENAI_BASE_URL").as_deref())
@@ -131,7 +158,7 @@ fn desktop_operator_flow_records_two_cameras_and_analyzes() {
         &settings_path,
         &driver_ready,
         &driver_result,
-        COMPLETE_ANALYSIS_SCENARIO,
+        scenario,
         mock_openai.is_some(),
         &logs,
     );
@@ -199,7 +226,8 @@ fn desktop_operator_flow_records_two_cameras_and_analyzes() {
     assert_ne!(first.inputs.id, second.inputs.id);
     assert_ne!(first.inputs.exercise.id, second.inputs.exercise.id);
     assert_eq!(first.corrections.len(), 1);
-    assert!(!first.corrections[0].evidence_ids.is_empty());
+    assert_eq!(first.corrections[0].reason, "Operator review: abc");
+    assert_eq!(first.corrections[0].evidence_ids.len(), 1);
     assert!(second.corrections.is_empty());
     for run in &runs {
         assert_eq!(run.checkpoint.stage, RunStage::Ready);
@@ -209,7 +237,12 @@ fn desktop_operator_flow_records_two_cameras_and_analyzes() {
                 .iter()
                 .all(|job| job.state == JobState::Complete)
         );
-        assert_eq!(run.checkpoint.assessments.len(), 1);
+        let expected_criteria = if scenario == "review-text" { 2 } else { 1 };
+        assert_eq!(
+            run.inputs.exercise.checklist.criteria.len(),
+            expected_criteria
+        );
+        assert_eq!(run.checkpoint.assessments.len(), expected_criteria);
     }
     if let Some(mock) = &mock_openai {
         assert_eq!(rendered_summary, "Workflow complete");
@@ -263,7 +296,15 @@ fn desktop_operator_flow_records_two_cameras_and_analyzes() {
                 "Pauses are allowed."
             );
         }
+        assert_eq!(
+            first.operator_review.marks.len(),
+            first.inputs.exercise.checklist.criteria.len()
+        );
         assert_eq!(first.operator_review.assessments.len(), 1);
+        assert_eq!(
+            first.operator_review.assessments[0].note,
+            "Overall review: abc"
+        );
         assert!(first.current_student_assessment().is_some());
         assert!(second.operator_review.assessments.is_empty());
     }
