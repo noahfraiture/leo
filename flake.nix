@@ -10,38 +10,42 @@
   outputs =
     { nixpkgs, ... }@inputs:
     let
-      system = "aarch64-darwin";
-      pkgs = import nixpkgs {
-        inherit system;
-        config.allowUnfree = true;
-        overlays = [
-          # Overlay which add rust-bin to pkgs
-          inputs.rust-overlay.overlays.default
-          (final: prev: {
-            rustToolchain = prev.rust-bin.stable.latest.default.override {
-              extensions = [ "rust-src" "llvm-tools-preview" ];
-              targets = [ "wasm32-unknown-unknown" ];
-            };
-          })
-        ];
-      };
+      systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
+      forEachSystem = nixpkgs.lib.genAttrs systems;
     in
     {
-      devShells.${system}.default = pkgs.mkShell {
+      devShells = forEachSystem (system:
+        let
+          pkgs = import nixpkgs {
+            inherit system;
+            config.allowUnfree = true;
+            overlays = [
+              inputs.rust-overlay.overlays.default
+              (final: prev: {
+                rustToolchain = prev.rust-bin.stable.latest.default.override {
+                  extensions = [ "rust-src" "llvm-tools-preview" ];
+                  targets = [ "wasm32-unknown-unknown" ];
+                };
+              })
+            ];
+          };
+        in
+        {
+          default = pkgs.mkShell {
+            packages = with pkgs; [
+              (if stdenv.isDarwin then vlc-bin else vlc)
+              just
+              mediamtx
+              ffmpeg
+              tailwindcss_4
+              dioxus-cli
+              bacon
+              cargo-llvm-cov
+              rustToolchain
+            ];
 
-        packages = with pkgs; [
-          vlc-bin
-          just
-          mediamtx
-          ffmpeg
-          tailwindcss_4
-          dioxus-cli
-          bacon
-          cargo-llvm-cov
-          rustToolchain
-        ];
-
-        DIRENV = "Leo";
-      };
+            DIRENV = "Leo";
+          };
+        });
     };
 }
