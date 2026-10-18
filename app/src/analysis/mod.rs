@@ -11,9 +11,7 @@ pub use corrections::save_correction;
 pub use execution::{recheck, resume, start};
 pub use playback::{load_references, open_evidence};
 pub use review::{mark_reviewed, save_assessment};
-pub use state::{
-    AnalysisContext, AnalysisPageState, AnalysisTab, SessionAnalyses, use_analysis_context,
-};
+pub use state::{AnalysisContext, AnalysisPageState, AnalysisTab, use_analysis_context};
 pub use storage::load_session;
 
 #[cfg(test)]

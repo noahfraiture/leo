@@ -19,6 +19,11 @@ pub fn RunSetup(session_id: Uuid) -> Element {
     let settings = use_context::<ResolvedSettings>();
     let gate = use_context::<InferenceGate>();
     let recording = !matches!(operator.read().session, SessionRunState::Idle);
+    let history_loading = state
+        .read()
+        .sessions
+        .get(&session_id)
+        .is_some_and(|session| session.loading);
     let active = gate
         .active
         .read()
@@ -34,18 +39,12 @@ pub fn RunSetup(session_id: Uuid) -> Element {
     });
     let resolved = selected_model
         .as_ref()
+        .ok_or_else(|| "Add an analysis model in Settings and restart Leo.".to_string())
         .and_then(|id| {
             settings
                 .settings
                 .workflow
-                .models
-                .iter()
-                .find(|model| model.id == *id)
-        })
-        .ok_or_else(|| "Add an analysis model in Settings and restart Leo.".to_string())
-        .and_then(|profile| {
-            profile
-                .resolve(&settings.settings.workflow.providers)
+                .resolve_model(id)
                 .map_err(|error| error.to_string())
         });
     let revision = exercise_state.read().selected_revision();
@@ -66,7 +65,8 @@ pub fn RunSetup(session_id: Uuid) -> Element {
         .iter()
         .map(|model| (model.id.clone(), model.name.clone()))
         .collect::<Vec<_>>();
-    let disabled = recording || active.is_some() || revision.is_none() || resolved.is_err();
+    let disabled =
+        history_loading || recording || active.is_some() || revision.is_none() || resolved.is_err();
     let selected_for_start = selected_model.clone();
     rsx! {
         section {

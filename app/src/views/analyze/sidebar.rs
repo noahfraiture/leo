@@ -141,11 +141,13 @@ fn row_status(page: &AnalysisPageState, session_id: uuid::Uuid) -> &'static str 
     let latest = session
         .runs
         .values()
+        .filter(|entry| entry.available)
         .max_by_key(|entry| entry.snapshot.inputs.created_utc_ms);
     match latest.map(|entry| entry.snapshot.checkpoint.stage) {
         Some(backend::analysis::RunStage::Ready) => "Ready for review",
         Some(backend::analysis::RunStage::Paused) => "Processing paused",
         Some(_) => "Incomplete run",
+        None if !session.archived.is_empty() => "Needs attention",
         None => "Not analyzed",
     }
 }

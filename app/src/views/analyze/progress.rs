@@ -1,4 +1,4 @@
-use super::labels::{stage_label, timeline};
+use super::labels::{stage_label, timestamp};
 use crate::{
     analysis::{self, AnalysisContext},
     inference::InferenceGate,
@@ -18,6 +18,21 @@ pub fn RunProgress(session_id: Uuid, run_id: Uuid, snapshot: RunSnapshot) -> Ele
     let gate = use_context::<InferenceGate>();
     let busy = gate.active.read().is_some();
     let recording = !matches!(operator.read().session, SessionRunState::Idle);
+    let (history_loading, decision_saving) = context
+        .state
+        .read()
+        .sessions
+        .get(&session_id)
+        .map(|session| {
+            (
+                session.loading,
+                session
+                    .runs
+                    .get(&run_id)
+                    .is_some_and(|entry| entry.assessment_draft.saving),
+            )
+        })
+        .unwrap_or_default();
     let total = snapshot.checkpoint.jobs.len();
     let complete = snapshot
         .checkpoint
@@ -42,7 +57,7 @@ pub fn RunProgress(session_id: Uuid, run_id: Uuid, snapshot: RunSnapshot) -> Ele
                     button {
                         id: "analysis-resume",
                         class: "btn btn-outline btn-sm",
-                        disabled: busy || recording,
+                        disabled: busy || recording || history_loading || decision_saving,
                         onclick: move |_| analysis::resume(
                             context,
                             operator,
@@ -90,7 +105,7 @@ pub fn RunProgress(session_id: Uuid, run_id: Uuid, snapshot: RunSnapshot) -> Ele
                     AnalysisWarning::RecordingGap { camera_id, start_offset_ms, end_offset_ms } => {
                         rsx! {
                             p { class: "alert alert-warning text-sm",
-                                "Recording gap on camera {camera_id}: {timeline(start_offset_ms)} to {timeline(end_offset_ms)}."
+                                "Recording gap on camera {camera_id}: {timestamp(start_offset_ms)} to {timestamp(end_offset_ms)}."
                             }
                         }
                     }

@@ -24,7 +24,7 @@ pub fn start(
     model_profile_id: String,
 ) {
     let prepared = (|| {
-        let directory = selected_directory(operator, session_id)?;
+        let directory = selected_directory(context, operator, session_id, None)?;
         let revision = exercises
             .state
             .read()
@@ -122,7 +122,7 @@ pub fn resume(
     session_id: Uuid,
     run_id: Uuid,
 ) {
-    let directory = match selected_directory(operator, session_id) {
+    let directory = match selected_directory(context, operator, session_id, Some(run_id)) {
         Ok(directory) => directory,
         Err(error) => {
             show_error(context, session_id, error);
@@ -171,9 +171,12 @@ async fn execute(mut context: AnalysisContext, request: ExecuteRun) -> Result<()
     Ok(())
 }
 
+/// Reject queued actions before they can bind old cached results to another recording folder.
 fn selected_directory(
+    context: AnalysisContext,
     operator: Signal<OperatorState>,
     expected: Uuid,
+    run_id: Option<Uuid>,
 ) -> Result<std::path::PathBuf, String> {
     let operator = operator.read();
     if !matches!(operator.session, SessionRunState::Idle) {
@@ -187,12 +190,33 @@ fn selected_directory(
             "The selected recording changed. Start again from its current selection.".into(),
         );
     }
-    operator
+    let directory = operator
         .sessions
         .iter()
         .find(|row| row.stored.session.id == expected)
         .map(|row| row.stored.directory.clone())
-        .ok_or("Select a completed recording.".into())
+        .ok_or("Select a completed recording.")?;
+    let page = context.state.read();
+    let session = page.sessions.get(&expected);
+    if session.is_some_and(|session| session.directory != directory) {
+        return Err(
+            "The recording folder changed. Wait for its saved history to load, then try again."
+                .into(),
+        );
+    }
+    if session.is_some_and(|session| session.loading) {
+        return Err("Wait for this recording's saved history to finish loading.".into());
+    }
+    if let Some(id) = run_id {
+        let entry = session
+            .and_then(|session| session.runs.get(&id))
+            .filter(|entry| entry.available)
+            .ok_or("Refresh this recording's history and select an available run.")?;
+        if entry.assessment_draft.saving {
+            return Err("Wait for this run's review decision to finish saving.".into());
+        }
+    }
+    Ok(directory)
 }
 
 fn show_error(mut context: AnalysisContext, session_id: Uuid, error: String) {
@@ -291,7 +315,7 @@ pub fn recheck(
     criterion_id: Uuid,
     frame_id: Option<String>,
 ) {
-    let directory = match selected_directory(operator, session_id) {
+    let directory = match selected_directory(context, operator, session_id, Some(run_id)) {
         Ok(directory) => directory,
         Err(error) => {
             show_error(context, session_id, error);
