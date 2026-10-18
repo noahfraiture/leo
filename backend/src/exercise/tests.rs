@@ -25,6 +25,61 @@ fn ready_draft(store: &ExerciseStore) -> ExerciseDraft {
     store.save_draft(&draft).unwrap()
 }
 
+#[test]
+fn oversized_json_cannot_replace_a_readable_exercise_draft() {
+    let (_temporary, store) = store();
+    let saved = ready_draft(&store);
+    let path = store.root.join(saved.id.to_string()).join("draft.json");
+    let original = fs::read(&path).unwrap();
+    let mut edited = saved.clone();
+    edited.checklist.criteria[0].text = "x".repeat(16 * 1024 * 1024);
+
+    assert!(store.save_draft(&edited).is_err());
+    assert_eq!(fs::read(path).unwrap(), original);
+    assert_eq!(store.load_draft(saved.id).unwrap(), saved);
+}
+
+#[test]
+fn corrupt_drafts_do_not_hide_other_saved_exercises() {
+    let (_temporary, store) = store();
+    let valid = ready_draft(&store);
+    let broken = store.create_draft("Damaged configuration").unwrap();
+    let path = store.root.join(broken.id.to_string()).join("draft.json");
+    fs::write(&path, b"broken JSON").unwrap();
+
+    let catalog = store.list().unwrap();
+    assert_eq!(catalog.drafts, vec![valid.clone()]);
+    assert_eq!(catalog.unavailable.len(), 1);
+    assert_eq!(catalog.unavailable[0].exercise_id, broken.id);
+    assert_eq!(catalog.unavailable[0].directory, path.parent().unwrap());
+    assert!(matches!(catalog.unavailable[0].source, Error::Json(_)));
+    assert_eq!(store.load_draft(valid.id).unwrap(), valid);
+    assert_eq!(fs::read(path).unwrap(), b"broken JSON");
+}
+
+#[test]
+fn noncanonical_folder_names_cannot_duplicate_a_configuration_identity() {
+    let (_temporary, store) = store();
+    let draft = ready_draft(&store);
+    let alias = store.root.join(draft.id.simple().to_string());
+    fs::create_dir(&alias).unwrap();
+    fs::copy(
+        store.root.join(draft.id.to_string()).join("draft.json"),
+        alias.join("draft.json"),
+    )
+    .unwrap();
+
+    let catalog = store.list().unwrap();
+
+    assert_eq!(catalog.drafts, vec![draft]);
+    assert_eq!(catalog.unavailable.len(), 1);
+    assert_eq!(catalog.unavailable[0].directory, alias);
+    assert!(matches!(
+        catalog.unavailable[0].source,
+        Error::InvalidStorageEntry
+    ));
+}
+
 fn encoded_image(format: ImageFormat) -> Vec<u8> {
     let pixels = RgbImage::from_fn(2, 3, |x, y| Rgb([x as u8 * 100, y as u8 * 70, 90]));
     let mut output = Cursor::new(Vec::new());

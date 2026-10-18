@@ -1,4 +1,15 @@
+use std::path::PathBuf;
 use uuid::Uuid;
+
+/// A retained configuration folder that could not supply a valid saved draft.
+#[derive(Debug, thiserror::Error)]
+#[error("exercise {exercise_id} is unavailable: {source}")]
+pub struct UnavailableExercise {
+    pub exercise_id: Uuid,
+    pub directory: PathBuf,
+    #[source]
+    pub source: Error,
+}
 
 /// Configuration errors describe storage or editing failures, never candidate performance.
 #[derive(Debug, thiserror::Error)]

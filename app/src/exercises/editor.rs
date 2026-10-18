@@ -10,6 +10,7 @@ use super::{
 pub fn ExerciseEditor() -> Element {
     let context = use_context::<ExerciseContext>();
     let mut state = context.state;
+    let operator = use_context::<Signal<crate::operator::OperatorState>>();
     let (choices, selected_id, loading, creating, error) = {
         let page = state.read();
         (
@@ -24,6 +25,12 @@ pub fn ExerciseEditor() -> Element {
         )
     };
     let creator = context.clone();
+    let unavailable = state
+        .read()
+        .unavailable
+        .iter()
+        .map(|issue| (issue.directory.clone(), issue.to_string()))
+        .collect::<Vec<_>>();
     rsx! {
         section {
             class: "flex min-w-0 flex-col gap-4",
@@ -62,6 +69,22 @@ pub fn ExerciseEditor() -> Element {
             if let Some(error) = error {
                 p { class: "alert alert-error", role: "alert", "{error}" }
             }
+            if !unavailable.is_empty() {
+                section { class: "rounded-box border border-warning p-3 text-sm", aria_label: "Configurations needing repair",
+                    h3 { class: "font-semibold", "Configurations needing repair" }
+                    p { class: "mt-1", "Other saved configurations remain available. Damaged files have been kept for repair." }
+                    for (directory, error) in unavailable {
+                        div { key: "{directory.display()}", class: "mt-3",
+                            p { "{error}" }
+                            p { class: "break-all opacity-70", "{directory.display()}" }
+                            button { class: "btn btn-outline btn-sm mt-2", r#type: "button",
+                                onclick: move |_| crate::operator::spawn_open_folder(operator, directory.clone()),
+                                "Open configuration folder"
+                            }
+                        }
+                    }
+                }
+            }
             if loading {
                 p { role: "status", "Loading saved configurations..." }
             }
@@ -81,7 +104,7 @@ fn ConfigurationBody(exercise_id: Uuid) -> Element {
     let context = use_context::<ExerciseContext>();
     let mut state = context.state;
     let mut step = use_signal(|| 0usize);
-    let Some((name, dirty, published, busy, error, validation_error)) =
+    let Some((name, dirty, published, busy, error, storage_error, validation_error)) =
         state.read().configurations.get(&exercise_id).map(|editor| {
             (
                 editor.draft.name.clone(),
@@ -92,6 +115,7 @@ fn ConfigurationBody(exercise_id: Uuid) -> Element {
                     .is_some_and(|revision| revision.edit_version == editor.saved.edit_version),
                 editor.saving || editor.importing,
                 editor.error.clone(),
+                editor.storage_error.clone(),
                 editor
                     .draft
                     .validate_for_publication()
@@ -105,6 +129,9 @@ fn ConfigurationBody(exercise_id: Uuid) -> Element {
     let draft_saver = context.clone();
     let publisher = context.clone();
     rsx! {
+        if let Some(error) = storage_error {
+            p { class: "alert alert-warning whitespace-pre-wrap", role: "alert", "{error}" }
+        }
         nav { class: "tabs tabs-boxed flex-wrap", aria_label: "Exercise preparation steps",
             for (index, title) in ["1. Exercise", "2. References", "3. Clarify", "4. Confirm"].iter().enumerate() {
                 button { class: if step() == index { "tab tab-active" } else { "tab" },
@@ -116,7 +143,8 @@ fn ConfigurationBody(exercise_id: Uuid) -> Element {
             0 => rsx! {
                 label { class: "form-control",
                     span { class: "label-text mb-1", "Exercise name" }
-                    input { id: "exercise-name", class: "input input-bordered w-full", value: name,
+                    // Native typing owns the current value; delayed renders only update its default.
+                    input { id: "exercise-name", class: "input input-bordered w-full", initial_value: name,
                         oninput: move |event| state.write().edit(exercise_id, |draft| draft.name = event.value()),
                     }
                 }
@@ -134,8 +162,12 @@ fn ConfigurationBody(exercise_id: Uuid) -> Element {
             _ => rsx! { super::preparation::Confirmation { exercise_id } },
         }
         div { class: "flex gap-2",
-            button { class: "btn btn-ghost btn-sm", disabled: step() == 0, onclick: move |_| step -= 1, "Back" }
-            button { class: "btn btn-outline btn-sm", disabled: step() == 3, onclick: move |_| step += 1, "Continue" }
+            button { class: "btn btn-ghost btn-sm", disabled: step() == 0,
+                onclick: move |_| step.set(step().saturating_sub(1)), "Back"
+            }
+            button { class: "btn btn-outline btn-sm", disabled: step() >= 3,
+                onclick: move |_| step.set(step().saturating_add(1).min(3)), "Continue"
+            }
         }
         if let Some(error) = error {
             p { class: "alert alert-error", role: "alert", "{error}" }
@@ -161,7 +193,12 @@ fn ConfigurationBody(exercise_id: Uuid) -> Element {
                 class: "btn btn-primary",
                 disabled: busy || step() != 3 || validation_error.is_some() || (!dirty && published),
                 aria_describedby: validation_error.as_ref().map(|_| "exercise-publication-error"),
-                onclick: move |_| tasks::save(publisher.clone(), exercise_id, true),
+                onclick: move |_| {
+                    // A queued confirmation must still belong to the final preparation screen.
+                    if step() == 3 {
+                        tasks::save(publisher.clone(), exercise_id, true);
+                    }
+                },
                 "Confirm configuration"
             }
             p { class: "text-sm", role: "status",

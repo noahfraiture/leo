@@ -10,7 +10,7 @@ mod preparation;
 mod review;
 mod store;
 
-pub use error::{Error, Result};
+pub use error::{Error, Result, UnavailableExercise};
 pub use formatter::{CHECKLIST_FORMAT_VERSION, format_checklist};
 pub use image::{MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, ReferencePreview, preview_reference_bytes};
 pub use model::{
@@ -21,7 +21,7 @@ pub use preparation::{ChecklistOrder, Clarification, Preparation};
 pub use review::{
     ChecklistProposal, ProposalComment, ProposalCommentKind, ProposedCriterion, SourceRange,
 };
-pub use store::ExerciseStore;
+pub use store::{ExerciseCatalog, ExerciseStore};
 
 #[cfg(test)]
 mod tests;

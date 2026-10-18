@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use backend::exercise::ReferenceAsset;
+use backend::exercise::{ExerciseDraft, ExerciseStore, ReferenceAsset};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use dioxus::prelude::*;
 
@@ -12,31 +12,20 @@ pub fn load(mut context: ExerciseContext) {
     let store = context.store;
     dioxus::dioxus_core::spawn_forever(async move {
         let loaded = tokio::task::spawn_blocking(move || {
-            let mut editors = Vec::new();
-            for draft in store.list()? {
-                let published = store.revisions(draft.id)?.pop();
-                let mut editor = ExerciseEditorState::new(draft, published);
-                for reference in &editor.draft.references {
-                    match store.preview_reference(editor.draft.id, &reference.image, 320) {
-                        Ok(preview) => {
-                            editor
-                                .previews
-                                .insert(reference.image.id, png_data_uri(&preview.png));
-                        }
-                        Err(error) => {
-                            editor.error = Some(error.to_string());
-                        }
-                    }
-                }
-                editors.push(editor);
-            }
-            Ok::<_, backend::exercise::Error>(editors)
+            let catalog = store.list()?;
+            let editors = catalog
+                .drafts
+                .into_iter()
+                .map(|draft| load_editor(&store, draft))
+                .collect::<Vec<_>>();
+            Ok::<_, backend::exercise::Error>((editors, catalog.unavailable))
         })
         .await;
         let mut page = context.state.write();
         page.loading = false;
         match completed(loaded) {
-            Ok(editors) => {
+            Ok((editors, unavailable)) => {
+                page.unavailable = unavailable;
                 for editor in editors {
                     page.configurations.insert(editor.draft.id, editor);
                 }
@@ -45,6 +34,32 @@ pub fn load(mut context: ExerciseContext) {
             Err(error) => page.error = Some(error),
         }
     });
+}
+
+fn load_editor(store: &ExerciseStore, draft: ExerciseDraft) -> ExerciseEditorState {
+    let mut errors = Vec::new();
+    let published = match store.revisions(draft.id) {
+        Ok(mut revisions) => revisions.pop(),
+        Err(error) => {
+            errors.push(format!("Saved publications could not load: {error}. The draft remains editable. Existing publications need repair."));
+            None
+        }
+    };
+    let mut editor = ExerciseEditorState::new(draft, published);
+    for reference in &editor.draft.references {
+        match store.preview_reference(editor.draft.id, &reference.image, 320) {
+            Ok(preview) => {
+                editor
+                    .previews
+                    .insert(reference.image.id, png_data_uri(&preview.png));
+            }
+            Err(error) => errors.push(error.to_string()),
+        }
+    }
+    if !errors.is_empty() {
+        editor.storage_error = Some(errors.join("\n"));
+    }
+    editor
 }
 
 pub fn create(mut context: ExerciseContext) {
@@ -78,7 +93,12 @@ pub fn save(mut context: ExerciseContext, exercise_id: uuid::Uuid, publish: bool
         let Some(editor) = page.configurations.get_mut(&exercise_id) else {
             return;
         };
-        if editor.saving || editor.importing {
+        let unchanged = editor.draft == editor.saved;
+        let already_published = editor
+            .published
+            .as_ref()
+            .is_some_and(|revision| revision.edit_version == editor.saved.edit_version);
+        if editor.saving || editor.importing || (unchanged && (!publish || already_published)) {
             return;
         }
         editor.saving = true;
@@ -176,3 +196,7 @@ fn completed<T>(
 fn png_data_uri(bytes: &[u8]) -> String {
     format!("data:image/png;base64,{}", STANDARD.encode(bytes))
 }
+
+#[cfg(test)]
+#[path = "tests/loading.rs"]
+mod tests;

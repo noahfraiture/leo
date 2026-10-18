@@ -9,9 +9,9 @@ mod state;
 mod tasks;
 
 pub use editor::ExerciseEditor;
-#[cfg(test)]
-pub use state::ExercisePageState;
 pub use state::{ExerciseContext, use_exercise_context};
+#[cfg(test)]
+pub use state::{ExerciseEditorState, ExercisePageState};
 
 #[cfg(test)]
 mod tests;

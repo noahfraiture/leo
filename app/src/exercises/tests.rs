@@ -34,6 +34,170 @@ fn incomplete_reference_metadata_explains_why_configuration_cannot_be_saved() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn unavailable_exercise_folders_remain_visible_alongside_healthy_editors() {
+    use crate::test_support::{RenderHarness, assert_button_disabled, ready_preview};
+    let draft = draft("Healthy configuration remains usable");
+    let mut harness = RenderHarness::new();
+    harness.exercises.selected_id = Some(draft.id);
+    harness
+        .exercises
+        .configurations
+        .insert(draft.id, ExerciseEditorState::new(draft, None));
+    harness
+        .exercises
+        .unavailable
+        .push(backend::exercise::UnavailableExercise {
+            exercise_id: Uuid::new_v4(),
+            directory: "/retained-exercise-folder".into(),
+            source: backend::exercise::Error::Invalid("Damaged saved draft".into()),
+        });
+
+    let html = harness.render_at(ready_preview(), "/analyze");
+
+    assert!(html.contains("Healthy configuration remains usable"));
+    assert!(html.contains("Configurations needing repair"));
+    assert!(html.contains("Damaged saved draft"));
+    assert!(html.contains("/retained-exercise-folder"));
+    assert_button_disabled(&html, "New configuration", false);
+}
+
+#[test]
+fn ordinary_edits_do_not_clear_a_publication_storage_warning() {
+    let draft = draft("Publication needs repair");
+    let id = draft.id;
+    let mut editor = ExerciseEditorState::new(draft, None);
+    editor.storage_error = Some("Saved publication needs repair".into());
+    let mut page = ExercisePageState {
+        configurations: [(id, editor)].into(),
+        ..Default::default()
+    };
+
+    page.edit(id, |draft| draft.name = "Edited draft".into());
+
+    assert_eq!(
+        page.configurations[&id].storage_error.as_deref(),
+        Some("Saved publication needs repair")
+    );
+}
+
+fn question_editor() -> ExerciseEditorState {
+    let mut draft = draft("Question identities");
+    let criterion = &draft.checklist.criteria[0];
+    draft.preparation.questions = ["First answer", "Second answer"]
+        .into_iter()
+        .map(|answer| backend::exercise::Clarification {
+            criterion_id: criterion.id,
+            question: "Which case?".into(),
+            source_text: criterion.text.clone(),
+            answer: answer.into(),
+        })
+        .collect();
+    ExerciseEditorState::new(draft, None)
+}
+
+#[test]
+fn late_question_events_cannot_target_a_neighbor_after_removal() {
+    let mut editor = question_editor();
+    let removed = editor.question_ids[0];
+    let remaining = editor.question_ids[1];
+    assert_ne!(removed, remaining);
+
+    editor.remove_question(removed);
+    editor.remove_question(removed);
+    editor.set_question_answer(removed, "Late input for removed question".into());
+    assert_eq!(editor.draft.preparation.questions.len(), 1);
+    assert_eq!(
+        editor.draft.preparation.questions[0].answer,
+        "Second answer"
+    );
+    editor.set_question_answer(remaining, "Updated remaining answer".into());
+    assert_eq!(
+        editor.draft.preparation.questions[0].answer,
+        "Updated remaining answer"
+    );
+    assert_eq!(editor.question_ids, vec![remaining]);
+}
+
+#[test]
+fn source_confirmation_targets_only_the_requested_question_row() {
+    let mut editor = question_editor();
+    let first = editor.question_ids[0];
+    let second = editor.question_ids[1];
+    let old_source = editor.draft.preparation.questions[0].source_text.clone();
+    editor.draft.checklist.criteria[0].text = "New original wording".into();
+
+    editor.confirm_question_source(second);
+
+    assert_eq!(
+        editor.draft.preparation.questions[0].source_text,
+        old_source
+    );
+    assert_eq!(
+        editor.draft.preparation.questions[1].source_text,
+        "New original wording"
+    );
+    assert_eq!(editor.question_ids, vec![first, second]);
+}
+
+#[test]
+fn saving_an_earlier_draft_does_not_restore_removed_question_identity() {
+    let mut editor = question_editor();
+    let submitted = editor.draft.clone();
+    let removed = editor.question_ids[0];
+    let remaining = editor.question_ids[1];
+    editor.remove_question(removed);
+    let mut saved = submitted.clone();
+    saved.edit_version += 1;
+
+    editor.finish_save(&submitted, saved, None);
+    editor.set_question_answer(remaining, "Typing after save".into());
+
+    assert_eq!(editor.question_ids, vec![remaining]);
+    assert_eq!(editor.draft.preparation.questions.len(), 1);
+    assert_eq!(editor.saved.preparation.questions.len(), 2);
+    assert_eq!(
+        editor.draft.preparation.questions[0].answer,
+        "Typing after save"
+    );
+}
+
+#[test]
+fn assistance_additions_keep_existing_question_identity_and_allocate_each_new_row_once() {
+    use backend::exercise::{
+        ChecklistProposal, ProposalComment, ProposalCommentKind, ProposedCriterion, SourceRange,
+    };
+    let mut editor = question_editor();
+    let original_ids = editor.question_ids.clone();
+    for _ in 0..2 {
+        let range = SourceRange {
+            start: 0,
+            end: editor.draft.source_checklist().source_text().len(),
+        };
+        let proposal = ChecklistProposal::for_draft(
+            &editor.draft,
+            vec![ProposedCriterion {
+                text: editor.draft.checklist.criteria[0].text.clone(),
+                source_ranges: vec![range.clone()],
+            }],
+            vec![ProposalComment {
+                kind: ProposalCommentKind::Ambiguity,
+                text: "Must the case be closed?".into(),
+                source_ranges: vec![range],
+                proposed_item: Some(0),
+            }],
+        )
+        .unwrap();
+        editor.receive_proposal(proposal).unwrap();
+    }
+
+    assert_eq!(&editor.question_ids[..2], original_ids.as_slice());
+    assert_eq!(editor.question_ids.len(), 3);
+    assert_eq!(editor.draft.preparation.questions.len(), 3);
+    assert!(!original_ids.contains(&editor.question_ids[2]));
+}
+
 fn draft(name: &str) -> ExerciseDraft {
     ExerciseDraft {
         schema_version: 1,
@@ -161,6 +325,41 @@ fn explicit_step_deletion_clears_only_its_reference_links() {
     let updated = &page.configurations[&id].draft;
     assert_eq!(updated.references[0].criterion_ids, vec![second]);
     assert_eq!(updated.checklist.criteria[0].id, second);
+}
+
+#[test]
+fn removing_a_reference_releases_only_its_runtime_preview() {
+    let mut draft = draft("Reference removal");
+    let removed = reference(draft.checklist.criteria[0].id);
+    let remaining = reference(draft.checklist.criteria[0].id);
+    let removed_id = removed.image.id;
+    let remaining_id = remaining.image.id;
+    draft.references = vec![removed, remaining.clone()];
+    let exercise_id = draft.id;
+    let mut editor = ExerciseEditorState::new(draft.clone(), None);
+    editor.previews = [
+        (removed_id, "removed thumbnail".into()),
+        (remaining_id, "remaining thumbnail".into()),
+    ]
+    .into();
+    let mut page = ExercisePageState {
+        configurations: [(exercise_id, editor)].into(),
+        ..Default::default()
+    };
+
+    page.remove_reference(exercise_id, removed_id);
+    page.remove_reference(exercise_id, removed_id);
+
+    let editor = &page.configurations[&exercise_id];
+    assert_eq!(editor.draft.references, vec![remaining]);
+    assert_eq!(
+        editor.previews,
+        [(remaining_id, "remaining thumbnail".into())].into()
+    );
+    assert_eq!(
+        editor.saved, draft,
+        "removal must not rewrite the saved snapshot"
+    );
 }
 
 #[test]

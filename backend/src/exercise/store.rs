@@ -7,10 +7,18 @@ use uuid::Uuid;
 
 use super::{
     Checklist, Error, ExerciseDraft, ExerciseRevision, ImageAsset, ReferencePreview, Result,
+    UnavailableExercise,
     image::{self, MAX_IMAGE_BYTES},
     model::SCHEMA_VERSION,
     persistence,
 };
+
+/// Readable configurations and per-folder failures, preserving access to the healthy library.
+#[derive(Debug, Default)]
+pub struct ExerciseCatalog {
+    pub drafts: Vec<ExerciseDraft>,
+    pub unavailable: Vec<UnavailableExercise>,
+}
 
 /// Blocking local persistence for exercise drafts, immutable publications, and image originals.
 /// Call from a worker when used by the desktop UI. The root is the `data/exercises` directory.
@@ -46,13 +54,13 @@ impl ExerciseStore {
         Ok(draft)
     }
 
-    /// Enumerate saved configurations, reporting corrupt exercise files rather than hiding them.
-    pub fn list(&self) -> Result<Vec<ExerciseDraft>> {
+    /// Enumerate saved drafts and report individual damaged folders without hiding healthy ones.
+    pub fn list(&self) -> Result<ExerciseCatalog> {
         if !self.root.try_exists()? {
-            return Ok(Vec::new());
+            return Ok(ExerciseCatalog::default());
         }
         persistence::ensure_directory(&self.root)?;
-        let mut drafts = Vec::new();
+        let mut catalog = ExerciseCatalog::default();
         for entry in fs::read_dir(&self.root)? {
             let entry = entry?;
             let Some(id) = entry
@@ -62,16 +70,35 @@ impl ExerciseStore {
             else {
                 continue;
             };
-            if !entry.file_type()?.is_dir() {
-                return Err(Error::InvalidStorageEntry);
-            }
-            // An interrupted initial publication has no saved configuration to enumerate.
-            if entry.path().join("draft.json").try_exists()? {
-                drafts.push(self.load_draft(id)?);
+            let directory = entry.path();
+            let loaded = (|| {
+                if !entry.file_type()?.is_dir() || entry.file_name() != id.to_string().as_str() {
+                    return Err(Error::InvalidStorageEntry);
+                }
+                // An interrupted initial publication has no saved configuration to enumerate.
+                if directory.join("draft.json").try_exists()? {
+                    self.load_draft(id).map(Some)
+                } else {
+                    Ok(None)
+                }
+            })();
+            match loaded {
+                Ok(Some(draft)) => catalog.drafts.push(draft),
+                Ok(None) => {}
+                Err(source) => catalog.unavailable.push(UnavailableExercise {
+                    exercise_id: id,
+                    directory,
+                    source,
+                }),
             }
         }
-        drafts.sort_by(|left, right| left.name.cmp(&right.name).then(left.id.cmp(&right.id)));
-        Ok(drafts)
+        catalog
+            .drafts
+            .sort_by(|left, right| left.name.cmp(&right.name).then(left.id.cmp(&right.id)));
+        catalog
+            .unavailable
+            .sort_by(|left, right| left.directory.cmp(&right.directory));
+        Ok(catalog)
     }
 
     pub fn load_draft(&self, exercise_id: Uuid) -> Result<ExerciseDraft> {

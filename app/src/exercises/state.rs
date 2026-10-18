@@ -19,27 +19,48 @@ pub struct ExerciseEditorState {
     pub draft: ExerciseDraft,
     pub saved: ExerciseDraft,
     pub published: Option<ExerciseRevision>,
+    /// Native checklist fields are replaced only when an explicit proposal is applied.
+    pub checklist_edit_id: Uuid,
+    /// Identifies the displayed proposal so new suggestions replace previous native fields.
+    pub proposal_edit_id: Uuid,
+    /// Runtime row identities parallel to draft preparation questions; never persisted or sent.
+    pub question_ids: Vec<Uuid>,
     pub previews: BTreeMap<Uuid, String>,
     pub pasted_text: String,
+    /// Renewed after Add consumes the paste buffer, rejecting input from its previous field.
+    pub pasted_edit_id: Uuid,
     pub pending_delete: Option<Uuid>,
     pub saving: bool,
     pub importing: bool,
     pub formatting: bool,
+    /// Startup storage failures stay visible independently of transient editing errors.
+    pub storage_error: Option<String>,
     pub error: Option<String>,
 }
 
 impl ExerciseEditorState {
     pub fn new(draft: ExerciseDraft, published: Option<ExerciseRevision>) -> Self {
+        let question_ids = draft
+            .preparation
+            .questions
+            .iter()
+            .map(|_| Uuid::new_v4())
+            .collect();
         Self {
             saved: draft.clone(),
             draft,
             published,
+            checklist_edit_id: Uuid::new_v4(),
+            proposal_edit_id: Uuid::new_v4(),
+            question_ids,
             previews: BTreeMap::new(),
             pasted_text: String::new(),
+            pasted_edit_id: Uuid::new_v4(),
             pending_delete: None,
             saving: false,
             importing: false,
             formatting: false,
+            storage_error: None,
             error: None,
         }
     }
@@ -61,6 +82,35 @@ impl ExerciseEditorState {
             self.published = Some(revision);
         }
         self.saving = false;
+    }
+
+    /// Ignore edits queued before the paste buffer was consumed.
+    pub fn set_pasted_text(&mut self, edit_id: Uuid, text: String) {
+        if self.pasted_edit_id == edit_id {
+            self.pasted_text = text;
+        }
+    }
+
+    /// Append nonempty pasted lines once and replace the consumed native field.
+    pub fn add_pasted_steps(&mut self, edit_id: Uuid) {
+        if self.pasted_edit_id != edit_id {
+            return;
+        }
+        let added = self
+            .pasted_text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| Criterion {
+                id: Uuid::new_v4(),
+                text: line.to_owned(),
+            })
+            .collect::<Vec<_>>();
+        if added.is_empty() {
+            return;
+        }
+        self.draft.checklist.criteria.extend(added);
+        self.pasted_text.clear();
+        self.pasted_edit_id = Uuid::new_v4();
     }
 
     /// Explicitly add operator-created final steps to preparation without replacing earlier source.
@@ -85,6 +135,7 @@ impl ExerciseEditorState {
             .map_err(|error| error.to_string())?;
         let sources = self.draft.source_checklist().criteria.clone();
         let mut questions = self.draft.preparation.questions.clone();
+        let mut question_ids = self.question_ids.clone();
         for comment in &proposal.comments {
             let Some(item) = comment.proposed_item.and_then(|index| sources.get(index)) else {
                 continue;
@@ -100,9 +151,11 @@ impl ExerciseEditorState {
                     question: comment.text.clone(),
                     answer: String::new(),
                 });
+                question_ids.push(Uuid::new_v4());
             }
         }
         self.draft.preparation.questions = questions;
+        self.question_ids = question_ids;
         if self.draft.preparation.reviewed_basis.is_none() {
             self.draft
                 .preparation
@@ -113,7 +166,86 @@ impl ExerciseEditorState {
             ChecklistProposal::for_draft(&self.draft, proposal.criteria, proposal.comments)
                 .map_err(|error| error.to_string())?;
         self.draft.preparation.proposal = Some(review);
+        self.proposal_edit_id = Uuid::new_v4();
         Ok(())
+    }
+
+    /// Edits belong to the displayed proposal, never a replacement returned by a later review.
+    pub fn set_proposal_text(&mut self, edit_id: Uuid, index: usize, text: String) {
+        if self.proposal_edit_id != edit_id {
+            return;
+        }
+        if let Some(item) = self
+            .draft
+            .preparation
+            .proposal
+            .as_mut()
+            .and_then(|proposal| proposal.criteria.get_mut(index))
+        {
+            item.text = text;
+        }
+    }
+
+    /// Ignore queued input from fields replaced by an explicitly applied proposal.
+    pub fn set_criterion_text(&mut self, id: Uuid, edit_id: Uuid, text: String) {
+        if self.checklist_edit_id != edit_id {
+            return;
+        }
+        if let Some(item) = self
+            .draft
+            .checklist
+            .criteria
+            .iter_mut()
+            .find(|item| item.id == id)
+        {
+            item.text = text;
+            self.error = None;
+        }
+    }
+
+    /// Apply typing to the original row even if preceding questions were removed.
+    pub fn set_question_answer(&mut self, id: Uuid, answer: String) {
+        let Some(index) = self.question_index(id) else {
+            return;
+        };
+        self.draft.preparation.questions[index].answer = answer;
+        self.error = None;
+    }
+
+    /// A repeated queued removal cannot remove the question that shifted into its place.
+    pub fn remove_question(&mut self, id: Uuid) {
+        let Some(index) = self.question_index(id) else {
+            return;
+        };
+        self.question_ids.remove(index);
+        self.draft.preparation.questions.remove(index);
+        self.error = None;
+    }
+
+    /// Explicitly confirm this answer against the criterion's current original wording.
+    pub fn confirm_question_source(&mut self, id: Uuid) {
+        let Some(index) = self.question_index(id) else {
+            return;
+        };
+        let criterion_id = self.draft.preparation.questions[index].criterion_id;
+        if let Some(text) = self
+            .draft
+            .source_checklist()
+            .criteria
+            .iter()
+            .find(|item| item.id == criterion_id)
+            .map(|item| item.text.clone())
+        {
+            self.draft.preparation.questions[index].source_text = text;
+            self.error = None;
+        }
+    }
+
+    fn question_index(&self, id: Uuid) -> Option<usize> {
+        self.question_ids
+            .iter()
+            .position(|candidate| *candidate == id)
+            .filter(|index| *index < self.draft.preparation.questions.len())
     }
 
     /// Apply edited suggestions while retaining each exactly mapped source criterion's identity.
@@ -162,6 +294,7 @@ impl ExerciseEditorState {
             .preparation
             .reconcile()
             .map_err(|error| error.to_string())?;
+        self.checklist_edit_id = Uuid::new_v4();
         self.error = None;
         Ok(())
     }
@@ -171,6 +304,8 @@ impl ExerciseEditorState {
 #[derive(Default)]
 pub struct ExercisePageState {
     pub configurations: BTreeMap<Uuid, ExerciseEditorState>,
+    /// Retained folders whose drafts could not be loaded; healthy configurations stay editable.
+    pub unavailable: Vec<backend::exercise::UnavailableExercise>,
     pub selected_id: Option<Uuid>,
     pub loading: bool,
     pub creating: bool,
@@ -208,6 +343,18 @@ impl ExercisePageState {
         });
         if let Some(editor) = self.configurations.get_mut(&exercise_id) {
             editor.pending_delete = None;
+        }
+    }
+
+    /// Remove a draft reference and release its runtime thumbnail, retaining saved originals.
+    pub fn remove_reference(&mut self, exercise_id: Uuid, asset_id: Uuid) {
+        if let Some(editor) = self.configurations.get_mut(&exercise_id) {
+            editor
+                .draft
+                .references
+                .retain(|item| item.image.id != asset_id);
+            editor.previews.remove(&asset_id);
+            editor.error = None;
         }
     }
 
