@@ -17,7 +17,8 @@ pub fn ContextEditor(exercise_id: Uuid) -> Element {
             span { class: "label-text mb-1", "Scene context" }
             textarea { id: "exercise-context", class: "textarea textarea-bordered", rows: 3,
                 placeholder: "Equipment, location and names the evaluator should understand.",
-                value: preparation.scene_context,
+                // Input events persist the draft without replaying older text over native typing.
+                initial_value: preparation.scene_context,
                 oninput: move |event| state.write().edit(exercise_id, |draft| draft.preparation.scene_context = event.value()),
             }
         }
@@ -72,7 +73,7 @@ pub fn OriginalChecklist(exercise_id: Uuid) -> Element {
             p { class: "text-sm opacity-70", "Source preserved before assistance. Editing it leaves your final checklist unchanged; review the final wording before confirming." }
             for (index, criterion) in source.criteria.iter().enumerate() {
                 textarea { key: "{criterion.id}", class: "textarea textarea-bordered w-full", rows: 2,
-                    aria_label: "Original step {index + 1}", value: criterion.text.clone(),
+                    aria_label: "Original step {index + 1}", initial_value: criterion.text.clone(),
                     oninput: move |event| state.write().edit(exercise_id, |draft| {
                         if let Some(source) = &mut draft.preparation.source { source.criteria[index].text = event.value(); }
                     }),
@@ -87,7 +88,14 @@ pub fn OriginalChecklist(exercise_id: Uuid) -> Element {
 #[component]
 pub fn ClarificationAnswers(exercise_id: Uuid) -> Element {
     let ExerciseContext { mut state, .. } = use_context::<ExerciseContext>();
-    let draft = state.read().configurations[&exercise_id].draft.clone();
+    let Some((draft, question_ids)) = state
+        .read()
+        .configurations
+        .get(&exercise_id)
+        .map(|editor| (editor.draft.clone(), editor.question_ids.clone()))
+    else {
+        return rsx! {};
+    };
     rsx! {
         section { class: "flex flex-col gap-3", aria_label: "Operator clarification answers",
             h3 { class: "font-semibold", "Questions for you" }
@@ -95,26 +103,33 @@ pub fn ClarificationAnswers(exercise_id: Uuid) -> Element {
             if draft.preparation.questions.is_empty() {
                 p { class: "text-sm", "No questions saved. You can review and confirm the checklist without AI assistance." }
             }
-            for (index, question) in draft.preparation.questions.iter().enumerate() {
-                label { class: "form-control rounded-box border border-base-300 p-3",
+            for (question_id, question) in question_ids.into_iter().zip(draft.preparation.questions.clone()) {
+                label { key: "{question_id}", class: "form-control rounded-box border border-base-300 p-3",
                     span { class: "text-xs opacity-70",
                         "Original wording: {question.source_text}"
                     }
                     span { class: "label-text my-2 font-semibold", "{question.question}" }
                     if draft.source_checklist().criteria.iter().any(|item| item.id == question.criterion_id && item.text != question.source_text) {
                         p { class: "text-warning text-sm", "The source changed. This answer is not used until you confirm it still applies." }
-                        button { class: "btn btn-outline btn-sm", onclick: move |_| state.write().edit(exercise_id, |draft| {
-                            let id = draft.preparation.questions[index].criterion_id;
-                            if let Some(item) = draft.source_checklist().criteria.iter().find(|item| item.id == id) {
-                                draft.preparation.questions[index].source_text = item.text.clone();
+                        button { class: "btn btn-outline btn-sm", onclick: move |_| {
+                            if let Some(editor) = state.write().configurations.get_mut(&exercise_id) {
+                                editor.confirm_question_source(question_id);
                             }
-                        }), "Answer still applies to the new wording" }
+                        }, "Answer still applies to the new wording" }
 
                     }
-                    button { class: "btn btn-ghost btn-sm self-start", onclick: move |_| state.write().edit(exercise_id, |draft| { draft.preparation.questions.remove(index); }), "Remove question" }
+                    button { class: "btn btn-ghost btn-sm self-start", onclick: move |_| {
+                        if let Some(editor) = state.write().configurations.get_mut(&exercise_id) {
+                            editor.remove_question(question_id);
+                        }
+                    }, "Remove question" }
                     textarea { class: "textarea textarea-bordered", rows: 2,
-                        value: question.answer.clone(), placeholder: "Leave blank if this policy is not decided yet",
-                        oninput: move |event| state.write().edit(exercise_id, |draft| draft.preparation.questions[index].answer = event.value()),
+                        initial_value: question.answer.clone(), placeholder: "Leave blank if this policy is not decided yet",
+                        oninput: move |event| {
+                            if let Some(editor) = state.write().configurations.get_mut(&exercise_id) {
+                                editor.set_question_answer(question_id, event.value());
+                            }
+                        },
                     }
                 }
             }

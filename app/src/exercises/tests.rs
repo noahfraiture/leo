@@ -216,6 +216,104 @@ fn draft(name: &str) -> ExerciseDraft {
     }
 }
 
+#[cfg(unix)]
+fn render_checklist_review(
+    draft: ExerciseDraft,
+    selected_model: Option<String>,
+    workflow: crate::settings::WorkflowSettings,
+) -> String {
+    use dioxus::{dioxus_core::NoOpMutations, prelude::*};
+
+    fn root(
+        (draft, selected_model, workflow, store): (
+            ExerciseDraft,
+            Option<String>,
+            crate::settings::WorkflowSettings,
+            crate::settings::SettingsStore,
+        ),
+    ) -> Element {
+        let exercise_id = draft.id;
+        let state = use_signal(move || ExercisePageState {
+            selected_id: Some(exercise_id),
+            formatter_model_id: selected_model,
+            configurations: [(exercise_id, ExerciseEditorState::new(draft, None))].into(),
+            ..Default::default()
+        });
+        let settings = store
+            .resolve(crate::settings::Settings {
+                workflow,
+                ..Default::default()
+            })
+            .unwrap();
+        use_context_provider(move || settings);
+        use_context_provider(move || super::state::ExerciseContext {
+            state,
+            store: backend::exercise::ExerciseStore::new(store.default_data_root.join("exercises")),
+        });
+        crate::inference::use_inference_gate();
+        rsx! { super::formatting::ChecklistAssistance { exercise_id } }
+    }
+
+    let temporary = tempfile::tempdir().unwrap();
+    let store = crate::settings::SettingsStore::new(
+        temporary.path().join("settings.json"),
+        temporary.path().join("data"),
+    );
+    let mut dom = VirtualDom::new_with_props(root, (draft, selected_model, workflow, store));
+    dom.rebuild(&mut NoOpMutations);
+    dioxus_ssr::render(&dom)
+}
+
+#[cfg(unix)]
+#[test]
+fn checklist_review_readiness_follows_its_original_source_wording() {
+    use crate::test_support::opening_tag_with_marker;
+    let mut disabled = Vec::new();
+    for empty_source in [true, false] {
+        let mut draft = draft("Review source readiness");
+        draft.preparation.source = Some(draft.checklist.clone());
+        if empty_source {
+            draft.preparation.source.as_mut().unwrap().criteria[0]
+                .text
+                .clear();
+        } else {
+            draft.checklist.criteria[0].text.clear();
+        }
+        let workflow = crate::test_workflow(Some(crate::test_openai_config()), 8, 0);
+        let html = render_checklist_review(draft, None, workflow);
+        disabled.push(
+            opening_tag_with_marker(&html, "button", r#"id="exercise-format""#)
+                .contains("disabled"),
+        );
+    }
+    assert_eq!(disabled, [true, false]);
+}
+
+#[cfg(unix)]
+#[test]
+fn checklist_review_explains_an_unusable_selected_model_before_starting() {
+    use crate::test_support::opening_tag_with_marker;
+
+    for missing_model in [true, false] {
+        let draft = draft("Checklist review admission");
+        let mut workflow = crate::test_workflow(Some(crate::test_openai_config()), 8, 0);
+        let (selected_model, expected) = if missing_model {
+            (Some("missing".into()), "selected model profile is missing")
+        } else {
+            workflow.execution.memory_budget_mib = 1024;
+            workflow.models[0].memory_cost_mib = 2048;
+            (None, "exceeds the configured memory budget")
+        };
+        let html = render_checklist_review(draft, selected_model, workflow);
+
+        assert!(
+            opening_tag_with_marker(&html, "button", r#"id="exercise-format""#)
+                .contains("disabled")
+        );
+        assert!(html.contains(expected));
+    }
+}
+
 fn publication(draft: &ExerciseDraft) -> ExerciseRevision {
     ExerciseRevision {
         schema_version: 1,
@@ -428,6 +526,82 @@ fn propose(editor: &mut ExerciseEditorState) {
             ChecklistProposal::for_draft(&editor.draft, criteria, Vec::new()).unwrap(),
         )
         .unwrap();
+}
+
+#[test]
+fn consumed_paste_rejects_queued_input_and_add_without_consuming_new_text() {
+    let mut editor = ExerciseEditorState::new(draft("Example"), None);
+    let previous_edit_id = editor.pasted_edit_id;
+    editor.set_pasted_text(previous_edit_id, "First pasted step".into());
+    editor.add_pasted_steps(previous_edit_id);
+    assert!(editor.pasted_text.is_empty());
+    assert_eq!(editor.draft.checklist.criteria.len(), 2);
+    assert_eq!(editor.draft.checklist.criteria[1].text, "First pasted step");
+
+    let current_edit_id = editor.pasted_edit_id;
+    assert_ne!(current_edit_id, previous_edit_id);
+    editor.set_pasted_text(current_edit_id, "Next operator text".into());
+    editor.set_pasted_text(previous_edit_id, "Late old input".into());
+    editor.add_pasted_steps(previous_edit_id);
+    assert_eq!(editor.pasted_text, "Next operator text");
+    assert_eq!(editor.draft.checklist.criteria.len(), 2);
+}
+
+#[test]
+fn applied_wording_rejects_input_queued_from_the_previous_checklist_fields() {
+    let mut editor = ExerciseEditorState::new(draft("Example"), None);
+    let criterion_id = editor.draft.checklist.criteria[0].id;
+    let previous_edit_id = editor.checklist_edit_id;
+    editor.set_criterion_text(criterion_id, previous_edit_id, "Operator wording".into());
+    propose(&mut editor);
+    editor.apply_proposal().unwrap();
+
+    let current_edit_id = editor.checklist_edit_id;
+    assert_ne!(current_edit_id, previous_edit_id);
+    editor.set_criterion_text(criterion_id, previous_edit_id, "Late old input".into());
+    assert_eq!(
+        editor.draft.checklist.criteria[0].text,
+        "Confirmed: Operator wording"
+    );
+    editor.set_criterion_text(
+        criterion_id,
+        current_edit_id,
+        "Further operator edits".into(),
+    );
+    assert_eq!(editor.draft.checklist.criteria[0].id, criterion_id);
+    assert_eq!(
+        editor.draft.checklist.criteria[0].text,
+        "Further operator edits"
+    );
+}
+
+#[test]
+fn new_suggestions_reject_input_queued_from_the_previous_proposal_fields() {
+    let mut editor = ExerciseEditorState::new(draft("Example"), None);
+    propose(&mut editor);
+    let previous_edit_id = editor.proposal_edit_id;
+    editor.set_proposal_text(previous_edit_id, 0, "Edited first suggestion".into());
+    assert_eq!(
+        editor.draft.preparation.proposal.as_ref().unwrap().criteria[0].text,
+        "Edited first suggestion"
+    );
+
+    propose(&mut editor);
+    let current_edit_id = editor.proposal_edit_id;
+    assert_ne!(current_edit_id, previous_edit_id);
+    let expected = editor.draft.preparation.proposal.as_ref().unwrap().criteria[0]
+        .text
+        .clone();
+    editor.set_proposal_text(previous_edit_id, 0, "Late old input".into());
+    assert_eq!(
+        editor.draft.preparation.proposal.as_ref().unwrap().criteria[0].text,
+        expected
+    );
+    editor.set_proposal_text(current_edit_id, 0, "Edited new suggestion".into());
+    assert_eq!(
+        editor.draft.preparation.proposal.as_ref().unwrap().criteria[0].text,
+        "Edited new suggestion"
+    );
 }
 
 #[test]

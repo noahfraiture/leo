@@ -1,9 +1,6 @@
 use std::time::Duration;
 
-use backend::{
-    exercise::ChecklistProposal,
-    model::{ModelClient, ScheduledJob, plan_execution},
-};
+use backend::{exercise::ChecklistProposal, model::ModelClient};
 use dioxus::prelude::*;
 use uuid::Uuid;
 
@@ -23,21 +20,21 @@ pub fn ChecklistAssistance(exercise_id: Uuid) -> Element {
     let active_task = gate.active.read().as_ref().map(|task| task.label.clone());
     let active = use_context::<ResolvedSettings>();
     let workflow = active.settings.workflow;
-    let Some((formatting, proposal, stale, ready, selected_model)) =
+    let Some((formatting, proposal, proposal_edit_id, stale, ready, selected_model)) =
         state.read().configurations.get(&exercise_id).map(|editor| {
+            let source = editor.draft.source_checklist();
             (
                 editor.formatting,
                 editor.draft.preparation.proposal.clone(),
+                editor.proposal_edit_id,
                 editor
                     .draft
                     .preparation
                     .proposal
                     .as_ref()
                     .is_some_and(|proposal| proposal.validate_against(&editor.draft).is_err()),
-                !editor.draft.checklist.criteria.is_empty()
-                    && editor
-                        .draft
-                        .checklist
+                !source.criteria.is_empty()
+                    && source
                         .criteria
                         .iter()
                         .all(|item| !item.text.trim().is_empty()),
@@ -58,6 +55,14 @@ pub fn ChecklistAssistance(exercise_id: Uuid) -> Element {
         .collect::<Vec<_>>();
     let requester = context.clone();
     let request_model = selected_model.clone();
+    let resolved = selected_model
+        .as_ref()
+        .ok_or_else(|| "Add a checklist review model in Settings and restart Leo.".to_string())
+        .and_then(|id| {
+            workflow
+                .resolve_model(id)
+                .map_err(|error| error.to_string())
+        });
     rsx! {
         section {
             class: "mt-4 rounded-box border border-base-300 p-3",
@@ -86,7 +91,7 @@ pub fn ChecklistAssistance(exercise_id: Uuid) -> Element {
                 button {
                     id: "exercise-format",
                     class: "btn btn-outline",
-                    disabled: formatting || active_task.is_some() || !ready || request_model.is_none(),
+                    disabled: formatting || active_task.is_some() || !ready || resolved.is_err(),
                     onclick: move |_| {
                         if let Some(model_id) = request_model.clone() {
                             request(requester.clone(), exercise_id, workflow.clone(), model_id, gate);
@@ -97,6 +102,14 @@ pub fn ChecklistAssistance(exercise_id: Uuid) -> Element {
                     } else {
                         "Format and review"
                     }
+                }
+            }
+            if let Err(ref error) = resolved {
+                p { class: "mt-2 text-sm text-warning", "{error}" }
+            }
+            if !ready {
+                p { class: "mt-2 text-sm text-warning",
+                    "Complete the original checklist on the Exercise screen before requesting a review."
                 }
             }
             if let Some(ref active_task) = active_task {
@@ -111,8 +124,9 @@ pub fn ChecklistAssistance(exercise_id: Uuid) -> Element {
                 div { class: "mt-3 flex flex-col gap-3",
                     for (index, item) in proposal.criteria.iter().enumerate() {
                         ProposalItem {
-                            key: "{index}",
+                            key: "{proposal_edit_id}-{index}",
                             exercise_id,
+                            edit_id: proposal_edit_id,
                             index,
                             source: item.source_ranges
                                 .iter()
@@ -124,28 +138,34 @@ pub fn ChecklistAssistance(exercise_id: Uuid) -> Element {
                     }
                 }
                 ReviewComments { proposal: proposal.clone() }
-                div { class: "mt-3 flex gap-2",
-                    button {
-                        id: "exercise-apply-proposal",
-                        class: "btn btn-primary btn-sm",
-                        disabled: stale,
-                        onclick: move |_| {
-                            if let Some(editor) = state.write().configurations.get_mut(&exercise_id) {
-                                if let Err(error) = editor.apply_proposal() {
+                // Replacement suggestions need new controls as well as new text fields.
+                for proposal_edit_id in [proposal_edit_id] {
+                    div { key: "{proposal_edit_id}", class: "mt-3 flex gap-2",
+                        button {
+                            id: "exercise-apply-proposal",
+                            class: "btn btn-primary btn-sm",
+                            disabled: stale,
+                            onclick: move |_| {
+                                if let Some(editor) = state.write().configurations.get_mut(&exercise_id)
+                                    && editor.proposal_edit_id == proposal_edit_id
+                                    && let Err(error) = editor.apply_proposal()
+                                {
                                     editor.error = Some(error);
                                 }
-                            }
-                        },
-                        "Apply to editable checklist"
-                    }
-                    button {
-                        class: "btn btn-ghost btn-sm",
-                        onclick: move |_| {
-                            if let Some(editor) = state.write().configurations.get_mut(&exercise_id) {
-                                editor.draft.preparation.proposal = None;
-                            }
-                        },
-                        "Dismiss proposal"
+                            },
+                            "Apply to editable checklist"
+                        }
+                        button {
+                            class: "btn btn-ghost btn-sm",
+                            onclick: move |_| {
+                                if let Some(editor) = state.write().configurations.get_mut(&exercise_id)
+                                    && editor.proposal_edit_id == proposal_edit_id
+                                {
+                                    editor.draft.preparation.proposal = None;
+                                }
+                            },
+                            "Dismiss proposal"
+                        }
                     }
                 }
             }
@@ -155,12 +175,18 @@ pub fn ChecklistAssistance(exercise_id: Uuid) -> Element {
 }
 
 #[component]
-fn ProposalItem(exercise_id: Uuid, index: usize, source: String, text: String) -> Element {
+fn ProposalItem(
+    exercise_id: Uuid,
+    edit_id: Uuid,
+    index: usize,
+    source: String,
+    text: String,
+) -> Element {
     let ExerciseContext { mut state, .. } = use_context::<ExerciseContext>();
     rsx! {
         div { class: "grid gap-2 md:grid-cols-2",
             div { class: "rounded bg-base-200 p-3",
-                p { class: "text-xs font-semibold", "Your current wording" }
+                p { class: "text-xs font-semibold", "Your original wording" }
                 p { class: "mt-1 whitespace-pre-wrap text-sm", "{source}" }
             }
             label { class: "form-control",
@@ -168,16 +194,10 @@ fn ProposalItem(exercise_id: Uuid, index: usize, source: String, text: String) -
                 textarea {
                     class: "textarea textarea-bordered w-full",
                     rows: 3,
-                    value: text,
+                    initial_value: text,
                     oninput: move |event| {
-                        if let Some(item) = state
-                            .write()
-                            .configurations
-                            .get_mut(&exercise_id)
-                            .and_then(|editor| editor.draft.preparation.proposal.as_mut())
-                            .and_then(|proposal| proposal.criteria.get_mut(index))
-                        {
-                            item.text = event.value();
+                        if let Some(editor) = state.write().configurations.get_mut(&exercise_id) {
+                            editor.set_proposal_text(edit_id, index, event.value());
                         }
                     },
                 }
@@ -257,21 +277,8 @@ fn request(
         let _lease = lease;
         let result = async {
             let model = workflow
-                .models
-                .iter()
-                .find(|profile| profile.id == model_id)
-                .ok_or("The checklist review model is missing.")?
-                .resolve(&workflow.providers)
+                .resolve_model(&model_id)
                 .map_err(|error| error.to_string())?;
-            plan_execution(
-                &[ScheduledJob {
-                    id: "checklist-format".into(),
-                    profile_id: model.profile.id.clone(),
-                }],
-                std::slice::from_ref(&model),
-                &workflow.execution,
-            )
-            .map_err(|error| error.to_string())?;
             let provider = workflow
                 .providers
                 .iter()

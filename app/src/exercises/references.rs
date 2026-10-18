@@ -30,22 +30,27 @@ pub fn ReferenceLibrary(exercise_id: Uuid) -> Element {
             p { class: "mt-1 text-sm opacity-70",
                 "Upload images that clarify objects or states. Label them yourself and link them to the relevant checklist steps."
             }
-            label { class: "form-control mt-3",
-                span { class: "label-text mb-1", "Upload a JPEG or PNG image" }
-                input {
-                    key: "{picker_key}",
-                    id: "exercise-reference-upload",
-                    class: "file-input file-input-bordered w-full",
-                    r#type: "file",
-                    accept: "image/jpeg,image/png",
-                    disabled: busy,
-                    onchange: move |event| {
-                        if let Some(file) = event.files().into_iter().next() {
-                            tasks::import(context.clone(), exercise_id, file.path());
-                        }
-                        let next = picker_key().wrapping_add(1);
-                        picker_key.set(next);
-                    },
+            // Remount after selection so the native chooser clears its previous filename.
+            for picker_key_value in [picker_key()] {
+                label { key: "{picker_key_value}", class: "form-control mt-3",
+                    span { class: "label-text mb-1", "Upload a JPEG or PNG image" }
+                    input {
+                        id: "exercise-reference-upload",
+                        class: "file-input file-input-bordered w-full",
+                        r#type: "file",
+                        accept: "image/jpeg,image/png",
+                        disabled: busy,
+                        onchange: {
+                            let context = context.clone();
+                            move |event| {
+                                if let Some(file) = event.files().into_iter().next() {
+                                    tasks::import(context.clone(), exercise_id, file.path());
+                                }
+                                let next = picker_key().wrapping_add(1);
+                                picker_key.set(next);
+                            }
+                        },
+                    }
                 }
             }
             div { class: "mt-4 flex flex-col gap-4",
@@ -91,14 +96,7 @@ fn ReferenceCard(
                     button {
                         class: "btn btn-ghost btn-sm mt-2 text-error",
                         onclick: move |_| {
-                            state
-                                .write()
-                                .edit(
-                                    exercise_id,
-                                    |draft| {
-                                        draft.references.retain(|item| item.image.id != asset_id);
-                                    },
-                                )
+                            state.write().remove_reference(exercise_id, asset_id);
                         },
                         "Remove reference"
                     }
@@ -173,7 +171,7 @@ fn ReferenceText(
             span { class: "label-text mb-1", "{label}" }
             input {
                 class: "input input-bordered w-full",
-                value,
+                initial_value: value,
                 oninput: move |event| {
                     state
                         .write()

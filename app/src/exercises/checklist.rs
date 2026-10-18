@@ -8,7 +8,7 @@ use super::state::ExerciseContext;
 #[component]
 pub fn ChecklistEditor(exercise_id: Uuid) -> Element {
     let ExerciseContext { mut state, .. } = use_context::<ExerciseContext>();
-    let Some((criteria, pasted, pending_delete, linked_count)) =
+    let Some((criteria, edit_id, pasted, pasted_edit_id, pending_delete, linked_count)) =
         state.read().configurations.get(&exercise_id).map(|editor| {
             let linked_count = editor
                 .draft
@@ -22,7 +22,9 @@ pub fn ChecklistEditor(exercise_id: Uuid) -> Element {
                 .count();
             (
                 editor.draft.checklist.criteria.clone(),
+                editor.checklist_edit_id,
                 editor.pasted_text.clone(),
+                editor.pasted_edit_id,
                 editor.pending_delete,
                 linked_count,
             )
@@ -42,26 +44,34 @@ pub fn ChecklistEditor(exercise_id: Uuid) -> Element {
             div { class: "mt-4 flex flex-col gap-3",
                 for (position, criterion) in criteria.into_iter().enumerate() {
                     CriterionRow {
-                        key: "{criterion.id}",
+                        key: "{criterion.id}-{edit_id}",
                         exercise_id,
+                        edit_id,
                         criterion,
                         position,
                         count,
                     }
                 }
             }
-            if let Some(criterion_id) = pending_delete {
-                div { class: "alert alert-warning mt-3", role: "alert",
+            for criterion_id in pending_delete {
+                div { key: "{criterion_id}", class: "alert alert-warning mt-3", role: "alert",
                     span { "Delete this step and remove its links from {linked_count} reference images?" }
                     button {
                         class: "btn btn-sm",
-                        onclick: move |_| state.write().delete_criterion(exercise_id, criterion_id),
+                        onclick: move |_| {
+                            let mut page = state.write();
+                            if page.configurations.get(&exercise_id).is_some_and(|editor| editor.pending_delete == Some(criterion_id)) {
+                                page.delete_criterion(exercise_id, criterion_id);
+                            }
+                        },
                         "Delete step and links"
                     }
                     button {
                         class: "btn btn-ghost btn-sm",
                         onclick: move |_| {
-                            if let Some(editor) = state.write().configurations.get_mut(&exercise_id) {
+                            if let Some(editor) = state.write().configurations.get_mut(&exercise_id)
+                                && editor.pending_delete == Some(criterion_id)
+                            {
                                 editor.pending_delete = None;
                             }
                         },
@@ -69,42 +79,37 @@ pub fn ChecklistEditor(exercise_id: Uuid) -> Element {
                     }
                 }
             }
-            label { class: "form-control mt-4",
-                span { class: "label-text mb-1", "Paste steps to add, one per line" }
-                textarea {
-                    id: "exercise-pasted-checklist",
-                    class: "textarea textarea-bordered w-full",
-                    rows: 4,
-                    value: pasted.clone(),
-                    placeholder: "Paste the checklist here, or add a blank step below.",
-                    oninput: move |event| {
-                        if let Some(editor) = state.write().configurations.get_mut(&exercise_id) {
-                            editor.pasted_text = event.value();
-                        }
-                    },
+            // A keyed fragment replaces the dirty native field only after Add consumes its text.
+            for pasted_edit_id in [pasted_edit_id] {
+                label { key: "{pasted_edit_id}", class: "form-control mt-4",
+                    span { class: "label-text mb-1", "Paste steps to add, one per line" }
+                    textarea {
+                        id: "exercise-pasted-checklist",
+                        class: "textarea textarea-bordered w-full",
+                        rows: 4,
+                        initial_value: pasted.clone(),
+                        placeholder: "Paste the checklist here, or add a blank step below.",
+                        oninput: move |event| {
+                            if let Some(editor) = state.write().configurations.get_mut(&exercise_id) {
+                                editor.set_pasted_text(pasted_edit_id, event.value());
+                            }
+                        },
+                    }
                 }
             }
             div { class: "mt-2 flex gap-2",
-                button {
+                for pasted_edit_id in [pasted_edit_id] {
+                  button { key: "{pasted_edit_id}",
                     id: "exercise-add-pasted",
                     class: "btn btn-outline btn-sm",
                     disabled: pasted.trim().is_empty(),
                     onclick: move |_| {
                         if let Some(editor) = state.write().configurations.get_mut(&exercise_id) {
-                            let added = editor
-                                .pasted_text
-                                .lines()
-                                .filter(|line| !line.trim().is_empty())
-                                .map(|line| Criterion {
-                                    id: Uuid::new_v4(),
-                                    text: line.to_owned(),
-                                })
-                                .collect::<Vec<_>>();
-                            editor.draft.checklist.criteria.extend(added);
-                            editor.pasted_text.clear();
+                            editor.add_pasted_steps(pasted_edit_id);
                         }
                     },
                     "Add pasted steps"
+                  }
                 }
                 button {
                     class: "btn btn-ghost btn-sm",
@@ -132,7 +137,13 @@ pub fn ChecklistEditor(exercise_id: Uuid) -> Element {
 }
 
 #[component]
-fn CriterionRow(exercise_id: Uuid, criterion: Criterion, position: usize, count: usize) -> Element {
+fn CriterionRow(
+    exercise_id: Uuid,
+    edit_id: Uuid,
+    criterion: Criterion,
+    position: usize,
+    count: usize,
+) -> Element {
     let ExerciseContext { mut state, .. } = use_context::<ExerciseContext>();
     let criterion_id = criterion.id;
     rsx! {
@@ -144,23 +155,11 @@ fn CriterionRow(exercise_id: Uuid, criterion: Criterion, position: usize, count:
                 class: "textarea textarea-bordered min-w-0 flex-1",
                 aria_label: "Step {position + 1}",
                 rows: 2,
-                value: criterion.text,
+                initial_value: criterion.text,
                 oninput: move |event| {
-                    state
-                        .write()
-                        .edit(
-                            exercise_id,
-                            |draft| {
-                                if let Some(item) = draft
-                                    .checklist
-                                    .criteria
-                                    .iter_mut()
-                                    .find(|item| item.id == criterion_id)
-                                {
-                                    item.text = event.value();
-                                }
-                            },
-                        )
+                    if let Some(editor) = state.write().configurations.get_mut(&exercise_id) {
+                        editor.set_criterion_text(criterion_id, edit_id, event.value());
+                    }
                 },
             }
             div { class: "flex flex-col gap-1",
