@@ -32,16 +32,13 @@ pub fn start(
             .ok_or("Save the exercise configuration before starting analysis.")?;
         let workflow = &settings.settings.workflow;
         let model = workflow
-            .models
-            .iter()
-            .find(|model| model.id == model_profile_id)
-            .ok_or("Select an analysis model.")?
-            .resolve(&workflow.providers)
+            .resolve_model(&model_profile_id)
             .map_err(|error| error.to_string())?;
         let options = context.state.read();
         let evidence = &settings.settings.workflow.evidence;
         Ok::<_, String>(CreateRun {
             session_directory: directory,
+            expected_session_id: session_id,
             exercise_store: exercises.store,
             revision,
             model,

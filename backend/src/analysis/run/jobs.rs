@@ -129,7 +129,12 @@ pub async fn complete(
     prepared: PreparedJob,
 ) -> RunResult<SavedResponse> {
     let model = &snapshot.inputs.model;
-    if provider.snapshot()? != model.provider {
+    let current = provider.snapshot()?;
+    // Display labels may change without replacing the frozen destination or model.
+    if current.id != model.provider.id
+        || current.base_url != model.provider.base_url
+        || current.transport != model.provider.transport
+    {
         return Err(RunError::Invalid(
             "The saved model connection changed; start a new run to use it".into(),
         ));

@@ -1,6 +1,7 @@
 //! Discovers analyzable completed sessions and creates their durable completion markers.
 
 use std::{
+    collections::HashMap,
     fs::{self, File},
     io::{self, Write},
     path::{Path, PathBuf},
@@ -20,10 +21,11 @@ pub struct StoredSession {
     pub session: Session,
 }
 
-/// Completed sessions and retained capture directories that still need repair.
+/// Unambiguous completed sessions and retained directories that still need repair.
 #[derive(Debug, Default)]
 pub struct SessionCatalog {
     pub sessions: Vec<StoredSession>,
+    /// Includes invalid metadata and copied folders sharing a session ID.
     pub incomplete: Vec<PathBuf>,
 }
 
@@ -91,6 +93,20 @@ pub fn list_sessions(root: &Path) -> Result<SessionCatalog> {
             }
         }
     }
+
+    // UI selection and saved run state use session IDs, so no copied folder can win by read order.
+    let mut identity_counts = HashMap::new();
+    for stored in &sessions {
+        *identity_counts.entry(stored.session.id).or_insert(0usize) += 1;
+    }
+    sessions.retain(|stored| {
+        if identity_counts[&stored.session.id] == 1 {
+            return true;
+        }
+        incomplete.push(stored.directory.clone());
+        tracing::warn!(path = %stored.directory.display(), "session ID appears in multiple catalogue folders");
+        false
+    });
 
     sessions.sort_by(|left, right| {
         right

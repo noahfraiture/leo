@@ -29,7 +29,8 @@ pub fn load_session(
             .collect::<std::collections::BTreeMap<_, _>>()
     };
     dioxus::dioxus_core::spawn_forever(async move {
-        let result = tokio::task::spawn_blocking(move || RunStore::new(directory).history()).await;
+        let result =
+            tokio::task::spawn_blocking(move || RunStore::new(directory).history(session_id)).await;
         let mut page = context.state.write();
         let result = result
             .map_err(|_| "Could not load analysis history.".to_owned())

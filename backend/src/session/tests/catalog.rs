@@ -78,6 +78,44 @@ fn missing_root_returns_no_sessions() {
 }
 
 #[test]
+fn copied_session_ids_are_unavailable_until_the_catalogue_identity_is_unique() {
+    let root = tempfile::tempdir().unwrap();
+    let duplicate_paths = ["original", "backup", "another-copy"]
+        .map(|name| write_complete_session(root.path(), name, VALID_ID, 1_000));
+    let independent_id = "00000000-0000-0000-0000-000000000004";
+    let independent = write_complete_session(root.path(), "independent", independent_id, 2_000);
+
+    let catalogue = list_sessions(root.path()).unwrap();
+
+    assert_eq!(catalogue.sessions.len(), 1);
+    assert_eq!(catalogue.sessions[0].directory, independent);
+    assert_eq!(catalogue.incomplete.len(), duplicate_paths.len());
+    for directory in &duplicate_paths {
+        assert!(catalogue.incomplete.contains(directory));
+        assert!(directory.join("events.jsonl").is_file());
+        assert_eq!(
+            fs::metadata(directory.join("recording-complete"))
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    for copy in &duplicate_paths[1..] {
+        fs::remove_dir_all(copy).unwrap();
+    }
+    let restored = list_sessions(root.path()).unwrap();
+    assert_eq!(restored.sessions.len(), 2);
+    assert!(
+        restored
+            .sessions
+            .iter()
+            .any(|stored| stored.directory == duplicate_paths[0])
+    );
+    assert!(restored.incomplete.is_empty());
+}
+
+#[test]
 fn catalogue_requires_ended_log_and_completion_marker() {
     let root = tempfile::tempdir().expect("temporary directory should be created");
     let valid = write_complete_session(root.path(), "valid", VALID_ID, 1_000);

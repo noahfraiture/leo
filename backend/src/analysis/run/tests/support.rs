@@ -95,6 +95,29 @@ impl Fixture {
                 sample_every_ms: 1000,
             }],
         };
+        let events = [
+            json!({
+                "schema_version":2,"sequence":0,"session_id":evidence.session_id,
+                "utc_ms":0,"session_offset_ms":0,
+                "action":{"type":"session_started",
+                    "cameras":[{"camera_id":1,"name":"Fixture camera","enabled":true,"initial_monitoring_profile_id":1}],
+                    "monitoring_profiles":[{"id":1,"name":"Standard","sampleEveryMs":1000}]}
+            }),
+            json!({
+                "schema_version":2,"sequence":1,"session_id":evidence.session_id,
+                "utc_ms":3000,"session_offset_ms":3000,"action":{"type":"session_ended"}
+            }),
+        ];
+        fs::write(
+            session.join("events.jsonl"),
+            events
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
         let windows = [
             vec!["C1-T0".into(), "C1-T1000".into()],
             vec!["C1-T1000".into(), "C1-T2000".into()],
@@ -150,6 +173,23 @@ impl Fixture {
     }
     pub fn snapshot(&self) -> RunSnapshot {
         self.store.load(self.run_id).unwrap()
+    }
+    /// Replace only recording identity, leaving the run's source bytes and caches unchanged.
+    pub fn replace_session_identity(&self) {
+        let path = self.store.session_directory.join("events.jsonl");
+        let replacement = Uuid::new_v4();
+        let events = fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let mut event: Value = serde_json::from_str(line).unwrap();
+                event["session_id"] = json!(replacement);
+                event.to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        fs::write(path, events).unwrap();
     }
     pub fn request(&self) -> ExecuteRun {
         ExecuteRun {

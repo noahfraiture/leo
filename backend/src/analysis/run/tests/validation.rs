@@ -3,12 +3,196 @@ use super::*;
 use crate::analysis::SentImage;
 use crate::model::Completion;
 
+#[tokio::test]
+async fn provider_connection_rename_keeps_paused_run_inputs_and_allows_resume() {
+    let server = ModelServer::new(true);
+    let fixture = Fixture::new(&server.base_url);
+    assert!(execute_run(fixture.request(), |_| {}).await.is_err());
+    let frozen = fixture.snapshot().inputs;
+    let mut request = fixture.request();
+    request.providers[0].name = "Renamed local connection".into();
+    request.providers[0].api_key = "rotated-local-fixture".into();
+
+    let resumed = execute_run(request, |_| {}).await.unwrap();
+
+    assert_eq!(resumed.checkpoint.stage, RunStage::Ready);
+    assert_eq!(resumed.inputs, frozen);
+    assert_eq!(server.requests.lock().unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn provider_connection_destination_changes_stay_rejected() {
+    for change_transport in [false, true] {
+        let server = ModelServer::new(false);
+        let fixture = Fixture::new(&server.base_url);
+        let mut request = fixture.request();
+        if change_transport {
+            request.providers[0].transport = crate::model::Transport::Responses;
+        } else {
+            request.providers[0].base_url.push_str("/changed");
+        }
+
+        let error = execute_run(request, |_| {}).await.unwrap_err();
+
+        assert!(error.to_string().contains("saved model connection changed"));
+        assert!(server.requests.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn oversized_json_cannot_replace_a_checkpoint_or_publish_a_new_file() {
+    let fixture = Fixture::new("http://127.0.0.1:1/v1");
+    let directory = fixture.store.directory(fixture.run_id).unwrap();
+    let path = directory.join("checkpoint.json");
+    let original = std::fs::read(&path).unwrap();
+    let mut checkpoint = fixture.snapshot().checkpoint;
+    checkpoint.error = Some("x".repeat(64 * 1024 * 1024));
+
+    assert!(
+        fixture
+            .store
+            .save_checkpoint(fixture.run_id, &checkpoint)
+            .is_err()
+    );
+    assert_eq!(std::fs::read(path).unwrap(), original);
+    let unpublished = directory.join("new-checkpoint.json");
+    assert!(super::super::store::write_json(&unpublished, &checkpoint, false).is_err());
+    assert!(!unpublished.exists());
+    assert!(fixture.store.load(fixture.run_id).is_ok());
+}
+
+#[tokio::test]
+async fn creation_rejects_a_replaced_recording_before_discovering_its_media() {
+    use crate::{
+        profiles::MonitoringProfile,
+        session::{OperatorAction, SessionCamera, SessionController, mark_recording_complete},
+    };
+    let fixture = Fixture::new("http://127.0.0.1:1/v1");
+    let selected = fixture.snapshot();
+    std::fs::rename(
+        fixture.store.session_directory.join("events.jsonl"),
+        fixture
+            .store
+            .session_directory
+            .join("original-events.jsonl"),
+    )
+    .unwrap();
+    let mut replacement = SessionController::create(
+        fixture.store.session_directory.join("events.jsonl"),
+        vec![SessionCamera {
+            id: 1,
+            name: "Replacement camera".into(),
+            enabled: true,
+            initial_monitoring_profile_id: 1,
+        }],
+        vec![MonitoringProfile {
+            id: 1,
+            name: "Standard".into(),
+            sample_every_ms: 1000,
+        }],
+    )
+    .unwrap();
+    replacement.apply(OperatorAction::EndSession).unwrap();
+    mark_recording_complete(&fixture.store.session_directory).unwrap();
+    let exercises = fixture
+        .store
+        .session_directory
+        .parent()
+        .unwrap()
+        .join("exercises");
+
+    let error = create_run(CreateRun {
+        session_directory: fixture.store.session_directory.clone(),
+        expected_session_id: selected.inputs.initial_evidence.session_id,
+        exercise_store: crate::exercise::ExerciseStore::new(exercises),
+        revision: selected.inputs.exercise,
+        model: selected.inputs.model,
+        execution: selected.inputs.execution,
+        evidence_policy: selected.inputs.evidence_policy,
+    })
+    .await
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("selected recording changed"),
+        "{error}"
+    );
+    assert!(!fixture.store.session_directory.join("recordings").exists());
+}
+
+#[tokio::test]
+async fn resumed_analysis_rejects_a_replaced_session_before_model_requests() {
+    let server = ModelServer::new(false);
+    let fixture = Fixture::new(&server.base_url);
+    let checkpoint = fixture
+        .store
+        .directory(fixture.run_id)
+        .unwrap()
+        .join("checkpoint.json");
+    let original = std::fs::read(&checkpoint).unwrap();
+    fixture.replace_session_identity();
+
+    let error = execute_run(fixture.request(), |_| {}).await.unwrap_err();
+
+    assert!(error.to_string().contains("another recording"), "{error}");
+    assert!(server.requests.lock().unwrap().is_empty());
+    assert_eq!(std::fs::read(checkpoint).unwrap(), original);
+}
+
+#[tokio::test]
+async fn recheck_rejects_a_replaced_session_without_changing_its_checkpoint() {
+    let server = ModelServer::new(false);
+    let fixture = Fixture::new(&server.base_url);
+    let ready = execute_run(fixture.request(), |_| {}).await.unwrap();
+    server.requests.lock().unwrap().clear();
+    let checkpoint = fixture
+        .store
+        .directory(fixture.run_id)
+        .unwrap()
+        .join("checkpoint.json");
+    let original = std::fs::read(&checkpoint).unwrap();
+    fixture.replace_session_identity();
+
+    let error = request_recheck(
+        fixture.store.session_directory.clone(),
+        fixture.run_id,
+        ready.inputs.exercise.checklist.criteria[0].id,
+        None,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("another recording"), "{error}");
+    assert!(server.requests.lock().unwrap().is_empty());
+    assert_eq!(std::fs::read(checkpoint).unwrap(), original);
+}
+
 fn completion<T>(value: T) -> Completion<T> {
     Completion {
         value,
         usage: None,
         elapsed_ms: 1,
     }
+}
+
+#[tokio::test]
+async fn cached_images_cannot_send_inconsistent_timeline_labels_to_a_provider() {
+    let server = ModelServer::new(false);
+    let fixture = Fixture::new(&server.base_url);
+    let mut snapshot = fixture.snapshot();
+    snapshot.checkpoint.evidence.frames[0].session_offset_ms = 1000;
+    fixture
+        .store
+        .save_checkpoint(fixture.run_id, &snapshot.checkpoint)
+        .unwrap();
+    // The bytes and cache identity are valid; only their claimed session timestamp is wrong.
+    fixture.cache_frames();
+
+    assert!(execute_run(fixture.request(), |_| {}).await.is_err());
+    assert!(server.requests.lock().unwrap().is_empty());
+    let paused = fixture.snapshot();
+    assert_eq!(paused.checkpoint.stage, RunStage::Paused);
+    assert!(paused.checkpoint.assessments.is_empty());
 }
 fn finding(snapshot: &RunSnapshot, judgment: Judgment) -> Finding {
     Finding {

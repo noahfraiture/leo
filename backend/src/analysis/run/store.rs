@@ -74,7 +74,8 @@ impl RunStore {
         Ok(())
     }
 
-    pub fn history(&self) -> RunResult<RunHistory> {
+    /// List this recording's current runs and retain foreign, damaged or retired runs as unavailable.
+    pub fn history(&self, session_id: Uuid) -> RunResult<RunHistory> {
         let root = self.session_directory.join("analyses");
         let mut history = RunHistory::default();
         if !root.try_exists()? {
@@ -90,8 +91,27 @@ impl RunStore {
             else {
                 continue;
             };
+            if entry.file_name() != id.to_string().as_str() || !entry.file_type()?.is_dir() {
+                history.archived.push(ArchivedRun {
+                    id,
+                    directory: entry.path(),
+                    name: "Unavailable run".into(),
+                    message:
+                        "Saved run folder name or type is invalid. Original files are preserved."
+                            .into(),
+                    ..Default::default()
+                });
+                continue;
+            }
             match self.load(id) {
-                Ok(run) => history.runs.push(run),
+                Ok(run) if run.inputs.initial_evidence.session_id == session_id => {
+                    history.runs.push(run)
+                }
+                Ok(_) => history.archived.push(super::legacy::read(
+                    self,
+                    id,
+                    "Saved run belongs to another recording. Original files are preserved.".into(),
+                )),
                 Err(error) => {
                     history
                         .archived
@@ -106,6 +126,7 @@ impl RunStore {
     }
 
     /// Recover complete requests from response files even when the last checkpoint was interrupted.
+    /// Recording identity is rechecked even when retained sources and image caches still match.
     pub fn load(&self, id: Uuid) -> RunResult<RunSnapshot> {
         let directory = self.directory(id)?;
         let inputs: RunInputs = read_json(&directory.join("inputs.json"))?;
@@ -115,6 +136,13 @@ impl RunStore {
             || checkpoint.evidence.session_id != inputs.initial_evidence.session_id
         {
             return Err(RunError::Invalid("Run identity or schema mismatch".into()));
+        }
+        let session = crate::session::Session::load(&self.session_directory.join("events.jsonl"))
+            .map_err(|error| RunError::Invalid(error.to_string()))?;
+        if session.id != inputs.initial_evidence.session_id {
+            return Err(RunError::Invalid(
+                "Saved run belongs to another recording. Original files are preserved.".into(),
+            ));
         }
         let corrections = self.read_optional(id, "review.json")?;
         let operator_review = self.read_optional(id, "operator-review.json")?;

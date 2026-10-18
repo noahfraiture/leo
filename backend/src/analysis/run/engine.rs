@@ -12,6 +12,8 @@ use std::{fs, path::PathBuf};
 /// Operator-selected immutable exercise and one model; additions are explicit evidence options.
 pub struct CreateRun {
     pub session_directory: PathBuf,
+    /// Session identity selected by the operator, rechecked when its directory is read.
+    pub expected_session_id: uuid::Uuid,
     pub exercise_store: ExerciseStore,
     pub revision: ExerciseRevision,
     pub model: ModelSnapshot,
@@ -25,6 +27,7 @@ pub struct ExecuteRun {
     pub providers: Vec<ProviderConnection>,
 }
 
+/// Prepare an immutable run for the selected recording identity on a filesystem worker.
 pub async fn create_run(request: CreateRun) -> RunResult<RunSnapshot> {
     tokio::task::spawn_blocking(move || {
         request.execution.validate()?;
@@ -46,6 +49,12 @@ pub async fn create_run(request: CreateRun) -> RunResult<RunSnapshot> {
         )?;
         let session = Session::load(&request.session_directory.join("events.jsonl"))
             .map_err(|error| RunError::Invalid(error.to_string()))?;
+        if session.id != request.expected_session_id {
+            return Err(RunError::Invalid(
+                "The selected recording changed on disk. Refresh sessions and select it again."
+                    .into(),
+            ));
+        }
         let cameras = session
             .cameras
             .iter()

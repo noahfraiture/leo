@@ -172,7 +172,7 @@ fn desktop_operator_flow_records_two_cameras_and_analyzes() {
     assert!(segments.iter().any(|segment| segment.camera_id == 2));
 
     let runs = RunStore::new(stored.directory.clone())
-        .history()
+        .history(stored.session.id)
         .expect("read saved runs")
         .runs;
     assert_eq!(
@@ -347,7 +347,7 @@ fn desktop_analysis_resumes_after_transient_provider_failure() {
     assert_eq!(sessions.len(), 1, "expected one completed E2E session");
     let stored = &sessions[0];
     let runs = RunStore::new(stored.directory.clone())
-        .history()
+        .history(stored.session.id)
         .expect("load resumed run")
         .runs;
     assert_eq!(runs.len(), 1);
