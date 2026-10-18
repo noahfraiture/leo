@@ -9,15 +9,23 @@ use uuid::Uuid;
 pub fn StudentReview(session_id: Uuid, run_id: Uuid) -> Element {
     let context = use_context::<AnalysisContext>();
     let mut state = context.state;
-    let entry = state
-        .read()
-        .sessions
-        .get(&session_id)
-        .and_then(|session| session.runs.get(&run_id))
-        .cloned();
+    let (entry, run_active) = {
+        let page = state.read();
+        (
+            page.sessions
+                .get(&session_id)
+                .and_then(|session| session.runs.get(&run_id))
+                .cloned(),
+            page.active.is_some_and(|active| {
+                active.session_id == session_id && active.run_id == Some(run_id)
+            }),
+        )
+    };
     let Some(entry) = entry else {
         return rsx! {};
     };
+    let already_saved = entry.assessment_draft_is_saved();
+    let review_saving = entry.review_saving();
     let snapshot = entry.snapshot;
     let reviewed = snapshot
         .inputs
@@ -31,7 +39,9 @@ pub fn StudentReview(session_id: Uuid, run_id: Uuid) -> Element {
     let draft = entry.assessment_draft;
     let disabled = snapshot.checkpoint.stage != RunStage::Ready
         || reviewed != count
-        || draft.saving
+        || review_saving
+        || run_active
+        || already_saved
         || draft.note.trim().is_empty();
     let current = snapshot.current_student_assessment();
     rsx! {
@@ -80,7 +90,7 @@ pub fn StudentReview(session_id: Uuid, run_id: Uuid) -> Element {
             }
             label { class: "form-control",
                 span { class: "label-text mb-1", "Assessment note" }
-                textarea { id: "student-note", class: "textarea textarea-bordered", rows: 3, value: draft.note, disabled: draft.saving,
+                textarea { id: "student-note", class: "textarea textarea-bordered", rows: 3, initial_value: draft.note, disabled: draft.saving,
                     oninput: move |event| {
                         if let Some(entry) = state.write().sessions.get_mut(&session_id).and_then(|session| session.runs.get_mut(&run_id)) { entry.assessment_draft.note = event.value(); }
                     },

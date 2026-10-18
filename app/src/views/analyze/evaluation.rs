@@ -65,11 +65,13 @@ fn SelectedRecording(
     cameras: usize,
 ) -> Element {
     let context = use_context::<AnalysisContext>();
-    let directory_loader = directory.clone();
-    use_effect(move || {
-        analysis::load_session(context, session_id, directory_loader.clone(), false)
-    });
-    let (selected_run, loading, error) = context
+    let work_in_progress =
+        use_memo(move || context.state.read().session_work_in_progress(session_id));
+    use_effect(use_reactive((&directory,), move |(directory,)| {
+        let _ = work_in_progress();
+        analysis::load_session(context, session_id, directory, false)
+    }));
+    let (selected_run, loading, error, directory_matches) = context
         .state
         .read()
         .sessions
@@ -79,9 +81,10 @@ fn SelectedRecording(
                 session.selected_run_id,
                 session.loading,
                 session.error.clone(),
+                session.directory == directory,
             )
         })
-        .unwrap_or_default();
+        .unwrap_or((None, false, None, true));
     rsx! {
         header { class: "rounded-box bg-base-200 p-4",
             h2 { class: "text-lg font-semibold", "Recording: {recorded_at(start_ms)}" }
@@ -92,19 +95,25 @@ fn SelectedRecording(
                 p { "{session_id}" }
             }
         }
-        RunSetup { session_id }
-        if loading {
+        if directory_matches {
+            RunSetup { session_id }
+        }
+        if !directory_matches && work_in_progress() {
+            p { role: "status", "Waiting for current analysis or review to finish before loading this recording folder." }
+        } else if loading || !directory_matches {
             p { role: "status", "Loading saved runs..." }
         }
         if let Some(error) = error {
             p { class: "alert alert-error", role: "alert", "{error}" }
         }
-        RunHistory { session_id, directory }
-        ArchivedHistory { session_id }
-        if let Some(run_id) = selected_run {
-            SelectedRun { key: "{run_id}", session_id, run_id }
-        } else if !loading {
-            p { class: "text-sm opacity-70", "No analysis runs saved for this recording yet." }
+        if directory_matches {
+            RunHistory { session_id, directory }
+            ArchivedHistory { session_id }
+            if let Some(run_id) = selected_run {
+                SelectedRun { key: "{run_id}", session_id, run_id }
+            } else if !loading {
+                p { class: "text-sm opacity-70", "No analysis runs saved for this recording yet." }
+            }
         }
     }
 }
@@ -122,6 +131,7 @@ fn RunHistory(session_id: Uuid, directory: PathBuf) -> Element {
                 session
                     .runs
                     .values()
+                    .filter(|entry| entry.available)
                     .map(|entry| {
                         let run = &entry.snapshot;
                         (
@@ -178,6 +188,7 @@ fn SelectedRun(session_id: Uuid, run_id: Uuid) -> Element {
         .sessions
         .get(&session_id)
         .and_then(|session| session.runs.get(&run_id))
+        .filter(|entry| entry.available)
         .map(|entry| entry.snapshot.clone());
     let Some(snapshot) = snapshot else {
         return rsx! {};

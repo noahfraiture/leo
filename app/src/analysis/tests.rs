@@ -1,7 +1,212 @@
-use super::state::ActiveRun;
+use super::state::{ActiveRun, CorrectionDraft, RunEntry};
 use super::{AnalysisPageState, test_snapshot};
-use backend::analysis::{ArchivedRun, HumanCorrection, Judgment, RunHistory, RunStage};
+use backend::analysis::{
+    ArchivedRun, HumanCorrection, Judgment, RunHistory, RunStage, StudentAssessment, StudentOutcome,
+};
 use uuid::Uuid;
+
+mod review_admission;
+
+#[test]
+fn loaded_assessment_editor_uses_only_the_current_saved_decision() {
+    for (stage, changed_result) in [
+        (RunStage::Ready, false),
+        (RunStage::Ready, true),
+        (RunStage::Paused, false),
+    ] {
+        let mut snapshot = test_snapshot(Uuid::new_v4(), Uuid::new_v4(), RunStage::Ready);
+        snapshot
+            .operator_review
+            .assessments
+            .push(StudentAssessment {
+                outcome: StudentOutcome::Pass,
+                note: "Completed the exercise independently.".into(),
+                basis: snapshot.assessment_basis().unwrap(),
+                created_utc_ms: 1000,
+            });
+        snapshot.checkpoint.stage = stage;
+        if changed_result {
+            snapshot.checkpoint.assessments[0].reason = "A revised finding".into();
+        }
+
+        let entry = RunEntry::new(snapshot);
+        let current = stage == RunStage::Ready && !changed_result;
+        assert_eq!(
+            entry.assessment_draft.outcome,
+            if current {
+                StudentOutcome::Pass
+            } else {
+                StudentOutcome::NeedsEvidence
+            }
+        );
+        assert_eq!(
+            entry.assessment_draft.note,
+            if current {
+                "Completed the exercise independently."
+            } else {
+                ""
+            }
+        );
+        assert_eq!(entry.assessment_draft_is_saved(), current);
+        assert_eq!(entry.snapshot.operator_review.assessments.len(), 1);
+    }
+}
+
+#[test]
+fn refreshing_a_run_preserves_the_newer_unsaved_assessment() {
+    let session_id = Uuid::new_v4();
+    let run_id = Uuid::new_v4();
+    let snapshot = test_snapshot(session_id, run_id, RunStage::Ready);
+    let mut page = AnalysisPageState::default();
+    page.apply_snapshot(snapshot.clone());
+    let draft = &mut page
+        .sessions
+        .get_mut(&session_id)
+        .unwrap()
+        .runs
+        .get_mut(&run_id)
+        .unwrap()
+        .assessment_draft;
+    draft.outcome = StudentOutcome::NeedsPractice;
+    draft.note = "My newer unsaved assessment".into();
+
+    page.apply_snapshot(snapshot.clone());
+    let generation = page.sessions[&session_id].runs[&run_id].snapshot_generation;
+    page.apply_history_snapshot(snapshot, Some(generation));
+
+    let draft = &page.sessions[&session_id].runs[&run_id].assessment_draft;
+    assert_eq!(draft.outcome, StudentOutcome::NeedsPractice);
+    assert_eq!(draft.note, "My newer unsaved assessment");
+}
+
+#[test]
+fn unchanged_assessment_matches_the_saved_outcome_and_exact_note() {
+    let snapshot = test_snapshot(Uuid::new_v4(), Uuid::new_v4(), RunStage::Ready);
+    let mut entry = RunEntry::new(snapshot);
+    entry.assessment_draft.note = "Operator review".into();
+    assert!(!entry.assessment_draft_is_saved());
+    entry
+        .snapshot
+        .operator_review
+        .assessments
+        .push(StudentAssessment {
+            outcome: entry.assessment_draft.outcome,
+            note: entry.assessment_draft.note.clone(),
+            basis: entry.snapshot.assessment_basis().unwrap(),
+            created_utc_ms: 1000,
+        });
+    assert!(entry.assessment_draft_is_saved());
+
+    entry.assessment_draft.note.push(' ');
+    assert!(!entry.assessment_draft_is_saved());
+    entry.assessment_draft.note.pop();
+    entry.assessment_draft.outcome = StudentOutcome::Pass;
+    assert!(!entry.assessment_draft_is_saved());
+    entry.assessment_draft.outcome = StudentOutcome::NeedsEvidence;
+    assert!(entry.assessment_draft_is_saved());
+}
+
+#[test]
+fn changed_results_allow_a_new_assessment_with_the_same_content() {
+    let snapshot = test_snapshot(Uuid::new_v4(), Uuid::new_v4(), RunStage::Ready);
+    let mut entry = RunEntry::new(snapshot);
+    entry.assessment_draft.note = "Operator review".into();
+    entry
+        .snapshot
+        .operator_review
+        .assessments
+        .push(StudentAssessment {
+            outcome: entry.assessment_draft.outcome,
+            note: entry.assessment_draft.note.clone(),
+            basis: entry.snapshot.assessment_basis().unwrap(),
+            created_utc_ms: 1000,
+        });
+    entry.snapshot.checkpoint.assessments[0].reason = "A revised finding".into();
+
+    assert!(!entry.assessment_draft_is_saved());
+    assert_eq!(entry.snapshot.operator_review.assessments.len(), 1);
+}
+
+#[test]
+fn saved_correction_reason_rejects_old_input_and_accepts_new_edits() {
+    let mut draft = CorrectionDraft::default();
+    let previous_edit_id = draft.reason_edit_id;
+    draft.set_reason(previous_edit_id, "Saved operator reason".into());
+    draft.saving = true;
+    let submitted = draft.clone();
+    draft.finish_save(&submitted);
+    assert!(draft.reason.is_empty());
+    assert!(!draft.saving);
+
+    let current_edit_id = draft.reason_edit_id;
+    assert_ne!(current_edit_id, previous_edit_id);
+    draft.set_reason(previous_edit_id, "Late input from the saved field".into());
+    assert!(draft.reason.is_empty());
+    draft.set_reason(current_edit_id, "Next operator reason".into());
+    assert_eq!(draft.reason, "Next operator reason");
+}
+
+#[test]
+fn correction_save_completion_preserves_newer_reason_and_its_field_identity() {
+    let mut draft = CorrectionDraft::default();
+    let edit_id = draft.reason_edit_id;
+    draft.set_reason(edit_id, "Submitted reason".into());
+    draft.saving = true;
+    let submitted = draft.clone();
+    draft.set_reason(edit_id, "Newer operator reason".into());
+    draft.finish_save(&submitted);
+
+    assert_eq!(draft.reason, "Newer operator reason");
+    assert_eq!(draft.reason_edit_id, edit_id);
+    assert!(!draft.saving);
+}
+
+#[test]
+fn another_recordings_history_cannot_import_corrections_into_its_cached_review() {
+    let selected_session = Uuid::from_u128(501);
+    let other_session = Uuid::from_u128(502);
+    let selected_run = Uuid::from_u128(503);
+    let other_run = Uuid::from_u128(504);
+    let original = test_snapshot(other_session, other_run, RunStage::Ready);
+    let mut foreign = original.clone();
+    foreign.corrections.push(HumanCorrection {
+        id: Uuid::new_v4(),
+        criterion_id: foreign.inputs.exercise.checklist.criteria[0].id,
+        judgment: Judgment::Met,
+        reason: "Saved only in the misplaced copy".into(),
+        evidence_ids: Vec::new(),
+        uses_outside_information: true,
+        created_utc_ms: 1000,
+        supersedes: None,
+    });
+    let mut page = AnalysisPageState::default();
+    page.apply_snapshot(original.clone());
+
+    page.apply_history(
+        selected_session,
+        Ok(RunHistory {
+            runs: vec![
+                test_snapshot(selected_session, selected_run, RunStage::Ready),
+                foreign,
+            ],
+            archived: Vec::new(),
+        }),
+        &Default::default(),
+    );
+
+    assert_eq!(page.sessions[&selected_session].runs.len(), 1);
+    assert!(
+        page.sessions[&selected_session]
+            .runs
+            .contains_key(&selected_run)
+    );
+    assert_eq!(
+        page.sessions[&other_session].runs[&other_run]
+            .snapshot
+            .corrections,
+        original.corrections
+    );
+}
 
 #[test]
 fn delayed_history_refresh_cannot_replace_newer_live_progress() {
@@ -369,8 +574,10 @@ fn correction_save_updates_human_history_without_replacing_finished_processing()
         supersedes: None,
     };
     let mut page = AnalysisPageState::default();
-    page.apply_snapshot(run);
+    page.apply_snapshot(run.clone());
+    let generation = page.sessions[&session_id].runs[&run_id].snapshot_generation;
     page.apply_corrections(session_id, run_id, vec![correction.clone()]);
+    page.apply_history_snapshot(run, Some(generation));
     let updated = &page.sessions[&session_id].runs[&run_id].snapshot;
     assert_eq!(updated.checkpoint.stage, RunStage::Ready);
     assert_eq!(updated.checkpoint.assessments, model_assessments);

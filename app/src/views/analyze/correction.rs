@@ -15,7 +15,7 @@ pub fn CorrectionEditor(
 ) -> Element {
     let context = use_context::<AnalysisContext>();
     let mut state = context.state;
-    let (draft, current_frame) = state
+    let (draft, current_frame, review_saving) = state
         .read()
         .sessions
         .get(&session_id)
@@ -28,12 +28,15 @@ pub fn CorrectionEditor(
                     .cloned()
                     .unwrap_or_default(),
                 entry.playback.frame_id.clone(),
+                entry.review_saving(),
             )
         })
         .unwrap_or_default();
     let has_current = current_frame
         .as_ref()
         .is_some_and(|id| !draft.evidence_ids.contains(id));
+    let reason_edit_id = draft.reason_edit_id;
+    let reason_field_key = format!("{criterion_id}-{reason_edit_id:?}");
     let selected_value = match draft.judgment {
         Judgment::Met => "met",
         Judgment::NotMet => "notMet",
@@ -80,23 +83,30 @@ pub fn CorrectionEditor(
                         option { value: "cannotVerify", selected: draft.judgment == Judgment::CannotVerify, "Cannot verify" }
                     }
                 }
-                label { class: "form-control",
-                    span { class: "label-text mb-1", "Reason for your correction" }
-                    textarea {
-                        id: "analysis-correction-reason",
-                        class: "textarea textarea-bordered w-full",
-                        rows: 3,
-                        value: draft.reason.clone(),
-                        oninput: move |event| {
-                            state
-                                .write()
-                                .edit_correction(
-                                    session_id,
-                                    run_id,
-                                    criterion_id,
-                                    |draft| draft.reason = event.value(),
-                                )
-                        },
+                // Selection and successful consumption explicitly replace this native text field.
+                for field_key in [reason_field_key] {
+                    label { key: "{field_key}", class: "form-control",
+                        span { class: "label-text mb-1", "Reason for your correction" }
+                        textarea {
+                            id: "analysis-correction-reason",
+                            class: "textarea textarea-bordered w-full",
+                            rows: 3,
+                            initial_value: draft.reason.clone(),
+                            oninput: move |event| {
+                                if let Some(entry) = state
+                                    .write()
+                                    .sessions
+                                    .get_mut(&session_id)
+                                    .and_then(|session| session.runs.get_mut(&run_id))
+                                {
+                                    entry
+                                        .corrections
+                                        .entry(criterion_id)
+                                        .or_default()
+                                        .set_reason(reason_edit_id, event.value());
+                                }
+                            },
+                        }
                     }
                 }
                 label { class: "flex items-start gap-2 text-sm",
@@ -117,30 +127,35 @@ pub fn CorrectionEditor(
                     }
                     span { "This correction uses information outside the video." }
                 }
-                button {
-                    class: "btn btn-outline btn-sm self-start",
-                    disabled: !has_current,
-                    onclick: move |_| {
-                        if let Some(id) = current_frame.clone() {
-                            state
-                                .write()
-                                .edit_correction(
-                                    session_id,
-                                    run_id,
-                                    criterion_id,
-                                    |draft| {
-                                        if !draft.evidence_ids.contains(&id) {
-                                            draft.evidence_ids.push(id);
-                                        }
-                                    },
-                                );
-                        }
-                    },
-                    "Attach selected timestamp"
+                // A late Attach still belongs to the timestamp it originally displayed.
+                for frame_id in [current_frame] {
+                    button {
+                        key: "{frame_id:?}",
+                        class: "btn btn-outline btn-sm self-start",
+                        disabled: !has_current,
+                        onclick: move |_| {
+                            if let Some(id) = frame_id.clone() {
+                                state
+                                    .write()
+                                    .edit_correction(
+                                        session_id,
+                                        run_id,
+                                        criterion_id,
+                                        |draft| {
+                                            if !draft.evidence_ids.contains(&id) {
+                                                draft.evidence_ids.push(id);
+                                            }
+                                        },
+                                    );
+                            }
+                        },
+                        "Attach selected timestamp"
+                    }
                 }
                 div { class: "flex flex-wrap gap-2",
                     for id in draft.evidence_ids {
                         CorrectionCitation {
+                            key: "{id}",
                             session_id,
                             run_id,
                             criterion_id,
@@ -163,15 +178,18 @@ pub fn CorrectionEditor(
                 if let Some(error) = draft.error {
                     p { class: "alert alert-error", role: "alert", "{error}" }
                 }
-                button {
-                    id: "analysis-save-correction",
-                    class: "btn btn-primary self-start",
-                    disabled: draft.saving || draft.reason.trim().is_empty(),
-                    onclick: move |_| analysis::save_correction(context, session_id, run_id, criterion_id),
-                    if draft.saving {
-                        "Saving correction..."
-                    } else {
-                        "Save my assessment"
+                for reason_edit_id in [reason_edit_id] {
+                    button {
+                        key: "{reason_edit_id:?}",
+                        id: "analysis-save-correction",
+                        class: "btn btn-primary self-start",
+                        disabled: review_saving || draft.reason.trim().is_empty(),
+                        onclick: move |_| analysis::save_correction(context, session_id, run_id, criterion_id, reason_edit_id),
+                        if draft.saving {
+                            "Saving correction..."
+                        } else {
+                            "Save my assessment"
+                        }
                     }
                 }
             }

@@ -5,7 +5,10 @@ use crate::{
     },
 };
 use backend::{
-    analysis::{AnalysisWarning, HumanCorrection, JobState, Judgment, RunSnapshot, RunStage},
+    analysis::{
+        AnalysisWarning, ArchivedRun, HumanCorrection, JobState, Judgment, RunHistory, RunSnapshot,
+        RunStage,
+    },
     session::mark_recording_complete,
 };
 use serde_json::json;
@@ -173,6 +176,18 @@ fn empty_catalog_keeps_exercise_preparation_available() {
 }
 
 #[test]
+fn catalogue_refresh_keeps_the_page_available_without_duplicate_requests() {
+    let mut harness = RenderHarness::new();
+    harness.operator_mut().begin_session_refresh().unwrap();
+
+    let html = harness.render_at(ready_preview(), "/analyze");
+
+    assert_button_disabled(&html, "Refresh sessions", true);
+    assert!(html.contains("Refreshing sessions..."));
+    assert!(html.contains("New configuration"));
+}
+
+#[test]
 fn catalog_selects_newest_recording_and_explains_required_configuration() {
     let mut harness = RenderHarness::new();
     let root = harness.operator().session_root.clone();
@@ -194,6 +209,56 @@ fn catalog_selects_newest_recording_and_explains_required_configuration() {
     );
 }
 
+fn prepared_with_exercise() -> RenderHarness {
+    let session_id = Uuid::new_v4();
+    let revision = test_snapshot(session_id, Uuid::new_v4(), RunStage::Ready)
+        .inputs
+        .exercise;
+    let draft = backend::exercise::ExerciseDraft {
+        schema_version: revision.schema_version,
+        id: revision.exercise_id,
+        name: revision.name.clone(),
+        edit_version: revision.edit_version,
+        checklist: revision.checklist.clone(),
+        references: revision.references.clone(),
+        preparation: revision.preparation.clone(),
+    };
+    let mut harness = prepared(session_id, None);
+    harness.exercises.selected_id = Some(draft.id);
+    harness.exercises.configurations.insert(
+        draft.id,
+        crate::exercises::ExerciseEditorState::new(draft, Some(revision)),
+    );
+    harness.workflow = crate::test_workflow(Some(crate::test_openai_config()), 8, 0);
+    harness
+}
+
+#[test]
+fn ambiguous_selected_model_ids_cannot_start_analysis() {
+    let mut harness = prepared_with_exercise();
+    let mut duplicate = harness.workflow.models[0].clone();
+    duplicate.name = "Another profile with the same ID".into();
+    duplicate.model = "different-model".into();
+    harness.workflow.models.push(duplicate);
+
+    let html = harness.render_at(ready_preview(), "/analyze");
+
+    assert_button_disabled(&html, "Start new analysis", true);
+    assert!(html.contains("duplicate identifier"));
+}
+
+#[test]
+fn a_model_exceeding_the_memory_budget_cannot_start_analysis() {
+    let mut harness = prepared_with_exercise();
+    harness.workflow.execution.memory_budget_mib = 1024;
+    harness.workflow.models[0].memory_cost_mib = 2048;
+
+    let html = harness.render_at(ready_preview(), "/analyze");
+
+    assert_button_disabled(&html, "Start new analysis", true);
+    assert!(html.contains("exceeds the configured memory budget"));
+}
+
 #[test]
 fn history_failure_is_reported_without_becoming_a_candidate_judgment() {
     let session_id = Uuid::new_v4();
@@ -208,6 +273,90 @@ fn history_failure_is_reported_without_becoming_a_candidate_judgment() {
     assert!(html.contains("Analysis data could not be read."));
     assert!(html.contains("Needs attention"));
     assert!(!html.contains("Model: Not met"));
+}
+
+#[test]
+fn unreadable_history_never_offers_cached_results_as_available() {
+    for whole_read_failed in [false, true] {
+        let session_id = Uuid::new_v4();
+        let run_id = Uuid::new_v4();
+        let mut run = test_snapshot(session_id, run_id, RunStage::Ready);
+        run.inputs.exercise.name = "Cached result must stay hidden".into();
+        let mut harness = prepared(session_id, Some(run));
+        let generation = harness.analysis.sessions[&session_id].runs[&run_id].snapshot_generation;
+        let error = "The saved run cannot be read.";
+        let history = if whole_read_failed {
+            Err(error.into())
+        } else {
+            Ok(RunHistory {
+                runs: Vec::new(),
+                archived: vec![ArchivedRun {
+                    id: run_id,
+                    name: "Unavailable run".into(),
+                    message: error.into(),
+                    ..Default::default()
+                }],
+            })
+        };
+        harness
+            .analysis
+            .apply_history(session_id, history, &[(run_id, generation)].into());
+
+        let html = harness.render_at(ready_preview(), "/analyze");
+
+        assert!(html.contains(error));
+        assert!(html.contains("Needs attention"));
+        assert!(!html.contains("Cached result must stay hidden"));
+        assert!(!html.contains("Ready for review"));
+    }
+}
+
+#[test]
+fn a_surviving_copy_cannot_display_the_old_folder_history_while_reloading() {
+    let session_id = Uuid::new_v4();
+    let run_id = Uuid::new_v4();
+    let mut snapshot = test_snapshot(session_id, run_id, RunStage::Ready);
+    snapshot.inputs.exercise.name = "Old folder result must remain hidden".into();
+    let mut harness = prepared(session_id, Some(snapshot));
+    harness
+        .analysis
+        .sessions
+        .get_mut(&session_id)
+        .unwrap()
+        .directory = "/removed-original".into();
+
+    let html = harness.render_at(ready_preview(), "/analyze");
+
+    assert!(html.contains("Loading saved runs..."));
+    assert!(!html.contains("Old folder result must remain hidden"));
+    assert!(!html.contains("analysis-start"));
+}
+
+#[test]
+fn history_refresh_keeps_results_visible_but_waits_before_model_actions() {
+    for stage in [RunStage::Ready, RunStage::Paused] {
+        let mut harness = prepared_with_exercise();
+        let session_id = harness.operator().selected_session_id.unwrap();
+        let run_id = Uuid::new_v4();
+        harness
+            .analysis
+            .apply_snapshot(test_snapshot(session_id, run_id, stage));
+        let session = harness.analysis.sessions.get_mut(&session_id).unwrap();
+        session.selected_run_id = Some(run_id);
+        session.loading = true;
+
+        let html = harness.render_at(ready_preview(), "/analyze");
+
+        assert!(html.contains("Loading saved runs..."));
+        assert!(html.contains("Saved run review"));
+        assert_button_disabled(&html, "Start new analysis", true);
+        let action = if stage == RunStage::Ready {
+            "Take one independent closer look"
+        } else {
+            "Resume saved run"
+        };
+        assert_button_disabled(&html, action, true);
+    }
 }
 
 #[test]
@@ -230,6 +379,36 @@ fn paused_processing_retains_findings_and_offers_resume() {
 }
 
 #[test]
+fn pending_review_decision_disables_model_actions_for_that_saved_run() {
+    for stage in [RunStage::Ready, RunStage::Paused] {
+        let mut harness = prepared_with_exercise();
+        let session_id = harness.operator().selected_session_id.unwrap();
+        let run_id = Uuid::new_v4();
+        harness
+            .analysis
+            .apply_snapshot(test_snapshot(session_id, run_id, stage));
+        let session = harness.analysis.sessions.get_mut(&session_id).unwrap();
+        session.selected_run_id = Some(run_id);
+        session
+            .runs
+            .get_mut(&run_id)
+            .unwrap()
+            .assessment_draft
+            .saving = true;
+
+        let html = harness.render_at(ready_preview(), "/analyze");
+
+        let action = if stage == RunStage::Ready {
+            "Take one independent closer look"
+        } else {
+            "Resume saved run"
+        };
+        assert_button_disabled(&html, action, true);
+        assert_button_disabled(&html, "Start new analysis", false);
+    }
+}
+
+#[test]
 fn ready_run_keeps_uncertainty_and_recording_gaps_visible() {
     let session_id = Uuid::new_v4();
     let mut run = test_snapshot(session_id, Uuid::new_v4(), RunStage::Ready);
@@ -238,28 +417,35 @@ fn ready_run_keeps_uncertainty_and_recording_gaps_visible() {
         .warnings
         .push(AnalysisWarning::RecordingGap {
             camera_id: 17,
-            start_offset_ms: 500,
-            end_offset_ms: 1000,
+            start_offset_ms: 10230,
+            end_offset_ms: 10575,
         });
     let html = prepared(session_id, Some(run)).render_at(ready_preview(), "/analyze");
     assert!(html.contains("Ready for review"));
     assert!(html.contains("Model: Cannot verify"));
     assert!(html.contains("The closing action is obscured."));
-    assert!(html.contains("Recording gap on camera 17"));
+    assert!(html.contains("Recording gap on camera 17: 0:10.230 to 0:10.575."));
     assert!(html.contains("Reference examples"));
     assert!(html.contains("Reason for your correction"));
     assert!(!html.contains("analysis-resume"));
 }
 
 #[test]
-fn recording_blocks_resuming_a_saved_run() {
-    let session_id = Uuid::new_v4();
-    let run = test_snapshot(session_id, Uuid::new_v4(), RunStage::Paused);
-    let mut harness = prepared(session_id, Some(run));
-    harness.activate();
-    let html = harness.render_at(ready_preview(), "/analyze");
-    assert!(html.contains("Analysis is unavailable while recording is active."));
-    assert_button_disabled(&html, "Resume saved run", true);
+fn recording_blocks_model_actions_on_a_saved_run() {
+    for stage in [RunStage::Paused, RunStage::Ready] {
+        let session_id = Uuid::new_v4();
+        let run = test_snapshot(session_id, Uuid::new_v4(), stage);
+        let mut harness = prepared(session_id, Some(run));
+        harness.activate();
+        let html = harness.render_at(ready_preview(), "/analyze");
+        assert!(html.contains("Analysis is unavailable while recording is active."));
+        let action = if stage == RunStage::Ready {
+            "Take one independent closer look"
+        } else {
+            "Resume saved run"
+        };
+        assert_button_disabled(&html, action, true);
+    }
 }
 
 #[test]

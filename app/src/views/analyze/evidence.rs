@@ -7,7 +7,7 @@ use crate::{
     analysis::{self, AnalysisContext},
     inference::InferenceGate,
     media::MediaRegistry,
-    operator::OperatorState,
+    operator::{OperatorState, SessionRunState},
     settings::ResolvedSettings,
 };
 use backend::analysis::{Finding, JobKind, JobOutput, RunSnapshot, RunStage};
@@ -20,7 +20,14 @@ pub fn EvidenceViewer(session_id: Uuid, run_id: Uuid) -> Element {
     let context = use_context::<AnalysisContext>();
     let gate = use_context::<InferenceGate>();
     let operator = use_context::<Signal<OperatorState>>();
+    let recording = !matches!(operator.read().session, SessionRunState::Idle);
     let settings = use_context::<ResolvedSettings>();
+    let history_loading = context
+        .state
+        .read()
+        .sessions
+        .get(&session_id)
+        .is_some_and(|session| session.loading);
     use_effect(move || analysis::load_references(context, session_id, run_id));
     let entry = context
         .state
@@ -35,6 +42,7 @@ pub fn EvidenceViewer(session_id: Uuid, run_id: Uuid) -> Element {
     let Some(criterion_id) = entry.selected_criterion else {
         return rsx! {};
     };
+    let review_saving = entry.review_saving();
     let snapshot = entry.snapshot;
     let Some(criterion) = snapshot
         .inputs
@@ -57,75 +65,85 @@ pub fn EvidenceViewer(session_id: Uuid, run_id: Uuid) -> Element {
         .iter()
         .any(|job| job.kind == JobKind::Recheck && job.criterion_id == Some(criterion_id));
     let recheck_disabled = used_recheck
+        || entry.assessment_draft.saving
+        || recording
+        || history_loading
         || gate.active.read().is_some()
         || snapshot.checkpoint.stage != RunStage::Ready
         || assessment.is_none_or(|finding| finding.configuration_issue.is_some());
     let selected_frame = entry.playback.frame_id.clone();
     let reviewed = snapshot.is_reviewed(criterion_id);
     rsx! {
-        section { class: "flex min-w-0 flex-col gap-4 border-t border-base-300 pt-4", aria_label: "Evidence and human review",
-            h3 { class: "font-semibold", "Inspect step: {criterion.text}" }
-            CandidatePlayback { session_id, run_id, criterion_id, snapshot: snapshot.clone() }
-            if let Some(assessment) = assessment {
-                div { class: "rounded-box bg-base-200 p-3 text-sm",
-                    h4 { class: "font-semibold", "Current model result: {judgment_label(assessment.judgment)}" }
-                    p { class: "mt-1", "{assessment.reason}" }
-                    if let Some(issue) = &assessment.configuration_issue {
-                        p { class: "text-warning mt-2", "Configuration issue: {issue}" }
-                        p { "Clarify the exercise and start a new run. This is not a student failure." }
+        // Replace every review control when selection changes, retaining each draft in run state.
+        for criterion_id in [criterion_id] {
+            section { key: "{criterion_id}", class: "flex min-w-0 flex-col gap-4 border-t border-base-300 pt-4", aria_label: "Evidence and human review",
+                h3 { class: "font-semibold", "Inspect step: {criterion.text}" }
+                CandidatePlayback { session_id, run_id, criterion_id, snapshot: snapshot.clone() }
+                if let Some(assessment) = assessment {
+                    div { class: "rounded-box bg-base-200 p-3 text-sm",
+                        h4 { class: "font-semibold", "Current model result: {judgment_label(assessment.judgment)}" }
+                        p { class: "mt-1", "{assessment.reason}" }
+                        if let Some(issue) = &assessment.configuration_issue {
+                            p { class: "text-warning mt-2", "Configuration issue: {issue}" }
+                            p { "Clarify the exercise and start a new run. This is not a student failure." }
+                        }
                     }
-                }
-                div { class: "grid gap-3 md:grid-cols-2",
-                    FindingCard { title: "Initial assessment", finding: assessment.initial.clone(), snapshot: snapshot.clone(), session_id, run_id }
-                    if let Some(finding) = &assessment.recheck {
-                        FindingCard { title: "Independent closer look", finding: finding.clone(), snapshot: snapshot.clone(), session_id, run_id }
+                    div { class: "grid gap-3 md:grid-cols-2",
+                        FindingCard { title: "Initial assessment", finding: assessment.initial.clone(), snapshot: snapshot.clone(), session_id, run_id }
+                        if let Some(finding) = &assessment.recheck {
+                            FindingCard { title: "Independent closer look", finding: finding.clone(), snapshot: snapshot.clone(), session_id, run_id }
+                        }
                     }
+                    if let Some(note) = &assessment.recheck_note { p { class: "text-sm text-warning", "{note}" } }
+                    button { id: "analysis-recheck", class: "btn btn-outline self-start", disabled: recheck_disabled,
+                        onclick: {
+                            let settings = settings.clone();
+                            let selected_frame = selected_frame.clone();
+                            move |_| analysis::recheck(context, operator, settings.clone(), gate, session_id, run_id, criterion_id, selected_frame.clone())
+                        },
+                        if used_recheck { "Closer look already used" } else { "Take one independent closer look" }
+                    }
+                    p { class: "text-xs opacity-70", "The closer look uses one episode around cited evidence, or the timestamp you selected above. It does not receive the initial verdict. Failed processing can be resumed." }
                 }
-                if let Some(note) = &assessment.recheck_note { p { class: "text-sm text-warning", "{note}" } }
-                button { id: "analysis-recheck", class: "btn btn-outline self-start", disabled: recheck_disabled,
-                    onclick: move |_| analysis::recheck(context, operator, settings.clone(), gate, session_id, run_id, criterion_id, selected_frame.clone()),
-                    if used_recheck { "Closer look already used" } else { "Take one independent closer look" }
-                }
-                p { class: "text-xs opacity-70", "The closer look uses one episode around cited evidence, or the timestamp you selected above. It does not receive the initial verdict. Failed processing can be resumed." }
-            }
-            details { class: "rounded-box border border-base-300 p-3 text-sm",
-                summary { class: "font-semibold", "Observations from the scan" }
-                for response in &snapshot.responses {
-                    if let JobOutput::Scan(completion) = &response.output {
-                        for observation in completion.value.observations.iter().filter(|observation| observation.criterion_id == criterion_id.to_string()) {
-                            div { class: "mt-3",
-                                p { "{observation.description}" }
-                                CitationLinks { session_id, run_id, citations: citation_labels(&snapshot, &observation.evidence_ids) }
+                details { class: "rounded-box border border-base-300 p-3 text-sm",
+                    summary { class: "font-semibold", "Observations from the scan" }
+                    for response in &snapshot.responses {
+                        if let JobOutput::Scan(completion) = &response.output {
+                            for observation in completion.value.observations.iter().filter(|observation| observation.criterion_id == criterion_id.to_string()) {
+                                div { class: "mt-3",
+                                    p { "{observation.description}" }
+                                    CitationLinks { session_id, run_id, citations: citation_labels(&snapshot, &observation.evidence_ids) }
+                                }
                             }
                         }
                     }
                 }
-            }
-            section { aria_label: "Frozen reference examples",
-                h4 { class: "font-semibold", "Reference examples" }
-                p { class: "text-sm opacity-70", "Instructor examples are separate from candidate evidence. Reference pixels sent to the model: {snapshot.inputs.evidence_policy.reference_images}." }
-                if entry.references_loading { p { role: "status", "Loading references..." } }
-                if let Some(error) = entry.reference_error { p { class: "text-error", "{error}" } }
-                div { class: "mt-3 flex flex-wrap gap-3",
-                    for reference in snapshot.inputs.exercise.references.iter().filter(|reference| reference.criterion_ids.contains(&criterion_id)) {
-                        figure { class: "w-48 rounded-box border border-base-300 p-3",
-                            if let Some(preview) = entry.reference_previews.get(&reference.image.id) {
-                                img { class: "max-h-40 w-full object-contain", src: preview.clone(), alt: "Reference: {reference.object_label}" }
-                            }
-                            figcaption { class: "mt-2 text-sm",
-                                p { class: "font-semibold", "{reference.object_label}" }
-                                p { "{reference.state_label}" }
-                                p { "{reference.purpose}" }
+                section { aria_label: "Frozen reference examples",
+                    h4 { class: "font-semibold", "Reference examples" }
+                    p { class: "text-sm opacity-70", "Instructor examples are separate from candidate evidence. Reference pixels sent to the model: {snapshot.inputs.evidence_policy.reference_images}." }
+                    if entry.references_loading { p { role: "status", "Loading references..." } }
+                    if let Some(error) = &entry.reference_error { p { class: "text-error", "{error}" } }
+                    div { class: "mt-3 flex flex-wrap gap-3",
+                        for reference in snapshot.inputs.exercise.references.iter().filter(|reference| reference.criterion_ids.contains(&criterion_id)) {
+                            figure { class: "w-48 rounded-box border border-base-300 p-3",
+                                if let Some(preview) = entry.reference_previews.get(&reference.image.id) {
+                                    img { class: "max-h-40 w-full object-contain", src: preview.clone(), alt: "Reference: {reference.object_label}" }
+                                }
+                                figcaption { class: "mt-2 text-sm",
+                                    p { class: "font-semibold", "{reference.object_label}" }
+                                    p { "{reference.state_label}" }
+                                    p { "{reference.purpose}" }
+                                }
                             }
                         }
                     }
                 }
-            }
-            CorrectionEditor { session_id, run_id, criterion_id, snapshot: snapshot.clone() }
-            button { id: "analysis-mark-reviewed", class: "btn btn-outline self-start",
-                disabled: reviewed || assessment.is_none() || entry.assessment_draft.saving,
-                onclick: move |_| analysis::mark_reviewed(context, session_id, run_id, criterion_id),
-                if reviewed { "Reviewed by you" } else { "Mark this criterion reviewed" }
+                CorrectionEditor { session_id, run_id, criterion_id, snapshot: snapshot.clone() }
+                button { id: "analysis-mark-reviewed", class: "btn btn-outline self-start",
+                    disabled: reviewed || assessment.is_none() || review_saving,
+                    onclick: move |_| analysis::mark_reviewed(context, session_id, run_id, criterion_id),
+                    if reviewed { "Reviewed by you" } else { "Mark this criterion reviewed" }
+                }
             }
         }
     }
@@ -175,7 +193,8 @@ fn CandidatePlayback(
     let before_ms = playback.before_ms;
     let after_ms = playback.after_ms;
     let request_id = playback.request_id;
-    let video_id = format!("analysis-evidence-video-{run_id}");
+    // Delayed metadata seeks can address only the player for their original request.
+    let video_id = format!("analysis-evidence-video-{run_id}-{request_id:?}");
     rsx! {
         section { class: "min-w-0", aria_label: "Candidate recording playback",
             h4 { class: "font-semibold", "Candidate footage" }
@@ -214,8 +233,9 @@ fn CandidatePlayback(
                 p { class: "alert alert-error mt-3", role: "alert", "{error}" }
             }
             if let (Some(clip), Some(url)) = (playback.clip, playback.url) {
+                // Each selection resets playback even when its cached asset URL is reused.
                 video {
-                    key: "{url}",
+                    key: "{request_id:?}",
                     id: video_id.clone(),
                     class: "mt-3 max-h-96 w-full rounded bg-black",
                     src: url.clone(),

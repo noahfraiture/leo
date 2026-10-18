@@ -11,6 +11,7 @@ pub fn mark_reviewed(context: AnalysisContext, session_id: Uuid, run_id: Uuid, c
         .sessions
         .get(&session_id)
         .and_then(|session| session.runs.get(&run_id))
+        .filter(|entry| !entry.snapshot.is_reviewed(criterion_id))
         .and_then(|entry| entry.snapshot.criterion_basis(criterion_id).ok());
     let Some(basis) = basis else {
         return;
@@ -23,19 +24,26 @@ pub fn mark_reviewed(context: AnalysisContext, session_id: Uuid, run_id: Uuid, c
 }
 
 pub fn save_assessment(context: AnalysisContext, session_id: Uuid, run_id: Uuid) {
-    let submitted = context
-        .state
-        .read()
-        .sessions
-        .get(&session_id)
-        .and_then(|session| session.runs.get(&run_id))
-        .and_then(|entry| {
-            entry
-                .snapshot
-                .assessment_basis()
-                .ok()
-                .map(|basis| (basis, entry.assessment_draft.clone()))
-        });
+    let submitted = {
+        let page = context.state.read();
+        if page
+            .active
+            .is_some_and(|active| active.session_id == session_id && active.run_id == Some(run_id))
+        {
+            return;
+        }
+        page.sessions
+            .get(&session_id)
+            .and_then(|session| session.runs.get(&run_id))
+            .filter(|entry| !entry.assessment_draft_is_saved())
+            .and_then(|entry| {
+                entry
+                    .snapshot
+                    .assessment_basis()
+                    .ok()
+                    .map(|basis| (basis, entry.assessment_draft.clone()))
+            })
+    };
     let Some((basis, draft)) = submitted else {
         return;
     };
@@ -60,7 +68,7 @@ fn save(
         let Some(entry) = session.runs.get_mut(&run_id) else {
             return;
         };
-        if entry.assessment_draft.saving {
+        if entry.review_saving() || !entry.available {
             return;
         }
         entry.assessment_draft.saving = true;

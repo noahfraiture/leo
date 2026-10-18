@@ -7,11 +7,13 @@ use uuid::Uuid;
 use super::AnalysisContext;
 
 /// Append an operator judgment to correction history without modifying any model output.
+/// Reject actions from a reason field already consumed by a successful save.
 pub fn save_correction(
     mut context: AnalysisContext,
     session_id: Uuid,
     run_id: Uuid,
     criterion_id: Uuid,
+    reason_edit_id: Option<Uuid>,
 ) {
     let (directory, submitted, correction) = {
         let mut page = context.state.write();
@@ -21,8 +23,11 @@ pub fn save_correction(
         let Some(entry) = session.runs.get_mut(&run_id) else {
             return;
         };
+        if entry.review_saving() || !entry.available {
+            return;
+        }
         let draft = entry.corrections.entry(criterion_id).or_default();
-        if draft.saving {
+        if draft.reason_edit_id != reason_edit_id {
             return;
         }
         if draft.reason.trim().is_empty() {
@@ -80,14 +85,7 @@ pub fn save_correction(
                     .and_then(|session| session.runs.get_mut(&run_id))
                     .and_then(|entry| entry.corrections.get_mut(&criterion_id))
                 {
-                    if draft.reason == submitted.reason
-                        && draft.judgment == submitted.judgment
-                        && draft.evidence_ids == submitted.evidence_ids
-                        && draft.outside_information == submitted.outside_information
-                    {
-                        draft.reason.clear();
-                    }
-                    draft.saving = false;
+                    draft.finish_save(&submitted);
                 }
             }
             Err(error) => {
