@@ -41,9 +41,11 @@ pub fn launch_with_store(store: SettingsStore) {
 }
 
 fn desktop_config(mut runtime: DesktopRuntime) -> Config {
-    Config::new().with_custom_event_handler(move |event, _| {
-        if matches!(event, Event::LoopDestroyed) {
-            runtime.shutdown();
-        }
-    })
+    Config::new()
+        .with_on_window(|window, _| window.set_title("Leo"))
+        .with_custom_event_handler(move |event, _| {
+            if matches!(event, Event::LoopDestroyed) {
+                runtime.shutdown();
+            }
+        })
 }

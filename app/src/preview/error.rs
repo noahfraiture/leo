@@ -6,6 +6,10 @@ pub(crate) enum Error {
     UnsupportedVersion(String),
     #[error("mediamtx --version exited unsuccessfully: {0}")]
     VersionCheckFailed(ExitStatus),
+    #[error("mediamtx --version did not finish within {timeout:?}")]
+    VersionCheckTimeout { timeout: Duration },
+    #[error("failed to inspect mediamtx version")]
+    VersionCheckIo(#[source] std::io::Error),
     #[error("failed to serialize a MediaMTX configuration value")]
     SerializeConfig(#[from] serde_json::Error),
     #[error("failed to create temporary MediaMTX configuration")]

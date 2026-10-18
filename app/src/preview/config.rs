@@ -7,8 +7,8 @@ use super::{CameraSource, Error};
 pub(crate) struct ConfigFile(NamedTempFile);
 
 impl ConfigFile {
-    pub(crate) fn create(sources: &[CameraSource]) -> Result<Self, Error> {
-        let contents = render(sources)?;
+    pub(crate) fn create(sources: &[CameraSource], access_password: &str) -> Result<Self, Error> {
+        let contents = render(sources, access_password)?;
         let mut file = NamedTempFile::new().map_err(Error::CreateConfig)?;
         file.write_all(contents.as_bytes())
             .and_then(|()| file.flush())
@@ -21,7 +21,7 @@ impl ConfigFile {
     }
 }
 
-fn render(sources: &[CameraSource]) -> Result<String, Error> {
+fn render(sources: &[CameraSource], access_password: &str) -> Result<String, Error> {
     let mut contents = concat!(
         "logDestinations: [stdout]\n",
         "api: false\n",
@@ -40,12 +40,19 @@ fn render(sources: &[CameraSource]) -> Result<String, Error> {
         "webrtcAdditionalHosts: [127.0.0.1]\n",
         "srt: false\n",
         "authInternalUsers:\n",
-        "  - user: any\n",
-        "    pass:\n",
-        "    ips: [127.0.0.1, '::1']\n",
-        "    permissions:\n",
+        "  - user: leo-preview\n",
     )
     .to_owned();
+    writeln!(
+        contents,
+        "    pass: {}",
+        serde_json::to_string(access_password)?
+    )
+    .expect("writing to a String cannot fail");
+    contents.push_str(concat!(
+        "    ips: [127.0.0.1, '::1']\n",
+        "    permissions:\n",
+    ));
 
     for index in 0..sources.len() {
         write!(

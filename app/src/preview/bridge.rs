@@ -1,11 +1,12 @@
 use std::{
-    io::{Read, Write},
+    io::{Read, Seek, Write},
     net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket},
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 
 use super::{ConfigFile, Error};
@@ -15,6 +16,8 @@ const WEBRTC_HTTP_ADDRESS: SocketAddr =
     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8889));
 const WEBRTC_UDP_ADDRESS: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8189));
 const READINESS_TIMEOUT: Duration = Duration::from_secs(5);
+const VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_VERSION_BYTES: u64 = 128;
 const PROBE_INTERVAL: Duration = Duration::from_millis(50);
 
 pub(crate) struct Bridge {
@@ -31,27 +34,31 @@ impl Bridge {
     }
 
     fn cleanup(&mut self) -> Result<(), Error> {
-        let Some(mut child) = self.child.take() else {
+        let Some(child) = self.child.take() else {
             return Ok(());
         };
-        let (status_error, stop_error) = match child.try_wait() {
-            Ok(Some(_)) => (None, None),
-            Ok(None) => (None, child.kill().err().map(Error::Stop)),
-            Err(error) => (
-                Some(Error::Wait(error)),
-                child.kill().err().map(Error::Stop),
-            ),
-        };
-        let wait_error = child.wait().err().map(Error::Wait);
-
-        match status_error.or(stop_error).or(wait_error) {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
+        stop_child(child)
     }
 
     pub(crate) fn stop(mut self) -> Result<(), Error> {
         self.cleanup()
+    }
+}
+
+/// Stop when necessary and always reap, retaining the first process-management failure.
+fn stop_child(mut child: Child) -> Result<(), Error> {
+    let (status_error, stop_error) = match child.try_wait() {
+        Ok(Some(_)) => (None, None),
+        Ok(None) => (None, child.kill().err().map(Error::Stop)),
+        Err(error) => (
+            Some(Error::Wait(error)),
+            child.kill().err().map(Error::Stop),
+        ),
+    };
+    let wait_error = child.wait().err().map(Error::Wait);
+    match status_error.or(stop_error).or(wait_error) {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
@@ -73,13 +80,15 @@ pub struct CameraSource {
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
-/// Browser-safe metadata for one live camera preview.
+/// Local preview access, including an ephemeral bridge password instead of camera credentials.
 pub struct PreviewFeed {
     /// Stable deployment camera ID, independent of the preview path index.
     pub camera_id: u32,
     pub name: String,
     pub video_id: String,
     pub whep_url: String,
+    /// Generated at bridge startup and shared only with Leo's mounted preview readers.
+    pub access_password: String,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -103,15 +112,44 @@ fn validate_version(output: &[u8]) -> Result<(), Error> {
     }
 }
 
-fn verify_version(executable: &str) -> Result<(), Error> {
-    let output = Command::new(executable)
+fn verify_version(executable: &str, timeout: Duration) -> Result<(), Error> {
+    // A regular file avoids blocking on a full pipe or a descendant retaining its write end.
+    let mut output = tempfile::tempfile().map_err(Error::VersionCheckIo)?;
+    let mut child = Command::new(executable)
         .arg("--version")
-        .output()
+        .stdin(Stdio::null())
+        .stdout(output.try_clone().map_err(Error::VersionCheckIo)?)
+        .stderr(Stdio::null())
+        .spawn()
         .map_err(Error::spawn)?;
-    if !output.status.success() {
-        return Err(Error::VersionCheckFailed(output.status));
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {}
+            Err(error) => break Err(Error::Wait(error)),
+        }
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            break Err(Error::VersionCheckTimeout { timeout });
+        }
+        thread::sleep(PROBE_INTERVAL.min(remaining));
+    };
+    stop_child(child)?;
+    let status = status?;
+    if !status.success() {
+        return Err(Error::VersionCheckFailed(status));
     }
-    validate_version(&output.stdout)
+    output.rewind().map_err(Error::VersionCheckIo)?;
+    let mut bytes = Vec::new();
+    output
+        .take(MAX_VERSION_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(Error::VersionCheckIo)?;
+    if bytes.len() as u64 > MAX_VERSION_BYTES {
+        return Err(Error::UnsupportedVersion("oversized version output".into()));
+    }
+    validate_version(&bytes)
 }
 
 fn reserve_ports(
@@ -133,13 +171,15 @@ fn wait_until_ready(
     child: &mut Child,
     address: SocketAddr,
     timeout: Duration,
+    access_password: &str,
 ) -> Result<(), Error> {
     let deadline = Instant::now() + timeout;
+    let authorization = STANDARD.encode(format!("leo-preview:{access_password}"));
     loop {
         if let Some(status) = child.try_wait().map_err(Error::Wait)? {
             return Err(Error::ExitedBeforeReady(status));
         }
-        let ready = probe(address, deadline);
+        let ready = probe(address, deadline, &authorization);
         if let Some(status) = child.try_wait().map_err(Error::Wait)? {
             return Err(Error::ExitedBeforeReady(status));
         }
@@ -154,7 +194,7 @@ fn wait_until_ready(
     }
 }
 
-fn probe(address: SocketAddr, deadline: Instant) -> bool {
+fn probe(address: SocketAddr, deadline: Instant, authorization: &str) -> bool {
     let mut io_timeout = PROBE_INTERVAL.min(deadline.saturating_duration_since(Instant::now()));
     if io_timeout.is_zero() {
         return false;
@@ -166,8 +206,9 @@ fn probe(address: SocketAddr, deadline: Instant) -> bool {
     if io_timeout.is_zero() || stream.set_write_timeout(Some(io_timeout)).is_err() {
         return false;
     }
-    let request =
-        format!("OPTIONS /camera-0/whep HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n");
+    let request = format!(
+        "OPTIONS /camera-0/whep HTTP/1.1\r\nHost: {address}\r\nAuthorization: Basic {authorization}\r\nConnection: close\r\n\r\n"
+    );
     if stream.write_all(request.as_bytes()).is_err() {
         return false;
     }
@@ -211,8 +252,10 @@ fn probe(address: SocketAddr, deadline: Instant) -> bool {
 
 pub(crate) fn start(sources: Vec<CameraSource>) -> Result<(PreviewState, Bridge), Error> {
     let ports = reserve_ports(WEBRTC_HTTP_ADDRESS, WEBRTC_UDP_ADDRESS)?;
-    verify_version("mediamtx")?;
-    let config = ConfigFile::create(&sources)?;
+    verify_version("mediamtx", VERSION_CHECK_TIMEOUT)?;
+    // Loopback alone cannot distinguish Leo from another page opened in a local browser.
+    let access_password = uuid::Uuid::new_v4().to_string();
+    let config = ConfigFile::create(&sources, &access_password)?;
     drop(ports);
     let mut child = Command::new("mediamtx")
         .arg(config.path())
@@ -222,17 +265,22 @@ pub(crate) fn start(sources: Vec<CameraSource>) -> Result<(PreviewState, Bridge)
         .spawn()
         .map_err(Error::spawn)?;
 
-    if let Err(error) = wait_until_ready(&mut child, WEBRTC_HTTP_ADDRESS, READINESS_TIMEOUT) {
+    if let Err(error) = wait_until_ready(
+        &mut child,
+        WEBRTC_HTTP_ADDRESS,
+        READINESS_TIMEOUT,
+        &access_password,
+    ) {
         if let Err(cleanup_error) = Bridge::new(child, config).stop() {
             tracing::error!(error = %cleanup_error, "preview startup cleanup failed");
         }
         return Err(error);
     }
-    let state = preview_metadata(&sources);
+    let state = preview_metadata(&sources, &access_password);
     Ok((state, Bridge::new(child, config)))
 }
 
-pub(crate) fn preview_metadata(sources: &[CameraSource]) -> PreviewState {
+pub(crate) fn preview_metadata(sources: &[CameraSource], access_password: &str) -> PreviewState {
     let feeds = sources
         .iter()
         .enumerate()
@@ -241,6 +289,7 @@ pub(crate) fn preview_metadata(sources: &[CameraSource]) -> PreviewState {
             name: source.name.clone(),
             video_id: format!("camera-{index}-video"),
             whep_url: format!("http://127.0.0.1:8889/camera-{index}/whep"),
+            access_password: access_password.to_owned(),
         })
         .collect();
     PreviewState::Ready {

@@ -20,7 +20,7 @@ fn sources() -> Vec<CameraSource> {
 #[test]
 fn renders_web_rtc_preview_configuration() {
     let sources = sources();
-    let config = ConfigFile::create(&sources).unwrap();
+    let config = ConfigFile::create(&sources, "fixture-preview-password").unwrap();
     let contents = fs::read_to_string(config.path()).unwrap();
 
     assert_eq!(
@@ -44,8 +44,8 @@ fn renders_web_rtc_preview_configuration() {
                 "webrtcAdditionalHosts: [127.0.0.1]\n",
                 "srt: false\n",
                 "authInternalUsers:\n",
-                "  - user: any\n",
-                "    pass:\n",
+                "  - user: leo-preview\n",
+                "    pass: \"fixture-preview-password\"\n",
                 "    ips: [127.0.0.1, '::1']\n",
                 "    permissions:\n",
                 "      - action: read\n",
@@ -76,7 +76,7 @@ fn renders_web_rtc_preview_configuration() {
 
 #[test]
 fn owns_temporary_file_until_drop() {
-    let config = ConfigFile::create(&sources()).unwrap();
+    let config = ConfigFile::create(&sources(), "fixture-preview-password").unwrap();
     let path = PathBuf::from(config.path());
     assert!(path.exists());
 
@@ -89,7 +89,7 @@ fn owns_temporary_file_until_drop() {
 fn temporary_file_mode_is_0600() {
     use std::os::unix::fs::PermissionsExt;
 
-    let config = ConfigFile::create(&sources()).unwrap();
+    let config = ConfigFile::create(&sources(), "fixture-preview-password").unwrap();
     let mode = fs::metadata(config.path()).unwrap().permissions().mode();
 
     assert_eq!(mode & 0o777, 0o600);

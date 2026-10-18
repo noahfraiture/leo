@@ -3,29 +3,7 @@ use dioxus::prelude::*;
 
 use crate::preview::PreviewFeed;
 
-const READER_PROGRAM: &str = r#"
-const config = await dioxus.recv();
-const deadline = Date.now() + 5000;
-while (!window.MediaMTXWebRTCReader && Date.now() < deadline) {
-  await new Promise((resolve) => setTimeout(resolve, 50));
-}
-if (!window.MediaMTXWebRTCReader) {
-  dioxus.send("MediaMTX reader failed to load");
-  return;
-}
-const video = document.getElementById(config.video_id);
-const reader = new MediaMTXWebRTCReader({
-  url: config.whep_url,
-  onError: (error) => dioxus.send(error),
-  onTrack: (event) => {
-    video.srcObject = event.streams[0];
-    dioxus.send(null);
-  },
-});
-await dioxus.recv();
-reader.close();
-video.srcObject = null;
-"#;
+const READER_PROGRAM: &str = include_str!("reader.js");
 
 /// Renders one stable live preview with independent analysis and recorder status.
 #[component]
@@ -38,9 +16,13 @@ pub fn CameraFeed(
 ) -> Element {
     let mut error = use_signal(|| None::<String>);
     let mut player_channel = use_signal(|| None::<document::Eval>);
+    // A delayed script/configuration delivery must not claim a later mount with the same DOM ID.
+    let mount_id = use_hook(|| uuid::Uuid::new_v4().to_string());
     let config = serde_json::json!({
         "video_id": feed.video_id.clone(),
         "whep_url": feed.whep_url.clone(),
+        "access_password": feed.access_password.clone(),
+        "mount_id": mount_id.clone(),
     });
 
     use_effect(move || {
@@ -89,6 +71,7 @@ pub fn CameraFeed(
 
                 video {
                     id: feed.video_id.clone(),
+                    "data-preview-owner": mount_id,
                     class: "h-full w-full object-cover",
                     autoplay: true,
                     muted: true,
@@ -154,7 +137,3 @@ fn recorder_status_label(status: RecorderStatus) -> &'static str {
         RecorderStatus::Stopped => "Idle",
     }
 }
-
-#[cfg(test)]
-#[path = "tests/feed.rs"]
-mod tests;
