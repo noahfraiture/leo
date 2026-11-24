@@ -12,6 +12,10 @@ Leo is a local desktop app for recording and analyzing a student's exercise from
 
 See [`docs/architecture.md`](docs/architecture.md) for system design and [`docs/validation.md`](docs/validation.md) for local, provider, and physical-hardware checks.
 
+## Compare vision models
+
+Run `python3 -m benchmarks list` from this checkout to see the reusable video benchmarks. The [benchmark guide](benchmarks/README.md) covers running models, comparing scores, and locating the original experiments.
+
 ## Run Locally
 
 The Leo desktop app supports macOS and Linux. Windows is not supported.
@@ -25,6 +29,17 @@ just app
 ```
 
 On first launch, `just app` opens Settings. Add the fixture cameras with RTSP URLs `rtsp://127.0.0.1:8554/axis-media/media.amp` and `rtsp://127.0.0.1:8555/axis-media/media.amp`, save, and restart Leo to activate them. If recording settings cannot load, Leo opens Settings with recovery guidance. Invalid monitoring or analysis settings leave recording available.
+
+### Find physical Axis cameras
+
+Run the standalone discovery script with Python 3. It detects the Wi-Fi subnet on macOS or the default network interface on Linux, checks the [Axis device information API](https://developer.axis.com/vapix/network-video/basic-device-information/) over HTTP/HTTPS without logging in, and prints web links and default RTSP URLs:
+
+```bash
+python3 scripts/find-axis.py
+python3 scripts/find-axis.py --network 192.168.1.0/24
+```
+
+Use `--interface en0` to select an interface, or `--timeout 3` for slower devices. No packages or administrator privileges are required. HTTPS discovery accepts self-signed device certificates and sends no credentials. Cameras must be reachable from this network; Wi-Fi client isolation or disabled anonymous identification can prevent discovery. Printed RTSP URLs use the default path and port and may need camera credentials in Leo.
 
 ## Application Settings
 

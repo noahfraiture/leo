@@ -1,5 +1,9 @@
 # Reproducible local evaluations
 
+Use the [vision benchmark guide](../benchmarks/README.md) to compare models on identical inputs, browse historical campaigns, and reopen saved results.
+
+## Historical single-model evaluator
+
 The `backend` evaluation example preserves the historical single-model sampling, prompt and checkpoint path used by prior comparisons. The desktop now uses the [reference-based workflow](analysis-workflow.md); this older evaluator does not measure that workflow. It is available only with `test-support`. Store manifests and results outside the checkout and `target`, using isolated session metadata and immutable source media.
 
 Build with `nix develop --command cargo build -p backend --example evaluate --features test-support`. A manifest contains:
